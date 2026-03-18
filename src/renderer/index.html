@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>TaskSaw</title>
+  <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<div id="topbar">
+  <button id="new-shell">+Shell</button>
+  <button id="new-codex">+Codex</button>
+  <button id="new-gemini">+Gemini</button>
+</div>
+
+<div id="layout">
+  <aside id="sidebar">
+    <div class="section-title">Sessions</div>
+    <ul id="session-list"></ul>
+  </aside>
+
+  <main id="main">
+    <div id="terminal-root"></div>
+  </main>
+</div>
+
+<div id="logbar"></div>
+
+<script src="./app.js"></script>
+</body>
+</html>

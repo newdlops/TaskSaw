@@ -1,0 +1,94 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #111;
+  color: #ddd;
+  font-family: monospace;
+}
+
+body {
+  display: grid;
+  grid-template-rows: 44px 1fr 28px;
+}
+
+#topbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border-bottom: 1px solid #333;
+  background: #181818;
+}
+
+#layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 0;
+}
+
+#sidebar {
+  border-right: 1px solid #333;
+  padding: 8px;
+  overflow: auto;
+  background: #151515;
+}
+
+#main {
+  min-width: 0;
+  min-height: 0;
+}
+
+#terminal-root {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.terminal-pane {
+  width: 100%;
+  height: 100%;
+}
+
+.section-title {
+  margin-bottom: 8px;
+  color: #aaa;
+}
+
+#session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#session-list li {
+  padding: 8px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+#session-list li:hover {
+  background: #222;
+}
+
+#session-list li.active {
+  background: #2a2a2a;
+}
+
+#logbar {
+  border-top: 1px solid #333;
+  background: #181818;
+  padding: 6px 10px;
+  color: #9f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+button {
+  background: #222;
+  color: #ddd;
+  border: 1px solid #444;
+  padding: 6px 10px;
+  cursor: pointer;
+}
