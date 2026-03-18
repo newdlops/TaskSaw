@@ -16,7 +16,8 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile(path.join(__dirname, "../renderer/index.html"));
+  // 개발용: src의 html 직접 로드
+  mainWindow.loadFile(path.join(app.getAppPath(), "src/renderer/index.html"));
 
   const ptyManager = new PtyManager(mainWindow);
   registerIpc(mainWindow, ptyManager);
