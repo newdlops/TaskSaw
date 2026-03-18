@@ -1,6 +1,13 @@
-import { ipcMain, BrowserWindow } from "electron";
+import fs from "node:fs";
+import { BrowserWindow, dialog, ipcMain } from "electron";
 import { PtyManager } from "./pty-manager";
 import { CreateSessionInput } from "./types";
+
+type DirectoryDialogOptions = {
+  defaultPath?: string;
+  title?: string;
+  buttonLabel?: string;
+};
 
 export function registerIpc(mainWindow: BrowserWindow, ptyManager: PtyManager) {
   ipcMain.handle("session:create", (_event, input: CreateSessionInput) => {
@@ -9,6 +16,36 @@ export function registerIpc(mainWindow: BrowserWindow, ptyManager: PtyManager) {
 
   ipcMain.handle("session:list", () => {
     return ptyManager.listSessions();
+  });
+
+  ipcMain.handle("dialog:select-directory", async (_event, payload: DirectoryDialogOptions = {}) => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      defaultPath: payload.defaultPath,
+      title: payload.title,
+      buttonLabel: payload.buttonLabel,
+      properties: ["openDirectory"]
+    });
+
+    if (result.canceled) return null;
+    return result.filePaths[0] ?? null;
+  });
+
+  ipcMain.handle("dialog:create-directory", async (_event, payload: DirectoryDialogOptions = {}) => {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      defaultPath: payload.defaultPath,
+      title: payload.title,
+      buttonLabel: payload.buttonLabel,
+      showsTagField: false
+    });
+
+    if (result.canceled || !result.filePath) return null;
+
+    if (fs.existsSync(result.filePath) && !fs.statSync(result.filePath).isDirectory()) {
+      throw new Error(`Path already exists and is not a directory: ${result.filePath}`);
+    }
+
+    fs.mkdirSync(result.filePath, { recursive: true });
+    return fs.realpathSync(result.filePath);
   });
 
   ipcMain.on("terminal:write", (_event, payload: { sessionId: string; data: string }) => {

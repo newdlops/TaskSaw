@@ -19,7 +19,7 @@ function createWindow() {
   // 개발용: src의 html 직접 로드
   mainWindow.loadFile(path.join(app.getAppPath(), "src/renderer/index.html"));
 
-  const ptyManager = new PtyManager(mainWindow);
+  const ptyManager = new PtyManager(mainWindow, app.getPath("userData"));
   registerIpc(mainWindow, ptyManager);
 }
 

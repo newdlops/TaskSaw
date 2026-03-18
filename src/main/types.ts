@@ -4,9 +4,10 @@ export type SessionInfo = {
   id: string;
   kind: SessionKind;
   title: string;
+  cwd: string;
 };
 
 export type CreateSessionInput = {
   kind: SessionKind;
-  cwd?: string;
+  cwd: string;
 };

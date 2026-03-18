@@ -1,12 +1,24 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { CreateSessionInput, SessionInfo } from "../main/types";
 
+type DirectoryDialogOptions = {
+  defaultPath?: string;
+  title?: string;
+  buttonLabel?: string;
+};
+
 contextBridge.exposeInMainWorld("tasksaw", {
   createSession: (input: CreateSessionInput): Promise<SessionInfo> =>
       ipcRenderer.invoke("session:create", input),
 
   listSessions: (): Promise<SessionInfo[]> =>
       ipcRenderer.invoke("session:list"),
+
+  selectDirectory: (options?: DirectoryDialogOptions): Promise<string | null> =>
+      ipcRenderer.invoke("dialog:select-directory", options),
+
+  createDirectory: (options?: DirectoryDialogOptions): Promise<string | null> =>
+      ipcRenderer.invoke("dialog:create-directory", options),
 
   writeTerminal: (sessionId: string, data: string) =>
       ipcRenderer.send("terminal:write", { sessionId, data }),

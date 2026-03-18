@@ -2,20 +2,76 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
+  <meta name="color-scheme" content="light dark" />
   <title>TaskSaw</title>
+  <script>
+    (() => {
+      const storageKey = "tasksaw-theme";
+      const root = document.documentElement;
+
+      const readThemePreference = () => {
+        try {
+          const storedPreference = window.localStorage.getItem(storageKey);
+          if (storedPreference === "light" || storedPreference === "dark" || storedPreference === "system") {
+            return storedPreference;
+          }
+        } catch {
+          // Ignore storage access failures and fall back to the system theme.
+        }
+
+        return "system";
+      };
+
+      const resolveTheme = (preference) => {
+        if (preference === "light" || preference === "dark") {
+          return preference;
+        }
+
+        return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      };
+
+      const themePreference = readThemePreference();
+      root.dataset.themePreference = themePreference;
+      root.dataset.theme = resolveTheme(themePreference);
+    })();
+  </script>
   <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
 <div id="topbar">
-  <button id="new-shell">+Shell</button>
-  <button id="new-codex">+Codex</button>
-  <button id="new-gemini">+Gemini</button>
+  <div id="workspace-toolbar" class="topbar-group">
+    <div class="workspace-indicator">
+      <span id="workspace-label">Workspace</span>
+      <strong id="workspace-path">No workspace selected</strong>
+    </div>
+    <button id="workspace-open" type="button">Open Workspace</button>
+    <button id="workspace-create" type="button">Create Workspace</button>
+  </div>
+
+  <div class="topbar-group">
+    <button id="new-shell" type="button" disabled>+Shell</button>
+    <button id="new-codex" type="button" disabled>+Codex</button>
+    <button id="new-gemini" type="button" disabled>+Gemini</button>
+  </div>
+
+  <div class="topbar-group">
+    <div id="language-switcher" class="topbar-group" role="group" aria-label="Language">
+      <button type="button" data-language-option="en">English</button>
+      <button type="button" data-language-option="ko">한국어</button>
+    </div>
+
+    <div id="theme-switcher" class="topbar-group" role="group" aria-label="Theme">
+      <button type="button" data-theme-option="system">Auto</button>
+      <button type="button" data-theme-option="light">Light</button>
+      <button type="button" data-theme-option="dark">Dark</button>
+    </div>
+  </div>
 </div>
 
 <div id="layout">
   <aside id="sidebar">
-    <div class="section-title">Sessions</div>
+    <div id="session-section-title" class="section-title">Sessions</div>
     <ul id="session-list"></ul>
   </aside>
 
@@ -26,6 +82,7 @@
 
 <div id="logbar"></div>
 
-<script src="./app.js"></script>
+<script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+<script src="../../dist/renderer/app.js"></script>
 </body>
 </html>
