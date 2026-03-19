@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ModelAdapterRegistry } from "./adapter-registry";
-import { OrchestratorRunCancelledError, OrchestratorRuntime } from "./runtime";
+import {
+  MissingChildTaskModelAssignmentError,
+  OrchestratorRunCancelledError,
+  OrchestratorRuntime
+} from "./runtime";
 import {
   AbstractPlanResult,
   ConcretePlanResult,
@@ -316,6 +320,9 @@ test("runtime executes the minimal happy path and propagates evidence into plann
   ]);
   assert.equal(result.snapshot.run.status, "done");
   assert.equal(result.rootNode.phase, "done");
+  assert.equal(result.snapshot.nodes.length, 2);
+  assert.equal(result.snapshot.nodes[0]?.kind, "planning");
+  assert.equal(result.snapshot.nodes[1]?.kind, "execution");
   assert.equal(result.snapshot.evidenceBundles.length, 3);
   assert.equal(result.snapshot.workingMemory.facts.length, 2);
   assert.equal(result.snapshot.workingMemory.unknowns.length, 1);
@@ -724,6 +731,53 @@ test("runtime reruns root concrete planning after project structure inspection u
       {
         gather: (context) => {
           workflowTrace.push(`gather:${context.workflowStage}:${context.node.depth}`);
+          if (context.workflowStage === "project_structure_inspection") {
+            return {
+              summary: "Inspection gathered the correct entrypoint with the lightweight model",
+              evidenceBundles: [
+                {
+                  id: "inspection-bundle",
+                  summary: "Inspection evidence",
+                  facts: [],
+                  hypotheses: [],
+                  unknowns: [],
+                  relevantTargets: [{ filePath: "src/main/orchestrator-service.ts" }],
+                  snippets: [],
+                  references: [],
+                  confidence: "high"
+                }
+              ],
+              projectStructure: {
+                summary: "Inspection confirmed the actual entrypoint",
+                directories: [
+                  {
+                    path: "src/main",
+                    summary: "Electron main-process services",
+                    confidence: "high"
+                  }
+                ],
+                keyFiles: [
+                  {
+                    path: "src/main/orchestrator-service.ts",
+                    summary: "The service launches orchestrator runs",
+                    confidence: "high"
+                  }
+                ],
+                entryPoints: [
+                  {
+                    path: "src/main/orchestrator-service.ts",
+                    role: "service entrypoint",
+                    summary: "Actual entrypoint for managed orchestration",
+                    confidence: "high"
+                  }
+                ],
+                modules: [],
+                openQuestions: [],
+                contradictions: []
+              }
+            };
+          }
+
           return {
             summary: "Gathered the initial repository structure",
             evidenceBundles: [
@@ -839,7 +893,7 @@ test("runtime reruns root concrete planning after project structure inspection u
     "gather:gather-lower",
     "concrete:planner-upper",
     "abstract:planner-upper",
-    "gather:planner-upper",
+    "gather:gather-lower",
     "concrete:planner-upper",
     "concrete:planner-upper",
     "execute:execute-lower",
@@ -883,7 +937,15 @@ test("runtime stops decomposing at maxDepth and executes the deepest node as a l
           childTasks: [
             {
               title: `${context.node.title} / child`,
-              objective: `Nested objective at depth ${context.node.depth + 1}`
+              objective: `Nested objective at depth ${context.node.depth + 1}`,
+              importance: "high",
+              assignedModels: {
+                abstractPlanner: planner,
+                gatherer,
+                concretePlanner: planner,
+                executor,
+                verifier: planner
+              }
             }
           ],
           executionNotes: []
@@ -951,7 +1013,8 @@ test("runtime stops decomposing at maxDepth and executes the deepest node as a l
 
   assert.equal(result.snapshot.run.status, "done");
   assert.equal(Math.max(...result.snapshot.nodes.map((node) => node.depth)), 2);
-  assert.equal(result.snapshot.nodes.length, 3);
+  assert.equal(result.snapshot.nodes.length, 4);
+  assert.equal(result.snapshot.nodes.at(-1)?.kind, "execution");
   assert.equal(
     result.snapshot.events.some((event) =>
       event.type === "scheduler_progress"
@@ -1043,62 +1106,143 @@ test("runtime records failure events when a node invocation throws", async () =>
   );
 });
 
-test("runtime retries managed gemini gather and execute with a codex fallback", async () => {
+test("runtime rejects decomposed child tasks that omit explicit routed models", async () => {
   const trace: string[] = [];
   const registry = new ModelAdapterRegistry();
 
-  const codexFallback: ModelRef = {
-    id: "gpt-5.2-codex",
-    provider: "OpenAI",
-    model: "gpt-5.2-codex",
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
     tier: "upper",
     reasoningEffort: "high"
   };
-  const geminiPrimary: ModelRef = {
-    id: "gemini-3.1-pro-preview",
-    provider: "Google",
-    model: "gemini-3.1-pro-preview",
-    tier: "upper",
-    reasoningEffort: "high"
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "executor-lower",
+    provider: "mock",
+    model: "executor-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
   };
 
   registry.register(
     new MockAdapter(
-      codexFallback,
-      new Set(["abstractPlan", "gather", "concretePlan", "execute", "verify"]),
+      planner,
+      new Set(["abstractPlan", "concretePlan"]),
       {
         abstractPlan: () => ({
-          summary: "Keep the run short and structured",
+          summary: "Decompose the task into a child node",
+          targetsToInspect: [],
+          evidenceRequirements: []
+        }),
+        concretePlan: () => ({
+          summary: "A child planner is required here",
+          childTasks: [
+            {
+              title: "Child without routing",
+              objective: "This child should fail before execution"
+            }
+          ],
+          executionNotes: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => {
+          return {
+            summary: "Gather complete",
+            evidenceBundles: []
+          };
+        }
+      },
+      trace
+    )
+  );
+  registry.register(new MockAdapter(executor, new Set(["execute"]), {}, trace));
+
+  const runtime = new OrchestratorRuntime(registry);
+  await assert.rejects(
+    runtime.executeScheduledRun({
+      goal: "Fail when the planner omits explicit child model routing",
+      reviewPolicy: "none",
+      assignedModels: {
+        abstractPlanner: planner,
+        gatherer,
+        concretePlanner: planner,
+        executor,
+        verifier: planner
+      }
+    }),
+    (error: unknown) => error instanceof MissingChildTaskModelAssignmentError
+  );
+
+  assert.deepEqual(trace, [
+    "abstract:planner-upper",
+    "gather:gather-lower",
+    "concrete:planner-upper"
+  ]);
+});
+
+test("runtime invokes only the exact routed model without cross-model fallback", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const failingExecutor: ModelRef = {
+    id: "gemini-primary",
+    provider: "Google",
+    model: "gemini-3.1-pro-preview",
+    tier: "lower",
+    reasoningEffort: "high"
+  };
+  const fallbackExecutor: ModelRef = {
+    id: "codex-fallback",
+    provider: "OpenAI",
+    model: "gpt-5.4",
+    tier: "upper",
+    reasoningEffort: "xhigh"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "gather", "concretePlan", "verify"]),
+      {
+        abstractPlan: () => ({
+          summary: "Plan a single execution leaf",
           targetsToInspect: [],
           evidenceRequirements: []
         }),
         gather: () => ({
-          summary: "Fallback gather completed",
-          evidenceBundles: [
-            {
-              id: "bundle-fallback",
-              summary: "Codex fallback evidence bundle",
-              facts: [],
-              hypotheses: [],
-              unknowns: [],
-              relevantTargets: [],
-              snippets: [],
-              references: [],
-              confidence: "medium"
-            }
-          ]
+          summary: "Gather complete",
+          evidenceBundles: []
         }),
         concretePlan: () => ({
-          summary: "Fallback concrete plan",
+          summary: "Execute directly after planning",
           childTasks: [],
           executionNotes: []
         }),
-        execute: () => ({
-          summary: "Fallback execute completed",
-          outputs: ["fallback-output"]
-        }),
         verify: () => ({
-          summary: "Fallback verify passed",
+          summary: "This verifier should not run after a failed execute",
           passed: true,
           findings: []
         })
@@ -1108,61 +1252,40 @@ test("runtime retries managed gemini gather and execute with a codex fallback", 
   );
   registry.register(
     new MockAdapter(
-      geminiPrimary,
-      new Set(["gather", "execute"]),
+      failingExecutor,
+      new Set(["execute"]),
       {
-        gather: () => {
-          throw new Error("Failed to parse gemini output for gather: Gemini CLI exited without writing any JSON to stdout");
-        },
         execute: () => {
-          throw new Error("Failed to parse gemini output for execute: Gemini CLI exited without writing any JSON to stdout");
+          throw new Error("Primary routed executor failed");
         }
       },
       trace
     )
   );
+  registry.register(new MockAdapter(fallbackExecutor, new Set(["execute"]), {}, trace));
 
   const runtime = new OrchestratorRuntime(registry);
-  const result = await runtime.executeHappyPath({
-    goal: "Fallback from managed Gemini to managed Codex when Gemini headless output is empty",
-    reviewPolicy: "none",
-    assignedModels: {
-      abstractPlanner: codexFallback,
-      gatherer: geminiPrimary,
-      concretePlanner: codexFallback,
-      executor: geminiPrimary,
-      verifier: codexFallback
-    }
-  });
+  await assert.rejects(
+    runtime.executeHappyPath({
+      goal: "Never switch away from the routed execution model",
+      reviewPolicy: "none",
+      assignedModels: {
+        abstractPlanner: planner,
+        gatherer: planner,
+        concretePlanner: planner,
+        executor: failingExecutor,
+        verifier: planner
+      }
+    }),
+    /Primary routed executor failed/
+  );
 
-  assert.equal(result.snapshot.run.status, "done");
   assert.deepEqual(trace, [
-    "abstract:gpt-5.2-codex",
-    "gather:gemini-3.1-pro-preview",
-    "gather:gpt-5.2-codex",
-    "concrete:gpt-5.2-codex",
-    "execute:gpt-5.2-codex",
-    "verify:gpt-5.2-codex"
+    "abstract:planner-upper",
+    "gather:planner-upper",
+    "concrete:planner-upper",
+    "execute:gemini-primary"
   ]);
-  assert.equal(
-    result.snapshot.events.some((event) =>
-      event.type === "scheduler_progress"
-      && event.payload.message === "Retrying capability with fallback model"
-      && event.payload.failedModelId === "gemini-3.1-pro-preview"
-      && event.payload.fallbackModelId === "gpt-5.2-codex"
-    ),
-    true
-  );
-  assert.equal(
-    result.snapshot.events.some((event) =>
-      event.type === "scheduler_progress"
-      && event.payload.message === "Using fallback model because the primary model was disabled earlier in the run"
-      && event.payload.disabledModelId === "gemini-3.1-pro-preview"
-      && event.payload.fallbackModelId === "gpt-5.2-codex"
-      && event.payload.capability === "execute"
-    ),
-    true
-  );
 });
 
 test("runtime deduplicates repeated working-memory entries and final report outputs", async () => {
@@ -1367,11 +1490,27 @@ test("runtime skips decomposition for short test tree goals", async () => {
           childTasks: [
             {
               title: "First child",
-              objective: "This child should be skipped"
+              objective: "This child should be skipped",
+              importance: "medium",
+              assignedModels: {
+                abstractPlanner: planner,
+                gatherer,
+                concretePlanner: planner,
+                executor,
+                verifier: planner
+              }
             },
             {
               title: "Second child",
-              objective: "This child should also be skipped"
+              objective: "This child should also be skipped",
+              importance: "medium",
+              assignedModels: {
+                abstractPlanner: planner,
+                gatherer,
+                concretePlanner: planner,
+                executor,
+                verifier: planner
+              }
             }
           ],
           executionNotes: []
@@ -1426,8 +1565,9 @@ test("runtime skips decomposition for short test tree goals", async () => {
     }
   });
 
-  assert.equal(result.snapshot.nodes.length, 1);
+  assert.equal(result.snapshot.nodes.length, 2);
   assert.equal(result.snapshot.run.status, "done");
+  assert.equal(result.snapshot.nodes[1]?.kind, "execution");
   assert.equal(
     result.snapshot.events.some((event) =>
       event.type === "scheduler_progress"

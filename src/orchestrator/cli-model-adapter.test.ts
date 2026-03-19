@@ -41,6 +41,7 @@ function createContext(model: ModelRef): ModelInvocationContext {
       runId: "run-test",
       parentId: null,
       childIds: [],
+      kind: "planning",
       title: "Root Task",
       objective: "Validate CLI adapter parsing",
       depth: 0,

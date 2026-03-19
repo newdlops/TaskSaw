@@ -120,6 +120,7 @@ type OrchestratorRunResponse =
   };
 
 type OrchestratorProgressTone = "idle" | "active" | "done" | "failed" | "paused" | "escalated";
+type OrchestratorDetailTab = "node" | "memory";
 type OrchestratorNodeProgressStepState = "done" | "active" | "pending" | "failed";
 type OrchestratorNodeProgressStep = {
   phase: string;
@@ -142,6 +143,10 @@ type SelectedNodeLiveView = {
   progress: OrchestratorNodeProgressView | null;
   command: string;
   log: string;
+  requestJson: string;
+  responseJson: string;
+  executionPlan: string;
+  hasExecutionPlan: boolean;
 };
 
 type TasksawApi = {
@@ -219,9 +224,14 @@ const TEXT = {
       orchestratorRefresh: "Refresh Runs",
       orchestratorRunsTitle: "Recent Runs",
       orchestratorDetailTitle: "Run Detail",
+      orchestratorDetailTabNode: "Node Detail",
+      orchestratorDetailTabMemory: "Working Memory",
       orchestratorDetailCopy: "Copy",
       orchestratorOpenViewer: "Large View",
       orchestratorNodeLiveTitle: "Selected Node Live",
+      orchestratorNodeRequestTitle: "Request JSON",
+      orchestratorNodeResponseTitle: "Response JSON",
+      orchestratorNodePlanTitle: "Execution Plan",
       orchestratorNodeProgressCurrent: "Current Work",
       orchestratorNodeProgressObjective: "Objective",
       orchestratorNodeProgressModel: "Active Model",
@@ -229,6 +239,13 @@ const TEXT = {
       orchestratorNodeProgressTrack: "Phase Track",
       orchestratorNodeCommandTitle: "Command",
       orchestratorNodeLogTitle: "Node Log",
+      orchestratorWorkingMemoryTitle: "Working Memory",
+      orchestratorWorkingMemoryEmpty: "No working-memory entries yet.",
+      orchestratorWorkingMemoryFacts: "Facts",
+      orchestratorWorkingMemoryOpenQuestions: "Open Questions",
+      orchestratorWorkingMemoryUnknowns: "Unknowns",
+      orchestratorWorkingMemoryConflicts: "Conflicts",
+      orchestratorWorkingMemoryDecisions: "Decisions",
       orchestratorLogTitle: "Orchestrator Log",
       orchestratorTreeTitle: "Node Graph",
       orchestratorTreeEmpty: "No nodes yet.",
@@ -238,6 +255,9 @@ const TEXT = {
       orchestratorNoRuns: "No orchestrator runs yet.",
       orchestratorNoDetail: "Select a run to inspect its nodes, live command flow, and working memory.",
       orchestratorNodeLiveEmpty: "Select a node to inspect its live command flow.",
+      orchestratorNodeRequestEmpty: "No node request JSON yet.",
+      orchestratorNodeResponseEmpty: "No node response payloads yet.",
+      orchestratorNodePlanEmpty: "No execution plan has been produced for this node yet.",
       orchestratorNodeCommandEmpty: "No command has been dispatched yet.",
       orchestratorNodeLogEmpty: "No node events yet.",
       orchestratorLogEmpty: "No orchestrator events yet.",
@@ -333,9 +353,14 @@ const TEXT = {
       orchestratorRefresh: "실행 목록 새로고침",
       orchestratorRunsTitle: "최근 실행",
       orchestratorDetailTitle: "실행 상세",
+      orchestratorDetailTabNode: "노드 상세",
+      orchestratorDetailTabMemory: "워킹 메모리",
       orchestratorDetailCopy: "복사",
       orchestratorOpenViewer: "크게 보기",
       orchestratorNodeLiveTitle: "선택 노드 실시간 상태",
+      orchestratorNodeRequestTitle: "요청 JSON",
+      orchestratorNodeResponseTitle: "응답 JSON",
+      orchestratorNodePlanTitle: "실행 계획",
       orchestratorNodeProgressCurrent: "현재 작업",
       orchestratorNodeProgressObjective: "목표",
       orchestratorNodeProgressModel: "실행 모델",
@@ -343,6 +368,13 @@ const TEXT = {
       orchestratorNodeProgressTrack: "단계 진행",
       orchestratorNodeCommandTitle: "전달 명령",
       orchestratorNodeLogTitle: "노드 로그",
+      orchestratorWorkingMemoryTitle: "워킹 메모리",
+      orchestratorWorkingMemoryEmpty: "아직 working memory 항목이 없습니다.",
+      orchestratorWorkingMemoryFacts: "사실",
+      orchestratorWorkingMemoryOpenQuestions: "열린 질문",
+      orchestratorWorkingMemoryUnknowns: "미확인 항목",
+      orchestratorWorkingMemoryConflicts: "충돌",
+      orchestratorWorkingMemoryDecisions: "결정",
       orchestratorLogTitle: "오케스트레이터 로그",
       orchestratorTreeTitle: "노드 그래프",
       orchestratorTreeEmpty: "아직 생성된 노드가 없습니다.",
@@ -352,6 +384,9 @@ const TEXT = {
       orchestratorNoRuns: "아직 오케스트레이터 실행이 없습니다.",
       orchestratorNoDetail: "실행 하나를 선택하면 노드, 실시간 명령 흐름, working memory를 볼 수 있습니다.",
       orchestratorNodeLiveEmpty: "노드를 선택하면 명령 전달 상태와 실시간 로그를 볼 수 있습니다.",
+      orchestratorNodeRequestEmpty: "아직 노드 요청 JSON이 없습니다.",
+      orchestratorNodeResponseEmpty: "아직 노드 응답 payload가 없습니다.",
+      orchestratorNodePlanEmpty: "이 노드에는 아직 실행 계획이 만들어지지 않았습니다.",
       orchestratorNodeCommandEmpty: "아직 전달된 명령이 없습니다.",
       orchestratorNodeLogEmpty: "아직 노드 이벤트가 없습니다.",
       orchestratorLogEmpty: "아직 오케스트레이터 이벤트가 없습니다.",
@@ -439,9 +474,16 @@ const orchestratorRunButton = document.getElementById("orchestrator-run") as HTM
 const orchestratorRunsTitleEl = document.getElementById("orchestrator-runs-title") as HTMLDivElement;
 const orchestratorRunListEl = document.getElementById("orchestrator-run-list") as HTMLUListElement;
 const orchestratorDetailTitleEl = document.getElementById("orchestrator-detail-title") as HTMLDivElement;
+const orchestratorDetailTabNodeButton = document.getElementById("orchestrator-detail-tab-node") as HTMLButtonElement;
+const orchestratorDetailTabMemoryButton = document.getElementById("orchestrator-detail-tab-memory") as HTMLButtonElement;
+const orchestratorDetailPanelNodeEl = document.getElementById("orchestrator-detail-panel-node") as HTMLElement;
+const orchestratorDetailPanelMemoryEl = document.getElementById("orchestrator-detail-panel-memory") as HTMLElement;
 const orchestratorNodeLiveTitleEl = document.getElementById("orchestrator-node-live-title") as HTMLDivElement;
 const orchestratorNodeLiveStatusEl = document.getElementById("orchestrator-node-live-status") as HTMLSpanElement;
 const orchestratorNodeLiveMetaEl = document.getElementById("orchestrator-node-live-meta") as HTMLDivElement;
+const orchestratorNodeRequestOpenButton = document.getElementById("orchestrator-node-request-open") as HTMLButtonElement;
+const orchestratorNodeResponseOpenButton = document.getElementById("orchestrator-node-response-open") as HTMLButtonElement;
+const orchestratorNodePlanOpenButton = document.getElementById("orchestrator-node-plan-open") as HTMLButtonElement;
 const orchestratorNodeCommandTitleEl = document.getElementById("orchestrator-node-command-title") as HTMLDivElement;
 const orchestratorNodeCommandOpenButton = document.getElementById("orchestrator-node-command-open") as HTMLButtonElement;
 const orchestratorNodeCommandCopyButton = document.getElementById("orchestrator-node-command-copy") as HTMLButtonElement;
@@ -450,6 +492,13 @@ const orchestratorNodeLogTitleEl = document.getElementById("orchestrator-node-lo
 const orchestratorNodeLogOpenButton = document.getElementById("orchestrator-node-log-open") as HTMLButtonElement;
 const orchestratorNodeLogCopyButton = document.getElementById("orchestrator-node-log-copy") as HTMLButtonElement;
 const orchestratorNodeLogEl = document.getElementById("orchestrator-node-log") as HTMLPreElement;
+const orchestratorNodeRequestDataEl = document.getElementById("orchestrator-node-request-data") as HTMLPreElement;
+const orchestratorNodeResponseDataEl = document.getElementById("orchestrator-node-response-data") as HTMLPreElement;
+const orchestratorNodePlanDataEl = document.getElementById("orchestrator-node-plan-data") as HTMLPreElement;
+const orchestratorWorkingMemoryTitleEl = document.getElementById("orchestrator-working-memory-title") as HTMLDivElement;
+const orchestratorWorkingMemoryOpenButton = document.getElementById("orchestrator-working-memory-open") as HTMLButtonElement;
+const orchestratorWorkingMemoryCopyButton = document.getElementById("orchestrator-working-memory-copy") as HTMLButtonElement;
+const orchestratorWorkingMemoryEl = document.getElementById("orchestrator-working-memory") as HTMLPreElement;
 const orchestratorLogTitleEl = document.getElementById("orchestrator-log-title") as HTMLDivElement;
 const orchestratorLogOpenButton = document.getElementById("orchestrator-log-open") as HTMLButtonElement;
 const orchestratorLogCopyButton = document.getElementById("orchestrator-log-copy") as HTMLButtonElement;
@@ -504,6 +553,7 @@ const ORCHESTRATOR_PHASE_TRACK = [
   "execute",
   "verify"
 ] as const;
+const TASKSAW_PROMPT_MARKER = "TASKSAW_PROMPT_ENVELOPE_JSON";
 const XTERM_THEMES = {
   light: {
     background: "#fffaf0",
@@ -579,6 +629,7 @@ let fitAllSessionsHandle: number | null = null;
 let activeWorkspaceTabId: string | null = "orchestrator";
 let isOrchestratorTabOpen = true;
 let selectedOrchestratorNodeId: string | null = null;
+let activeOrchestratorDetailTab: OrchestratorDetailTab = "node";
 let activeLogViewerSource: {
   titleElement: HTMLElement;
   contentElement: HTMLElement;
@@ -903,60 +954,63 @@ function scheduleOrchestratorRender(options: { list?: boolean; detail?: boolean 
 
 function summarizeEvent(event: OrchestratorEvent): string[] {
   const payload = event.payload;
+  const eventLabel = (value: string) => translateOrchestratorEventLabel(value);
 
   if (event.type === "run_created") {
     return [
-      `[${formatTimestamp(event.createdAt)}] run created`,
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("run created")}`,
       String(payload.goal ?? event.runId)
     ];
   }
 
   if (event.type === "node_created") {
     return [
-      `[${formatTimestamp(event.createdAt)}] node created`,
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("node created")}`,
       `${String(payload.title ?? event.nodeId ?? "unknown node")} (depth ${String(payload.depth ?? "n/a")})`
     ];
   }
 
   if (event.type === "phase_transition") {
     return [
-      `[${formatTimestamp(event.createdAt)}] phase`,
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("phase")}`,
       `${formatNodePhaseLabel(String(payload.from ?? "unknown"))} -> ${formatNodePhaseLabel(String(payload.to ?? "unknown"))}`
     ];
   }
 
   if (event.type === "acceptance_updated") {
     return [
-      `[${formatTimestamp(event.createdAt)}] acceptance`,
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("acceptance")}`,
       `${String(payload.criterionId ?? "unknown")} => ${String(payload.status ?? "unknown")}`
     ];
   }
 
   if (event.type === "evidence_attached") {
     return [
-      `[${formatTimestamp(event.createdAt)}] evidence attached`,
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("evidence attached")}`,
       String(payload.bundleId ?? "unknown bundle")
     ];
   }
 
   if (event.type === "scheduler_progress") {
     return [
-      `[${formatTimestamp(event.createdAt)}] scheduler`,
-      String(payload.message ?? "scheduler progress")
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("scheduler")}`,
+      typeof payload.message === "string"
+        ? translateSchedulerProgressMessage(payload.message)
+        : (languagePreference === "ko" ? "스케줄러 진행 업데이트" : "scheduler progress")
     ];
   }
 
   if (event.type === "node_decomposed") {
     const childTitles = Array.isArray(payload.childTitles) ? payload.childTitles.join(", ") : "";
     return [
-      `[${formatTimestamp(event.createdAt)}] decomposed`,
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("decomposed")}`,
       `children: ${childTitles || "n/a"}`
     ];
   }
 
   if (event.type === "model_invocation") {
     return [
-      `[${formatTimestamp(event.createdAt)}] invoke ${String(payload.capability ?? "unknown")} via ${formatModelLabel(
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("invoke")} ${String(payload.capability ?? "unknown")} via ${formatModelLabel(
         typeof payload.modelId === "string" ? payload.modelId : undefined,
         typeof payload.model === "string" ? payload.model : undefined,
         typeof payload.provider === "string" ? payload.provider : undefined
@@ -969,7 +1023,7 @@ function summarizeEvent(event: OrchestratorEvent): string[] {
 
   if (event.type === "model_response") {
     return [
-      `[${formatTimestamp(event.createdAt)}] response ${String(payload.capability ?? "unknown")} via ${formatModelLabel(
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("response")} ${String(payload.capability ?? "unknown")} via ${formatModelLabel(
         typeof payload.modelId === "string" ? payload.modelId : undefined,
         typeof payload.model === "string" ? payload.model : undefined,
         typeof payload.provider === "string" ? payload.provider : undefined
@@ -980,28 +1034,28 @@ function summarizeEvent(event: OrchestratorEvent): string[] {
 
   if (event.type === "node_failed") {
     return [
-      `[${formatTimestamp(event.createdAt)}] node failed`,
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("node failed")}`,
       `${formatNodePhaseLabel(String(payload.phase ?? "unknown"))}: ${formatDisplayValue(payload.error ?? "unknown error", 2400)}`
     ];
   }
 
   if (event.type === "run_failed") {
     return [
-      `[${formatTimestamp(event.createdAt)}] run failed`,
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("run failed")}`,
       formatDisplayValue(payload.error ?? "unknown error", 2400)
     ];
   }
 
   if (event.type === "run_paused") {
     return [
-      `[${formatTimestamp(event.createdAt)}] run paused`,
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("run paused")}`,
       formatDisplayValue(payload.reason ?? "paused", 2400)
     ];
   }
 
   if (event.type === "run_completed") {
     return [
-      `[${formatTimestamp(event.createdAt)}] run completed`,
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("run completed")}`,
       formatDisplayValue(payload.summary ?? "completed", 2400)
     ];
   }
@@ -1189,7 +1243,7 @@ function getNodeSchedulerMessage(event: OrchestratorEvent | null): string {
   }
 
   return typeof event.payload.message === "string"
-    ? event.payload.message.trim()
+    ? translateSchedulerProgressMessage(event.payload.message.trim())
     : "";
 }
 
@@ -1203,9 +1257,104 @@ function isNodeDetailEvent(event: OrchestratorEvent): boolean {
 }
 
 function humanizePayloadKey(key: string): string {
-  return key
+  const humanized = key
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replaceAll("_", " ");
+
+  if (languagePreference === "ko") {
+    const labels: Record<string, string> = {
+      message: "메시지",
+      "allow decomposition": "분해 허용",
+      "source run id": "원본 실행 ID",
+      "seeded evidence count": "시드 근거 개수",
+      "seeded fact count": "시드 사실 개수",
+      "seeded open question count": "시드 열린 질문 개수",
+      "seeded project structure directory count": "시드 구조 디렉터리 개수",
+      "seeded project structure key file count": "시드 구조 핵심 파일 개수",
+      "parent node id": "부모 노드 ID",
+      "child index": "하위 순번",
+      "child count": "하위 노드 개수",
+      "node depth": "노드 깊이",
+      "max depth": "최대 깊이",
+      "proposed child count": "제안된 하위 노드 개수",
+      capability: "capability",
+      "failed model id": "실패 모델 ID",
+      "fallback model id": "대체 모델 ID",
+      error: "오류",
+      "directory count": "디렉터리 개수",
+      "key file count": "핵심 파일 개수",
+      "open question count": "열린 질문 개수",
+      "contradiction count": "모순 개수",
+      attempt: "시도",
+      objectives: "목표",
+      contradictions: "모순",
+      "inspection objective count": "inspection 목표 개수",
+      "inspection objectives": "inspection 목표",
+      resolution: "정리 결과",
+      "bundle id": "번들 ID",
+      status: "상태",
+      summary: "요약",
+      reason: "사유",
+      outputs: "출력"
+    };
+
+    return labels[humanized] ?? humanized;
+  }
+
+  return humanized;
+}
+
+function translateOrchestratorEventLabel(label: string): string {
+  if (languagePreference === "ko") {
+    const labels: Record<string, string> = {
+      "run created": "실행 생성",
+      "node created": "노드 생성",
+      phase: "단계",
+      acceptance: "승인 기준",
+      "evidence attached": "근거 연결",
+      scheduler: "스케줄러",
+      decomposed: "분해",
+      invoke: "호출",
+      response: "응답",
+      "node failed": "노드 실패",
+      "run failed": "실행 실패",
+      "run paused": "실행 일시중지",
+      "run completed": "실행 완료"
+    };
+
+    return labels[label] ?? label;
+  }
+
+  return label;
+}
+
+function translateSchedulerProgressMessage(message: string): string {
+  const normalized = message.trim();
+  if (normalized.length === 0) {
+    return normalized;
+  }
+
+  if (languagePreference === "ko") {
+    const messages: Record<string, string> = {
+      "Starting orchestrator run": "오케스트레이터 실행 시작",
+      "Seeded run from previous snapshot": "이전 스냅샷에서 실행 시드 적용",
+      "Ignoring inspection child tasks because inspection nodes only refresh project structure memory": "inspection 노드는 프로젝트 구조 메모리만 갱신하므로 하위 작업은 무시함",
+      "Executing child subtree": "하위 서브트리 실행 중",
+      "Skipping decomposition because the goal requested a short test tree": "목표가 짧은 테스트 트리를 요구해 분해를 건너뜀",
+      "Skipping decomposition because max depth was reached": "최대 깊이에 도달해 분해를 건너뜀",
+      "Retrying capability with fallback model": "fallback 모델로 capability 재시도 중",
+      "Project structure memory updated": "프로젝트 구조 메모리 갱신됨",
+      "Stopping repeated project structure inspection because the structure memory did not change": "구조 메모리가 바뀌지 않아 반복 inspection 중단",
+      "Project structure inspection requested": "프로젝트 구조 inspection 요청됨",
+      "Executing project structure inspection node": "프로젝트 구조 inspection 노드 실행 중",
+      "Project structure inspection completed": "프로젝트 구조 inspection 완료",
+      "Using fallback model because the primary model was disabled earlier in the run": "이번 실행에서 주 모델이 비활성화되어 fallback 모델 사용 중"
+    };
+
+    return messages[normalized] ?? normalized;
+  }
+
+  return normalized;
 }
 
 function formatPayloadDetails(
@@ -1282,6 +1431,159 @@ function formatModelResponseDebugLog(event: OrchestratorEvent): string[] {
   }
 
   return lines;
+}
+
+function serializeViewerValue(value: unknown): string {
+  if (value === undefined) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return tryBeautifyJsonString(trimmed) ?? trimmed;
+  }
+
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function extractPromptEnvelopeJson(promptValue: unknown): string {
+  if (typeof promptValue !== "string") {
+    return serializeViewerValue(promptValue);
+  }
+
+  const prompt = promptValue.trim();
+  if (prompt.length === 0) {
+    return "";
+  }
+
+  const markerIndex = prompt.indexOf(TASKSAW_PROMPT_MARKER);
+  if (markerIndex === -1) {
+    return tryBeautifyJsonString(prompt) ?? prompt;
+  }
+
+  const jsonStart = prompt.indexOf("{", markerIndex);
+  if (jsonStart === -1) {
+    return prompt;
+  }
+
+  const envelopeText = prompt.slice(jsonStart).trim();
+  return tryBeautifyJsonString(envelopeText) ?? envelopeText;
+}
+
+function formatNodeFlowHeader(event: OrchestratorEvent): string {
+  const capability = typeof event.payload.capability === "string" ? event.payload.capability : event.type;
+  const modelLabel = formatModelLabel(
+    typeof event.payload.modelId === "string" ? event.payload.modelId : undefined,
+    typeof event.payload.model === "string" ? event.payload.model : undefined,
+    typeof event.payload.provider === "string" ? event.payload.provider : undefined
+  );
+
+  return `[${formatTimestamp(event.createdAt)}] ${capability} via ${modelLabel}`;
+}
+
+function buildNodeRequestJsonView(nodeEvents: OrchestratorEvent[]): string {
+  const invocationEvents = nodeEvents.filter((event) => event.type === "model_invocation");
+  if (invocationEvents.length === 0) {
+    return translate("ui.orchestratorNodeRequestEmpty");
+  }
+
+  return invocationEvents
+    .map((event) => {
+      const requestJson = extractPromptEnvelopeJson(event.payload.prompt);
+      return [
+        formatNodeFlowHeader(event),
+        "",
+        requestJson.length > 0 ? requestJson : translate("ui.orchestratorNodeRequestEmpty")
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function buildNodeResponseJsonView(nodeEvents: OrchestratorEvent[]): string {
+  const responseEvents = nodeEvents.filter((event) => event.type === "model_response");
+  if (responseEvents.length === 0) {
+    return translate("ui.orchestratorNodeResponseEmpty");
+  }
+
+  return responseEvents
+    .map((event) => {
+      const responseJson = serializeViewerValue(event.payload.result);
+      return [
+        formatNodeFlowHeader(event),
+        "",
+        responseJson.length > 0 ? responseJson : translate("ui.orchestratorNodeResponseEmpty")
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+function normalizeExecutionPlanPayload(result: unknown): Record<string, unknown> | null {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+
+  const record = result as Record<string, unknown>;
+  const normalized: Record<string, unknown> = {};
+
+  if (typeof record.summary === "string" && record.summary.trim().length > 0) {
+    normalized.summary = record.summary.trim();
+  }
+
+  if (Array.isArray(record.childTasks) && record.childTasks.length > 0) {
+    normalized.childTasks = record.childTasks;
+  }
+
+  if (Array.isArray(record.executionNotes) && record.executionNotes.length > 0) {
+    normalized.executionNotes = record.executionNotes;
+  }
+
+  if (typeof record.needsProjectStructureInspection === "boolean") {
+    normalized.needsProjectStructureInspection = record.needsProjectStructureInspection;
+  }
+
+  if (Array.isArray(record.inspectionObjectives) && record.inspectionObjectives.length > 0) {
+    normalized.inspectionObjectives = record.inspectionObjectives;
+  }
+
+  if (Array.isArray(record.projectStructureContradictions) && record.projectStructureContradictions.length > 0) {
+    normalized.projectStructureContradictions = record.projectStructureContradictions;
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function buildNodeExecutionPlanView(nodeEvents: OrchestratorEvent[]): { text: string; hasPlan: boolean } {
+  const planSections = nodeEvents
+    .filter((event) => event.type === "model_response" && event.payload.capability === "concretePlan")
+    .map((event) => {
+      const normalizedPlan = normalizeExecutionPlanPayload(event.payload.result);
+      if (!normalizedPlan) {
+        return null;
+      }
+
+      return [
+        formatNodeFlowHeader(event),
+        "",
+        serializeViewerValue(normalizedPlan)
+      ].join("\n");
+    })
+    .filter((section): section is string => Boolean(section));
+
+  if (planSections.length === 0) {
+    return {
+      text: translate("ui.orchestratorNodePlanEmpty"),
+      hasPlan: false
+    };
+  }
+
+  return {
+    text: planSections.join("\n\n"),
+    hasPlan: true
+  };
 }
 
 function getEventLogLevel(event: OrchestratorEvent): "DEBUG" | "INFO" | "WARN" | "ERROR" {
@@ -1509,7 +1811,11 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
       status: translate("ui.orchestratorCommandStatusIdle"),
       progress: null,
       command: translate("ui.orchestratorNodeCommandEmpty"),
-      log: translate("ui.orchestratorNodeLogEmpty")
+      log: translate("ui.orchestratorNodeLogEmpty"),
+      requestJson: translate("ui.orchestratorNodeRequestEmpty"),
+      responseJson: translate("ui.orchestratorNodeResponseEmpty"),
+      executionPlan: translate("ui.orchestratorNodePlanEmpty"),
+      hasExecutionPlan: false
     };
   }
 
@@ -1519,7 +1825,11 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
       status: translate("ui.orchestratorCommandStatusIdle"),
       progress: null,
       command: translate("ui.orchestratorNodeCommandEmpty"),
-      log: translate("ui.orchestratorNodeLogEmpty")
+      log: translate("ui.orchestratorNodeLogEmpty"),
+      requestJson: translate("ui.orchestratorNodeRequestEmpty"),
+      responseJson: translate("ui.orchestratorNodeResponseEmpty"),
+      executionPlan: translate("ui.orchestratorNodePlanEmpty"),
+      hasExecutionPlan: false
     };
   }
 
@@ -1560,12 +1870,77 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
     logLines.push("");
   }
 
+  const executionPlanView = buildNodeExecutionPlanView(nodeEvents);
+
   return {
     status,
     progress,
     command: command.length > 0 ? formatCommand(command) : translate("ui.orchestratorNodeCommandEmpty"),
-    log: logLines.join("\n").trim() || translate("ui.orchestratorNodeLogEmpty")
+    log: logLines.join("\n").trim() || translate("ui.orchestratorNodeLogEmpty"),
+    requestJson: buildNodeRequestJsonView(nodeEvents),
+    responseJson: buildNodeResponseJsonView(nodeEvents),
+    executionPlan: executionPlanView.text,
+    hasExecutionPlan: executionPlanView.hasPlan
   };
+}
+
+function buildWorkingMemoryText(detail: OrchestratorRunDetail | null): string {
+  if (!detail) {
+    return translate("ui.orchestratorWorkingMemoryEmpty");
+  }
+
+  const sections: string[] = [];
+  const appendSection = (title: string, lines: string[]) => {
+    if (lines.length === 0) {
+      return;
+    }
+
+    sections.push(`${title} (${lines.length})`, ...lines.map((line, index) => `${index + 1}. ${line}`), "");
+  };
+
+  appendSection(
+    translate("ui.orchestratorWorkingMemoryFacts"),
+    detail.workingMemory.facts.map((fact) => fact.statement.trim()).filter((statement) => statement.length > 0)
+  );
+  appendSection(
+    translate("ui.orchestratorWorkingMemoryOpenQuestions"),
+    detail.workingMemory.openQuestions
+      .filter((question) => question.status === "open")
+      .map((question) => question.question.trim())
+      .filter((question) => question.length > 0)
+  );
+  appendSection(
+    translate("ui.orchestratorWorkingMemoryUnknowns"),
+    detail.workingMemory.unknowns
+      .filter((unknown) => unknown.status === "open")
+      .map((unknown) => unknown.description.trim())
+      .filter((description) => description.length > 0)
+  );
+  appendSection(
+    translate("ui.orchestratorWorkingMemoryConflicts"),
+    detail.workingMemory.conflicts
+      .filter((conflict) => conflict.status === "open")
+      .map((conflict) => conflict.summary.trim())
+      .filter((summary) => summary.length > 0)
+  );
+  appendSection(
+    translate("ui.orchestratorWorkingMemoryDecisions"),
+    detail.workingMemory.decisions
+      .map((decision) => {
+        const summary = decision.summary.trim();
+        const rationale = decision.rationale.trim();
+        if (!summary && !rationale) {
+          return "";
+        }
+
+        return rationale.length > 0 ? `${summary}\n   rationale: ${rationale}` : summary;
+      })
+      .filter((entry) => entry.length > 0)
+  );
+
+  return sections.length > 0
+    ? sections.join("\n").trim()
+    : translate("ui.orchestratorWorkingMemoryEmpty");
 }
 
 function buildOrchestratorLog(detail: OrchestratorRunDetail | null): string {
@@ -1693,6 +2068,21 @@ function renderNodeProgressPanel(container: HTMLDivElement, progress: Orchestrat
   container.appendChild(shell);
 }
 
+function renderOrchestratorDetailTabs() {
+  const isNodeTab = activeOrchestratorDetailTab === "node";
+  orchestratorDetailTabNodeButton.classList.toggle("active", isNodeTab);
+  orchestratorDetailTabNodeButton.setAttribute("aria-selected", String(isNodeTab));
+  orchestratorDetailTabMemoryButton.classList.toggle("active", !isNodeTab);
+  orchestratorDetailTabMemoryButton.setAttribute("aria-selected", String(!isNodeTab));
+  orchestratorDetailPanelNodeEl.hidden = !isNodeTab;
+  orchestratorDetailPanelMemoryEl.hidden = isNodeTab;
+}
+
+function setActiveOrchestratorDetailTab(tab: OrchestratorDetailTab) {
+  activeOrchestratorDetailTab = tab;
+  renderOrchestratorDetailTabs();
+}
+
 function getNodeActivityPreview(detail: OrchestratorRunDetail, node: OrchestratorPlanNode): {
   tone: OrchestratorProgressTone;
   summary: string;
@@ -1776,8 +2166,11 @@ function renderOrchestratorDetail() {
       String(selectedOrchestratorRun.events.length),
       selectedOrchestratorRun.finalReport?.summary ?? "",
       selectedNode?.id ?? "",
+      String(selectedOrchestratorRun.workingMemory.facts.length),
       String(selectedOrchestratorRun.workingMemory.openQuestions.filter((question) => question.status === "open").length),
-      String(selectedOrchestratorRun.workingMemory.unknowns.filter((unknown) => unknown.status === "open").length)
+      String(selectedOrchestratorRun.workingMemory.unknowns.filter((unknown) => unknown.status === "open").length),
+      String(selectedOrchestratorRun.workingMemory.conflicts.filter((conflict) => conflict.status === "open").length),
+      String(selectedOrchestratorRun.workingMemory.decisions.length)
     ].join("|")
     : `__empty__:${languagePreference}`;
 
@@ -1789,9 +2182,19 @@ function renderOrchestratorDetail() {
   const liveView = buildSelectedNodeLiveView(selectedOrchestratorRun);
   orchestratorNodeLiveStatusEl.textContent = liveView.status;
   renderNodeProgressPanel(orchestratorNodeLiveMetaEl, liveView.progress);
+  orchestratorNodeRequestDataEl.textContent = liveView.requestJson;
+  orchestratorNodeResponseDataEl.textContent = liveView.responseJson;
+  orchestratorNodePlanDataEl.textContent = liveView.executionPlan;
+  orchestratorNodeRequestOpenButton.disabled = liveView.progress === null;
+  orchestratorNodeResponseOpenButton.disabled = liveView.progress === null;
+  orchestratorNodePlanOpenButton.disabled = !liveView.hasExecutionPlan;
   orchestratorNodeCommandEl.textContent = liveView.command;
   orchestratorNodeLogEl.textContent = liveView.log;
+  orchestratorWorkingMemoryEl.textContent = buildWorkingMemoryText(selectedOrchestratorRun);
+  orchestratorWorkingMemoryOpenButton.disabled = selectedOrchestratorRun === null;
+  orchestratorWorkingMemoryCopyButton.disabled = selectedOrchestratorRun === null;
   orchestratorLogEl.textContent = buildOrchestratorLog(selectedOrchestratorRun);
+  renderOrchestratorDetailTabs();
   syncLogViewerContent();
 }
 
@@ -2277,13 +2680,21 @@ function refreshLocalizedContent() {
   orchestratorRefreshButton.textContent = translate("ui.orchestratorRefresh");
   orchestratorRunsTitleEl.textContent = translate("ui.orchestratorRunsTitle");
   orchestratorDetailTitleEl.textContent = translate("ui.orchestratorDetailTitle");
+  orchestratorDetailTabNodeButton.textContent = translate("ui.orchestratorDetailTabNode");
+  orchestratorDetailTabMemoryButton.textContent = translate("ui.orchestratorDetailTabMemory");
   orchestratorNodeLiveTitleEl.textContent = translate("ui.orchestratorNodeLiveTitle");
+  orchestratorNodeRequestOpenButton.textContent = translate("ui.orchestratorNodeRequestTitle");
+  orchestratorNodeResponseOpenButton.textContent = translate("ui.orchestratorNodeResponseTitle");
+  orchestratorNodePlanOpenButton.textContent = translate("ui.orchestratorNodePlanTitle");
   orchestratorNodeCommandTitleEl.textContent = translate("ui.orchestratorNodeCommandTitle");
   orchestratorNodeCommandOpenButton.textContent = translate("ui.orchestratorOpenViewer");
   orchestratorNodeCommandCopyButton.textContent = translate("ui.orchestratorDetailCopy");
   orchestratorNodeLogTitleEl.textContent = translate("ui.orchestratorNodeLogTitle");
   orchestratorNodeLogOpenButton.textContent = translate("ui.orchestratorOpenViewer");
   orchestratorNodeLogCopyButton.textContent = translate("ui.orchestratorDetailCopy");
+  orchestratorWorkingMemoryTitleEl.textContent = translate("ui.orchestratorWorkingMemoryTitle");
+  orchestratorWorkingMemoryOpenButton.textContent = translate("ui.orchestratorOpenViewer");
+  orchestratorWorkingMemoryCopyButton.textContent = translate("ui.orchestratorDetailCopy");
   orchestratorLogTitleEl.textContent = translate("ui.orchestratorLogTitle");
   orchestratorLogOpenButton.textContent = translate("ui.orchestratorOpenViewer");
   orchestratorLogCopyButton.textContent = translate("ui.orchestratorDetailCopy");
@@ -2314,6 +2725,7 @@ function refreshLocalizedContent() {
   updateTerminalRootState();
   renderOrchestratorRunList();
   renderOrchestratorDetail();
+  renderOrchestratorDetailTabs();
   renderOrchestratorTree();
   renderWorkspaceTabs();
   renderWorkspacePanels();
@@ -2402,9 +2814,19 @@ async function copyLogViewerContent() {
 function setOrchestratorTransientDetail(message: string) {
   orchestratorNodeLiveStatusEl.textContent = translate("ui.orchestratorCommandStatusIdle");
   orchestratorNodeLiveMetaEl.textContent = message;
+  orchestratorNodeRequestDataEl.textContent = translate("ui.orchestratorNodeRequestEmpty");
+  orchestratorNodeResponseDataEl.textContent = translate("ui.orchestratorNodeResponseEmpty");
+  orchestratorNodePlanDataEl.textContent = translate("ui.orchestratorNodePlanEmpty");
+  orchestratorNodeRequestOpenButton.disabled = true;
+  orchestratorNodeResponseOpenButton.disabled = true;
+  orchestratorNodePlanOpenButton.disabled = true;
   orchestratorNodeCommandEl.textContent = translate("ui.orchestratorNodeCommandEmpty");
   orchestratorNodeLogEl.textContent = message;
+  orchestratorWorkingMemoryEl.textContent = message;
+  orchestratorWorkingMemoryOpenButton.disabled = true;
+  orchestratorWorkingMemoryCopyButton.disabled = true;
   orchestratorLogEl.textContent = message;
+  renderOrchestratorDetailTabs();
   syncLogViewerContent();
 }
 
@@ -3283,6 +3705,33 @@ workspaceOpenOrchestratorButton.addEventListener("click", () => {
 workspaceEmptyOpenOrchestratorButton.addEventListener("click", () => {
   openOrchestratorTab();
 });
+orchestratorDetailTabNodeButton.addEventListener("click", () => {
+  setActiveOrchestratorDetailTab("node");
+});
+orchestratorDetailTabMemoryButton.addEventListener("click", () => {
+  setActiveOrchestratorDetailTab("memory");
+});
+orchestratorNodeRequestOpenButton.addEventListener("click", () => {
+  openLogViewer(
+    orchestratorNodeRequestOpenButton,
+    orchestratorNodeRequestDataEl,
+    translate("ui.orchestratorNodeRequestEmpty")
+  );
+});
+orchestratorNodeResponseOpenButton.addEventListener("click", () => {
+  openLogViewer(
+    orchestratorNodeResponseOpenButton,
+    orchestratorNodeResponseDataEl,
+    translate("ui.orchestratorNodeResponseEmpty")
+  );
+});
+orchestratorNodePlanOpenButton.addEventListener("click", () => {
+  openLogViewer(
+    orchestratorNodePlanOpenButton,
+    orchestratorNodePlanDataEl,
+    translate("ui.orchestratorNodePlanEmpty")
+  );
+});
 orchestratorNodeCommandCopyButton.addEventListener("click", () => {
   void copyOrchestratorSection(
     orchestratorNodeCommandTitleEl,
@@ -3309,6 +3758,20 @@ orchestratorNodeLogOpenButton.addEventListener("click", () => {
     orchestratorNodeLogTitleEl,
     orchestratorNodeLogEl,
     translate("ui.orchestratorNodeLogEmpty")
+  );
+});
+orchestratorWorkingMemoryCopyButton.addEventListener("click", () => {
+  void copyOrchestratorSection(
+    orchestratorWorkingMemoryTitleEl,
+    orchestratorWorkingMemoryEl,
+    translate("ui.orchestratorWorkingMemoryEmpty")
+  );
+});
+orchestratorWorkingMemoryOpenButton.addEventListener("click", () => {
+  openLogViewer(
+    orchestratorWorkingMemoryTitleEl,
+    orchestratorWorkingMemoryEl,
+    translate("ui.orchestratorWorkingMemoryEmpty")
   );
 });
 orchestratorLogCopyButton.addEventListener("click", () => {

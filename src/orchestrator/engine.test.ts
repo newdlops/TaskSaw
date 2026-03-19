@@ -46,7 +46,7 @@ test("rejects invalid phase transitions", () => {
   });
 
   assert.throws(
-    () => engine.transitionNode(rootNode.id, "execute"),
+    () => engine.transitionNode(rootNode.id, "verify"),
     (error: unknown) => error instanceof InvalidNodePhaseTransitionError
   );
 });
@@ -79,6 +79,32 @@ test("creates child nodes within configured depth", () => {
   );
 
   assert.equal(engine.listRunNodes(run.id).length, 2);
+});
+
+test("creates execution children without increasing planning depth or inheriting models", () => {
+  const engine = new OrchestratorEngine();
+  const { rootNode } = engine.createRun({
+    goal: "Split planning and execution nodes",
+    assignedModels: {
+      abstractPlanner: {
+        id: "planner-upper",
+        provider: "mock",
+        model: "planner-upper",
+        tier: "upper",
+        reasoningEffort: "high"
+      }
+    }
+  });
+
+  const { childNode } = engine.createChildNode(rootNode.id, {
+    title: "Execute the planned work",
+    objective: "Perform the execution in a separate node",
+    kind: "execution"
+  });
+
+  assert.equal(childNode.kind, "execution");
+  assert.equal(childNode.depth, rootNode.depth);
+  assert.deepEqual(childNode.assignedModels, {});
 });
 
 test("emits live events to subscribers", () => {

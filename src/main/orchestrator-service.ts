@@ -303,9 +303,10 @@ export class OrchestratorService {
   }
 
   private selectCodexWorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef | undefined): ModelRef | undefined {
-    const selectedModel = catalog.models.find((model) => model.isDefault && !model.hidden)
-      ?? catalog.models.find((model) => model.isDefault)
-      ?? this.pickBestModel(catalog, (model) => this.scoreCodexWorkerModel(model));
+    const lightweightCandidates = this.listSelectableModels(catalog).filter((model) =>
+      this.looksLikeOpenAiFrontierModel(model.model) && this.isLightweightCodexModel(model.model)
+    );
+    const selectedModel = this.pickBestCandidate(lightweightCandidates, (model) => this.scoreCodexWorkerModel(model));
 
     if (!selectedModel) {
       return planningModel;
@@ -315,7 +316,7 @@ export class OrchestratorService {
   }
 
   private selectGeminiPlanningModel(catalog: ManagedToolModelCatalog): ModelRef {
-    const selectedModel = this.pickBestModel(catalog, (model) => this.scoreGeminiPlanningModel(model, catalog.currentModelId));
+    const selectedModel = this.pickBestModel(catalog, (model) => this.scoreGeminiPlanningModel(model));
     if (!selectedModel) {
       throw new Error("Gemini CLI did not report any available models");
     }
@@ -324,31 +325,16 @@ export class OrchestratorService {
   }
 
   private selectGeminiWorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef | undefined): ModelRef | undefined {
-    const currentStableConcreteModel = catalog.models.find(
-      (model) => model.id === catalog.currentModelId && this.isStableGeminiModel(model.model)
+    const lightweightCandidates = this.listSelectableModels(catalog).filter((model) =>
+      this.isConcreteGeminiModel(model.model) && this.isLightweightGeminiModel(model.model)
     );
-    const preferredStableConcreteModel = catalog.models.find((model) => this.isStableGeminiModel(model.model));
-    const currentConcreteModel = catalog.models.find(
-      (model) => model.id === catalog.currentModelId && this.isConcreteGeminiModel(model.model)
-    );
-    const preferredConcreteModel = catalog.models.find((model) => this.isConcreteGeminiModel(model.model));
-    const currentModel = catalog.models.find((model) => model.id === catalog.currentModelId);
-    const selectedModel = currentStableConcreteModel
-      ?? preferredStableConcreteModel
-      ?? currentConcreteModel
-      ?? preferredConcreteModel
-      ?? currentModel
-      ?? catalog.models[0];
+    const selectedModel = this.pickBestCandidate(lightweightCandidates, (model) => this.scoreGeminiWorkerModel(model));
 
     if (!selectedModel) {
       return planningModel;
     }
 
     return this.toModelRef("Google", selectedModel, "lower");
-  }
-
-  private isStableGeminiModel(model: string): boolean {
-    return this.isConcreteGeminiModel(model) && !model.includes("preview") && !model.includes("exp");
   }
 
   private isConcreteGeminiModel(model: string): boolean {
@@ -452,48 +438,65 @@ export class OrchestratorService {
     catalog: ManagedToolModelCatalog,
     score: (model: ManagedToolModelCatalog["models"][number]) => number
   ): ManagedToolModelCatalog["models"][number] | undefined {
-    return [...catalog.models]
+    return this.pickBestCandidate(catalog.models, score);
+  }
+
+  private pickBestCandidate(
+    models: ManagedToolModelCatalog["models"],
+    score: (model: ManagedToolModelCatalog["models"][number]) => number
+  ): ManagedToolModelCatalog["models"][number] | undefined {
+    return [...models]
       .sort((left, right) => score(right) - score(left))
       .find((model) => !model.hidden)
-      ?? [...catalog.models].sort((left, right) => score(right) - score(left))[0];
+      ?? [...models].sort((left, right) => score(right) - score(left))[0];
+  }
+
+  private listSelectableModels(catalog: ManagedToolModelCatalog): ManagedToolModelCatalog["models"] {
+    const visibleModels = catalog.models.filter((model) => !model.hidden);
+    return visibleModels.length > 0 ? visibleModels : [...catalog.models];
   }
 
   private scoreCodexPlanningModel(model: ManagedToolModelCatalog["models"][number]): number {
-    return (this.isMiniModel(model.model) ? -20_000 : 0)
-      + (model.model.includes("codex") ? 3_000 : 0)
-      + (model.hidden ? -10_000 : 0)
-      + (model.isDefault ? 250 : 0)
-      + (this.scoreReasoningCapability(model) * 100)
-      + (this.scoreVersion(model.model, "gpt-") * 10);
+    return (model.hidden ? -1_000_000 : 0)
+      + (this.isMiniModel(model.model) ? -500_000 : 0)
+      + (this.looksLikeOpenAiFrontierModel(model.model) ? 10_000 : -10_000)
+      + (this.scoreReasoningCapability(model) * 1_000)
+      + (this.scoreVersion(model.model, "gpt-") * 100)
+      + (model.isDefault ? 25 : 0);
   }
 
   private scoreCodexWorkerModel(model: ManagedToolModelCatalog["models"][number]): number {
-    return (model.isDefault ? 200 : 0)
-      + (model.hidden ? -1_000 : 0)
-      + (this.isMiniModel(model.model) ? 20 : 0)
-      + this.scoreVersion(model.model, "gpt-");
+    return (model.hidden ? -1_000_000 : 0)
+      + (this.looksLikeOpenAiFrontierModel(model.model) ? 1_000_000 : -1_000_000)
+      + (this.isLightweightCodexModel(model.model) ? 1_000_000 : -1_000_000)
+      + (this.scoreVersion(model.model, "gpt-") * 10_000)
+      + (this.scoreCodexLightweightFamily(model.model) * 1_000)
+      + (this.scoreLighterReasoningPreference(model) * 10)
+      + (model.isDefault ? 1 : 0);
   }
 
-  private scoreGeminiPlanningModel(
-    model: ManagedToolModelCatalog["models"][number],
-    currentModelId: string | null
-  ): number {
+  private scoreGeminiPlanningModel(model: ManagedToolModelCatalog["models"][number]): number {
     const normalizedModelName = model.model.toLowerCase();
-    const familyScore = normalizedModelName.includes("ultra")
-      ? 25_000
-      : normalizedModelName.includes("pro")
-        ? 20_000
-        : normalizedModelName.includes("flash")
-          ? 5_000
-          : 10_000;
 
-    return (this.isConcreteGeminiModel(model.model) ? 0 : -50_000)
-      + familyScore
-      + (normalizedModelName.includes("preview") ? 250 : 0)
-      + (normalizedModelName.includes("exp") ? -250 : 0)
-      + (model.id === currentModelId ? 50 : 0)
-      + (model.hidden ? -10_000 : 0)
-      + (this.scoreVersion(model.model, "gemini-") * 10);
+    return (model.hidden ? -1_000_000 : 0)
+      + (this.isConcreteGeminiModel(model.model) ? 0 : -500_000)
+      + (this.scoreGeminiPlanningFamily(normalizedModelName) * 10_000)
+      + (this.scoreVersion(model.model, "gemini-") * 100)
+      + (normalizedModelName.includes("preview") ? 75 : 0)
+      + (normalizedModelName.includes("exp") ? -250 : 0);
+  }
+
+  private scoreGeminiWorkerModel(model: ManagedToolModelCatalog["models"][number]): number {
+    const normalizedModelName = model.model.toLowerCase();
+
+    return (model.hidden ? -1_000_000 : 0)
+      + (this.isConcreteGeminiModel(model.model) ? 1_000_000 : -1_000_000)
+      + (this.isLightweightGeminiModel(model.model) ? 1_000_000 : -1_000_000)
+      + (this.scoreVersion(model.model, "gemini-") * 10_000)
+      + (this.scoreGeminiWorkerFamily(normalizedModelName) * 1_000)
+      + (model.isDefault ? 1 : 0)
+      + (normalizedModelName.includes("preview") ? -10 : 0)
+      + (normalizedModelName.includes("exp") ? -100 : 0);
   }
 
   private scoreReasoningCapability(model: ManagedToolModelCatalog["models"][number]): number {
@@ -510,6 +513,44 @@ export class OrchestratorService {
     return 0;
   }
 
+  private scoreLighterReasoningPreference(model: ManagedToolModelCatalog["models"][number]): number {
+    if (model.supportedReasoningEfforts.includes("low")) return 400;
+    if (model.supportedReasoningEfforts.includes("medium")) return 300;
+    if (model.supportedReasoningEfforts.includes("high")) return 200;
+    if (model.supportedReasoningEfforts.includes("xhigh")) return 100;
+
+    const normalizedDefaultReasoning = this.normalizeReasoningEffort(model.defaultReasoningEffort);
+    if (normalizedDefaultReasoning === "low") return 350;
+    if (normalizedDefaultReasoning === "medium") return 250;
+    if (normalizedDefaultReasoning === "high") return 150;
+    if (normalizedDefaultReasoning === "xhigh") return 50;
+    return 0;
+  }
+
+  private scoreGeminiPlanningFamily(model: string): number {
+    if (model.includes("ultra")) return 500;
+    if (model.includes("pro")) return 400;
+    if (model.includes("flash")) return 200;
+    if (model.includes("lite")) return 100;
+    return 0;
+  }
+
+  private scoreGeminiWorkerFamily(model: string): number {
+    if (model.includes("flash-lite")) return 500;
+    if (model.includes("flash")) return 450;
+    if (model.includes("lite")) return 425;
+    if (model.includes("pro")) return 250;
+    if (model.includes("ultra")) return 150;
+    return 0;
+  }
+
+  private scoreCodexLightweightFamily(model: string): number {
+    const normalizedModel = model.toLowerCase();
+    if (normalizedModel.includes("nano")) return 500;
+    if (normalizedModel.includes("mini")) return 450;
+    return 0;
+  }
+
   private scoreVersion(model: string, prefix: string): number {
     const match = model.match(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\d+)(?:\\.(\\d+))?`));
     if (!match) {
@@ -522,7 +563,22 @@ export class OrchestratorService {
   }
 
   private isMiniModel(model: string): boolean {
+    return this.isLightweightCodexModel(model);
+  }
+
+  private isLightweightCodexModel(model: string): boolean {
     return /\bmini\b/i.test(model) || /\bnano\b/i.test(model);
+  }
+
+  private isLightweightGeminiModel(model: string): boolean {
+    const normalizedModel = model.toLowerCase();
+    return normalizedModel.includes("flash-lite")
+      || normalizedModel.includes("flash")
+      || normalizedModel.includes("lite");
+  }
+
+  private looksLikeOpenAiFrontierModel(model: string): boolean {
+    return /^gpt-\d/i.test(model);
   }
 
   private toModelRef(

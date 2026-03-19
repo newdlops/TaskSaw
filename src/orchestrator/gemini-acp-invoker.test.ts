@@ -46,6 +46,7 @@ function createContext(model: ModelRef): ModelInvocationContext {
       runId: "run-test",
       parentId: null,
       childIds: [],
+      kind: "planning",
       title: "Root Task",
       objective: "Validate Gemini ACP invocation",
       depth: 0,
@@ -250,7 +251,7 @@ test("gemini ACP invoker switches the session model before prompting", async () 
   });
 });
 
-test("gemini ACP invoker extends planning prompt timeouts beyond the base timeout", async () => {
+test("gemini ACP invoker waits for prompt completion instead of timing out", async () => {
   const fakeChild = new FakeChildProcess();
 
   const adapter = new CliModelAdapter({
@@ -339,6 +340,175 @@ test("gemini ACP invoker extends planning prompt timeouts beyond the base timeou
   }));
 
   assert.equal(result.summary, "Abstract plan through ACP");
+});
+
+test("gemini ACP invoker aborts an in-flight prompt only when cancellation is requested", async () => {
+  const fakeChild = new FakeChildProcess();
+  const abortController = new AbortController();
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      timeoutMs: 10,
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            constructor(_toClient: () => object) {}
+
+            async initialize() {
+              return {
+                protocolVersion: 1
+              };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              return new Promise<never>(() => undefined);
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const pendingGather = adapter.gather!({
+    ...createContext(TEST_MODEL),
+    abortSignal: abortController.signal
+  });
+
+  setTimeout(() => abortController.abort(), 20);
+
+  await assert.rejects(
+    pendingGather,
+    /Gemini ACP prompt was aborted/
+  );
+});
+
+test("gemini ACP invoker retries invalid streams and falls back to another Gemini model", async () => {
+  const sessionModelIds: string[] = [];
+  let currentModelId = "";
+  let promptAttemptCount = 0;
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      fallbackModelIds: [TEST_MODEL.model, "gemini-2.5-flash"],
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return {
+                protocolVersion: 1
+              };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel(params: Record<string, unknown>) {
+              currentModelId = String(params.modelId ?? "");
+              sessionModelIds.push(currentModelId);
+              return {};
+            }
+
+            async prompt() {
+              promptAttemptCount += 1;
+              if (currentModelId !== "gemini-2.5-flash") {
+                throw new Error("Model stream ended with empty response text.");
+              }
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Recovered after Gemini fallback",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => new FakeChildProcess()
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!(createContext(TEST_MODEL));
+
+  assert.equal(result.summary, "Recovered after Gemini fallback");
+  assert.equal(promptAttemptCount, 3);
+  assert.deepEqual(sessionModelIds, [
+    "gemini-2.5-pro",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash"
+  ]);
 });
 
 test("gemini ACP invoker advertises filesystem capabilities and serves workspace file reads", async () => {

@@ -29,7 +29,7 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
 };
 
 export const NODE_PHASE_TRANSITIONS: Record<NodePhase, readonly NodePhase[]> = {
-  init: ["abstract_plan", "escalated"],
+  init: ["abstract_plan", "review", "execute", "escalated"],
   abstract_plan: ["gather", "concrete_plan", "replan", "escalated"],
   gather: ["evidence_consolidation", "replan", "escalated"],
   evidence_consolidation: ["gather", "concrete_plan", "replan", "escalated"],
@@ -89,6 +89,7 @@ export class OrchestratorEngine {
       runId,
       parentId: null,
       childIds: [],
+      kind: input.kind ?? "planning",
       title: input.title ?? "Root Task",
       objective: input.objective ?? input.goal,
       depth: 0,
@@ -112,6 +113,7 @@ export class OrchestratorEngine {
     });
     this.recordEvent(runId, rootNodeId, "node_created", {
       parentId: null,
+      kind: rootNode.kind,
       phase: rootNode.phase,
       depth: rootNode.depth,
       title: rootNode.title
@@ -124,7 +126,8 @@ export class OrchestratorEngine {
     const parentNode = this.getRequiredNode(parentNodeId);
     const run = this.getRequiredRun(parentNode.runId);
     const timestamp = this.now();
-    const childDepth = parentNode.depth + 1;
+    const childKind = input.kind ?? "planning";
+    const childDepth = childKind === "execution" ? parentNode.depth : parentNode.depth + 1;
 
     if (childDepth > run.config.maxDepth) {
       throw new Error(`Child node depth ${childDepth} exceeds configured maxDepth ${run.config.maxDepth}`);
@@ -135,11 +138,12 @@ export class OrchestratorEngine {
       runId: parentNode.runId,
       parentId: parentNodeId,
       childIds: [],
+      kind: childKind,
       title: input.title,
       objective: input.objective,
       depth: childDepth,
       phase: "init",
-      assignedModels: input.assignedModels ?? parentNode.assignedModels,
+      assignedModels: input.assignedModels ?? {},
       reviewPolicy: input.reviewPolicy ?? parentNode.reviewPolicy,
       acceptanceCriteria: this.cloneAcceptanceCriteria(input.acceptanceCriteria ?? DEFAULT_ACCEPTANCE_CRITERIA),
       executionBudget: this.resolveBudget(parentNode.executionBudget, input.executionBudget),
@@ -159,6 +163,7 @@ export class OrchestratorEngine {
     this.nodes.set(childNode.id, childNode);
     this.recordEvent(parentNode.runId, childNode.id, "node_created", {
       parentId: parentNodeId,
+      kind: childNode.kind,
       phase: childNode.phase,
       depth: childNode.depth,
       title: childNode.title

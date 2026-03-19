@@ -29,6 +29,16 @@ function createCodexCatalog(overrides: Partial<ManagedToolModelCatalog> = {}): M
         isDefault: false,
         defaultReasoningEffort: "high",
         supportedReasoningEfforts: ["medium", "high", "xhigh"]
+      },
+      {
+        id: "gpt-5.3-codex",
+        model: "gpt-5.3-codex",
+        displayName: "GPT-5.3 Codex",
+        description: null,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: "high",
+        supportedReasoningEfforts: ["medium", "high", "xhigh"]
       }
     ],
     ...overrides
@@ -42,6 +52,16 @@ function createGeminiCatalog(overrides: Partial<ManagedToolModelCatalog> = {}): 
     currentModelId: "auto-gemini-3",
     discoveredAt: "2026-03-19T00:00:00.000Z",
     models: [
+      {
+        id: "gemini-2.5-flash",
+        model: "gemini-2.5-flash",
+        displayName: "Gemini 2.5 Flash",
+        description: null,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: null,
+        supportedReasoningEfforts: []
+      },
       {
         id: "gemini-2.5-pro",
         model: "gemini-2.5-pro",
@@ -77,7 +97,7 @@ function createGeminiCatalog(overrides: Partial<ManagedToolModelCatalog> = {}): 
   };
 }
 
-test("orchestrator service assigns the highest-grade Gemini model to planning and a stable concrete model to worker roles", async () => {
+test("orchestrator service assigns the latest frontier Gemini model to planning and a lightweight Gemini model to worker roles", async () => {
   const catalog = createGeminiCatalog();
   const toolManager = {
     prepareWorkspaceContext: async () => undefined,
@@ -97,10 +117,10 @@ test("orchestrator service assigns the highest-grade Gemini model to planning an
     };
 
   assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gemini-3.1-pro-preview");
-  assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-2.5-pro");
+  assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-2.5-flash");
   assert.deepEqual(modeConfig.toolModels.gemini.map((model) => model.model), [
     "gemini-3.1-pro-preview",
-    "gemini-2.5-pro"
+    "gemini-2.5-flash"
   ]);
 });
 
@@ -144,6 +164,59 @@ test("orchestrator service falls back to a concrete Gemini model when currentMod
     };
 
   assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gemini-2.5-pro");
+});
+
+test("orchestrator service keeps the latest concrete Gemini model for worker roles when no lightweight Gemini model exists", async () => {
+  const catalog = createGeminiCatalog({
+    models: [
+      {
+        id: "gemini-2.5-pro",
+        model: "gemini-2.5-pro",
+        displayName: "Gemini 2.5 Pro",
+        description: null,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: null,
+        supportedReasoningEfforts: []
+      },
+      {
+        id: "gemini-3.1-pro-preview",
+        model: "gemini-3.1-pro-preview",
+        displayName: "Gemini 3.1 Pro Preview",
+        description: null,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: null,
+        supportedReasoningEfforts: []
+      },
+      {
+        id: "auto-gemini-3",
+        model: "auto-gemini-3",
+        displayName: "Auto Gemini 3",
+        description: null,
+        hidden: false,
+        isDefault: true,
+        defaultReasoningEffort: null,
+        supportedReasoningEfforts: []
+      }
+    ]
+  });
+  const toolManager = {
+    prepareWorkspaceContext: async () => undefined,
+    discoverModelCatalog: async () => catalog
+  };
+  const service = new OrchestratorService("/tmp/tasksaw-app", "/tmp/tasksaw-user-data", toolManager as never);
+
+  const modeConfig = await (service as unknown as { resolveModeConfig(mode: string, workspacePath: string): Promise<unknown> })
+    .resolveModeConfig("gemini_only", "/tmp/tasksaw-workspace") as {
+      assignedModels: {
+        abstractPlanner: { model: string };
+        gatherer: { model: string };
+      };
+    };
+
+  assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gemini-3.1-pro-preview");
+  assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-3.1-pro-preview");
 });
 
 test("orchestrator service assigns the strongest non-mini Codex model to planning while keeping the default model for worker roles", async () => {

@@ -9,6 +9,7 @@ export type CliPromptEnvelope = {
   nodeId: string;
   parentId: string | null;
   depth: number;
+  nodeKind: string;
   nodeTitle: string;
   objective: string;
   goal: string;
@@ -17,7 +18,51 @@ export type CliPromptEnvelope = {
     provider: string;
     model: string;
     tier: string;
-    reasoningEffort?: string;
+      reasoningEffort?: string;
+  };
+  nodeModelRouting: {
+    abstractPlanner?: {
+      id: string;
+      provider: string;
+      model: string;
+      tier: string;
+      reasoningEffort?: string;
+    };
+    gatherer?: {
+      id: string;
+      provider: string;
+      model: string;
+      tier: string;
+      reasoningEffort?: string;
+    };
+    concretePlanner?: {
+      id: string;
+      provider: string;
+      model: string;
+      tier: string;
+      reasoningEffort?: string;
+    };
+    reviewer?: {
+      id: string;
+      provider: string;
+      model: string;
+      tier: string;
+      reasoningEffort?: string;
+    };
+    executor?: {
+      id: string;
+      provider: string;
+      model: string;
+      tier: string;
+      reasoningEffort?: string;
+    };
+    verifier?: {
+      id: string;
+      provider: string;
+      model: string;
+      tier: string;
+      reasoningEffort?: string;
+    };
   };
   executionBudget: ModelInvocationContext["executionBudget"];
   reviewPolicy: ModelInvocationContext["reviewPolicy"];
@@ -69,7 +114,7 @@ const PHASE_RESPONSE_SCHEMAS: Record<OrchestratorCapability, string> = {
   gather:
     '{"summary": string, "evidenceBundles": EvidenceBundleDraft[], "projectStructure"?: ProjectStructureReport}',
   concretePlan:
-    '{"summary": string, "childTasks": OrchestratorChildTask[], "executionNotes": string[], "needsProjectStructureInspection"?: boolean, "inspectionObjectives"?: string[], "projectStructureContradictions"?: string[]}',
+    '{"summary": string, "childTasks": Array<{"title": string, "objective": string, "importance": "critical" | "high" | "medium" | "low", "assignedModels": ModelAssignment, "reviewPolicy"?: ReviewPolicy, "acceptanceCriteria"?: AcceptanceCriteria, "executionBudget"?: Partial<ExecutionBudget>}>, "executionNotes": string[], "needsProjectStructureInspection"?: boolean, "inspectionObjectives"?: string[], "projectStructureContradictions"?: string[]}',
   review:
     '{"summary": string, "approved": boolean, "followUpQuestions": string[]}',
   execute:
@@ -88,6 +133,7 @@ export function buildCliPrompt(capability: OrchestratorCapability, context: Mode
     nodeId: context.node.id,
     parentId: context.node.parentId,
     depth: context.node.depth,
+    nodeKind: context.node.kind,
     nodeTitle: context.node.title,
     objective: context.node.objective,
     goal: context.run.goal,
@@ -98,6 +144,7 @@ export function buildCliPrompt(capability: OrchestratorCapability, context: Mode
       tier: context.assignedModel.tier,
       reasoningEffort: context.assignedModel.reasoningEffort
     },
+    nodeModelRouting: serializeModelAssignment(context.node.assignedModels),
     executionBudget: context.executionBudget,
     reviewPolicy: context.reviewPolicy,
     acceptanceCriteria: context.node.acceptanceCriteria.items.map((item) => item.description),
@@ -231,9 +278,34 @@ function buildStageInstructions(
   if (workflowStage === "task_orchestration" && capability === "concretePlan") {
     return [
       "Plan execution using the current projectStructure memory.",
-      "If projectStructure is contradictory or missing critical facts, set needsProjectStructureInspection=true, provide inspectionObjectives, and explain the contradiction in projectStructureContradictions."
+      "If projectStructure is contradictory or missing critical facts, set needsProjectStructureInspection=true, provide inspectionObjectives, and explain the contradiction in projectStructureContradictions.",
+      "Child tasks created here are planning nodes only. Do not merge execution into the planning node.",
+      "Each child task must include an importance field and explicit assignedModels chosen from nodeModelRouting.",
+      "There is no model inheritance. The orchestrator will execute child nodes only with the exact assignedModels you return."
     ].join(" ");
   }
 
   return "Use the provided evidence, working memory, and projectStructure to produce the best possible JSON response.";
+}
+
+function serializeModelAssignment(contextAssignment: ModelInvocationContext["node"]["assignedModels"]): CliPromptEnvelope["nodeModelRouting"] {
+  const serializeModel = (model: ModelInvocationContext["node"]["assignedModels"][keyof ModelInvocationContext["node"]["assignedModels"]]) =>
+    model
+      ? {
+          id: model.id,
+          provider: model.provider,
+          model: model.model,
+          tier: model.tier,
+          reasoningEffort: model.reasoningEffort
+        }
+      : undefined;
+
+  return {
+    abstractPlanner: serializeModel(contextAssignment.abstractPlanner),
+    gatherer: serializeModel(contextAssignment.gatherer),
+    concretePlanner: serializeModel(contextAssignment.concretePlanner),
+    reviewer: serializeModel(contextAssignment.reviewer),
+    executor: serializeModel(contextAssignment.executor),
+    verifier: serializeModel(contextAssignment.verifier)
+  };
 }

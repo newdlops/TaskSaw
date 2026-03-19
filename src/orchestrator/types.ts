@@ -14,6 +14,9 @@ export const NODE_PHASES = [
 
 export type NodePhase = (typeof NODE_PHASES)[number];
 
+export const NODE_KINDS = ["planning", "execution"] as const;
+export type NodeKind = (typeof NODE_KINDS)[number];
+
 export const RUN_STATUSES = ["pending", "running", "done", "failed", "paused", "escalated"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
@@ -31,6 +34,9 @@ export type ModelTier = (typeof MODEL_TIERS)[number];
 
 export const REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export const CHILD_TASK_IMPORTANCE_LEVELS = ["critical", "high", "medium", "low"] as const;
+export type ChildTaskImportance = (typeof CHILD_TASK_IMPORTANCE_LEVELS)[number];
 
 export const ORCHESTRATOR_WORKFLOW_STAGES = [
   "project_structure_discovery",
@@ -68,6 +74,7 @@ export type ModelAssignment = {
 export type OrchestratorChildTask = {
   title: string;
   objective: string;
+  importance?: ChildTaskImportance;
   assignedModels?: ModelAssignment;
   reviewPolicy?: ReviewPolicy;
   acceptanceCriteria?: AcceptanceCriteria;
@@ -341,6 +348,7 @@ export type PlanNode = {
   runId: string;
   parentId: string | null;
   childIds: string[];
+  kind: NodeKind;
   title: string;
   objective: string;
   depth: number;
@@ -426,6 +434,7 @@ export type CreateRunInput = {
   goal: string;
   title?: string;
   objective?: string;
+  kind?: NodeKind;
   config?: Partial<OrchestratorConfig>;
   assignedModels?: ModelAssignment;
   reviewPolicy?: ReviewPolicy;
@@ -437,6 +446,7 @@ export type CreateRunInput = {
 export type CreateChildNodeInput = {
   title: string;
   objective: string;
+  kind?: NodeKind;
   assignedModels?: ModelAssignment;
   reviewPolicy?: ReviewPolicy;
   acceptanceCriteria?: AcceptanceCriteria;

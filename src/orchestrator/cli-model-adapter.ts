@@ -523,6 +523,7 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
       childTasks.push({
         title,
         objective,
+        importance: this.normalizeChildTaskImportance(record.importance ?? record.priority),
         assignedModels: this.asOptionalRecord(record.assignedModels) as OrchestratorChildTask["assignedModels"],
         reviewPolicy: this.normalizeReviewPolicy(record.reviewPolicy),
         acceptanceCriteria: this.asOptionalRecord(record.acceptanceCriteria) as OrchestratorChildTask["acceptanceCriteria"],
@@ -611,6 +612,14 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
 
   private normalizeReviewPolicy(value: unknown): OrchestratorChildTask["reviewPolicy"] {
     if (value === "none" || value === "light" || value === "risk_based" || value === "mandatory") {
+      return value;
+    }
+
+    return undefined;
+  }
+
+  private normalizeChildTaskImportance(value: unknown): OrchestratorChildTask["importance"] {
+    if (value === "critical" || value === "high" || value === "medium" || value === "low") {
       return value;
     }
 

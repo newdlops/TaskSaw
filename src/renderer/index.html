@@ -135,12 +135,23 @@
               <section class="orchestrator-card orchestrator-detail-card">
                 <div class="orchestrator-detail-header">
                   <div id="orchestrator-detail-title" class="section-title">Run Detail</div>
+                  <div class="orchestrator-detail-tabs" role="tablist" aria-label="Run detail tabs">
+                    <button id="orchestrator-detail-tab-node" class="orchestrator-detail-tab active" type="button" role="tab" aria-selected="true">Node Detail</button>
+                    <button id="orchestrator-detail-tab-memory" class="orchestrator-detail-tab" type="button" role="tab" aria-selected="false">Working Memory</button>
+                  </div>
                 </div>
 
-                <section class="orchestrator-node-live-card">
+                <section id="orchestrator-detail-panel-node" class="orchestrator-node-live-card">
                   <div class="orchestrator-node-live-header">
                     <div id="orchestrator-node-live-title" class="section-title section-title-small">Selected Node Live</div>
-                    <span id="orchestrator-node-live-status" class="orchestrator-node-live-status">Queued</span>
+                    <div class="orchestrator-node-live-header-actions">
+                      <div class="orchestrator-card-actions orchestrator-node-flow-actions">
+                        <button id="orchestrator-node-request-open" class="orchestrator-copy-button" type="button">Request JSON</button>
+                        <button id="orchestrator-node-response-open" class="orchestrator-copy-button" type="button">Response JSON</button>
+                        <button id="orchestrator-node-plan-open" class="orchestrator-copy-button" type="button">Execution Plan</button>
+                      </div>
+                      <span id="orchestrator-node-live-status" class="orchestrator-node-live-status">Queued</span>
+                    </div>
                   </div>
                   <div id="orchestrator-node-live-meta" class="orchestrator-node-live-meta"></div>
 
@@ -167,6 +178,20 @@
                       <pre id="orchestrator-node-log"></pre>
                     </section>
                   </div>
+                  <pre id="orchestrator-node-request-data" hidden></pre>
+                  <pre id="orchestrator-node-response-data" hidden></pre>
+                  <pre id="orchestrator-node-plan-data" hidden></pre>
+                </section>
+
+                <section id="orchestrator-detail-panel-memory" class="orchestrator-working-memory-card" hidden>
+                  <div class="orchestrator-section-header">
+                    <div id="orchestrator-working-memory-title" class="section-title section-title-small">Working Memory</div>
+                    <div class="orchestrator-card-actions">
+                      <button id="orchestrator-working-memory-open" class="orchestrator-copy-button" type="button">Large View</button>
+                      <button id="orchestrator-working-memory-copy" class="orchestrator-copy-button" type="button">Copy</button>
+                    </div>
+                  </div>
+                  <pre id="orchestrator-working-memory"></pre>
                 </section>
               </section>
 

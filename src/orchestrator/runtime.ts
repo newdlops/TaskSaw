@@ -45,9 +45,11 @@ type RootPhaseResults = {
   verify?: VerifyResult;
 };
 
+type NodePhaseResults = Partial<RootPhaseResults>;
+
 type NodeExecutionOutcome = {
   node: PlanNode;
-  phaseResults: RootPhaseResults;
+  phaseResults: NodePhaseResults;
   outputs: string[];
   verifySummaries: string[];
 };
@@ -97,6 +99,13 @@ export class MissingModelAssignmentError extends Error {
   }
 }
 
+export class MissingChildTaskModelAssignmentError extends Error {
+  constructor(nodeId: string, childTitle: string, role: AssignedModelRole) {
+    super(`Planning node ${nodeId} routed child task "${childTitle}" without a model assignment for role ${role}`);
+    this.name = "MissingChildTaskModelAssignmentError";
+  }
+}
+
 export class ReviewRejectedError extends Error {
   constructor(nodeId: string, summary: string) {
     super(`Review rejected node ${nodeId}: ${summary}`);
@@ -135,7 +144,6 @@ export class OrchestratorRuntime {
   private readonly projectStructureInspectionNodeIdsByRun = new Map<string, Set<string>>();
   private readonly projectStructureInspectionAttemptsByNode = new Map<string, number>();
   private readonly finalReports = new Map<string, OrchestratorFinalReport>();
-  private readonly disabledModelIdsByRun = new Map<string, Set<string>>();
   private readonly abortController = new AbortController();
   private cancellationReason: string | null = null;
 
@@ -257,7 +265,6 @@ export class OrchestratorRuntime {
     );
     this.projectStructureInspectionNodeIdsByRun.set(run.id, new Set());
     this.projectStructureInspectionAttemptsByNode.set(rootNode.id, 0);
-    this.disabledModelIdsByRun.set(run.id, new Set());
     const seededEvidenceCount = this.seedContinuationContext(rootNode, input.continuation);
     this.persistence?.saveSnapshot(this.getSnapshot(run.id));
     this.engine.appendEvent(run.id, rootNode.id, "scheduler_progress", {
@@ -279,6 +286,7 @@ export class OrchestratorRuntime {
     try {
       this.throwIfCancelled(run.id, rootNode.id);
       const rootExecution = await this.executeNode(rootNode.id, allowDecomposition);
+      const rootPhaseResults = this.requireRootPhaseResults(rootExecution.phaseResults, rootNode.id);
       const finalReport = this.buildFinalReport(run.id, rootExecution.outputs, rootExecution.verifySummaries);
       this.finalReports.set(run.id, finalReport);
       this.engine.appendEvent(run.id, rootExecution.node.id, "run_completed", {
@@ -296,7 +304,7 @@ export class OrchestratorRuntime {
         snapshot,
         outputs: rootExecution.outputs,
         verifySummaries: rootExecution.verifySummaries,
-        phaseResults: rootExecution.phaseResults
+        phaseResults: rootPhaseResults
       };
     } catch (error) {
       if (this.isCancellationError(error)) {
@@ -314,8 +322,6 @@ export class OrchestratorRuntime {
       this.escalateRunIfPossible(rootNode.id);
       this.persistence?.saveSnapshot(this.getSnapshot(run.id));
       throw error;
-    } finally {
-      this.disabledModelIdsByRun.delete(run.id);
     }
   }
 
@@ -327,228 +333,9 @@ export class OrchestratorRuntime {
 
     try {
       this.throwIfCancelled(startingNode.runId, nodeId);
-      const isProjectStructureInspection = this.isProjectStructureInspectionNode(startingNode);
-      const seededEvidence = this.getNodeEvidenceBundles(startingNode);
-      let currentNode = this.engine.transitionNode(nodeId, "abstract_plan");
-      const abstractPlan = await this.invokeCapability<AbstractPlanResult>(
-        currentNode,
-        "abstractPlanner",
-        "abstractPlan",
-        seededEvidence
-      );
-      this.recordAbstractPlanning(currentNode, abstractPlan);
-
-      this.throwIfCancelled(currentNode.runId, currentNode.id);
-      currentNode = this.engine.transitionNode(nodeId, "gather");
-      const gather = await this.invokeCapability<GatherResult>(currentNode, "gatherer", "gather", seededEvidence);
-      this.mergeProjectStructureReport(currentNode, gather.projectStructure);
-      const gatheredBundles = gather.evidenceBundles.map((bundleDraft) =>
-        this.materializeEvidenceBundle(currentNode, bundleDraft)
-      );
-
-      for (const bundle of gatheredBundles) {
-        this.evidenceStore.upsertBundle(bundle);
-        this.engine.attachEvidenceBundle(currentNode.id, bundle.id);
-        this.ingestEvidenceBundle(currentNode.id, bundle);
-      }
-
-      this.throwIfCancelled(currentNode.runId, currentNode.id);
-      currentNode = this.engine.transitionNode(nodeId, "evidence_consolidation");
-      const bundleIdsForConsolidation = [
-        ...seededEvidence.map((bundle) => bundle.id),
-        ...gatheredBundles.map((bundle) => bundle.id)
-      ];
-      const consolidatedEvidence = this.evidenceStore.mergeBundles({
-        runId: currentNode.runId,
-        nodeId: currentNode.id,
-        bundleIds: bundleIdsForConsolidation,
-        summary: gather.summary
-      });
-      this.evidenceStore.upsertBundle(consolidatedEvidence);
-      this.engine.attachEvidenceBundle(currentNode.id, consolidatedEvidence.id);
-
-      this.throwIfCancelled(currentNode.runId, currentNode.id);
-      currentNode = this.engine.transitionNode(nodeId, "concrete_plan");
-      let concretePlan = await this.invokeCapability<ConcretePlanResult>(
-        currentNode,
-        "concretePlanner",
-        "concretePlan",
-        [consolidatedEvidence]
-      );
-      this.recordDecision(currentNode.runId, currentNode.id, "Concrete plan created", concretePlan.summary);
-      if (!isProjectStructureInspection && currentNode.depth === 0) {
-        const inspectedPlan = await this.resolveProjectStructureInspectionLoop(
-          currentNode,
-          consolidatedEvidence,
-          concretePlan
-        );
-        currentNode = inspectedPlan.node;
-        concretePlan = inspectedPlan.concretePlan;
-      }
-
-      const phaseResults: RootPhaseResults = {
-        abstractPlan,
-        gather,
-        consolidatedEvidence,
-        concretePlan
-      };
-
-      if (isProjectStructureInspection) {
-        if (concretePlan.childTasks.length > 0) {
-          this.engine.appendEvent(currentNode.runId, currentNode.id, "scheduler_progress", {
-            message: "Ignoring inspection child tasks because inspection nodes only refresh project structure memory",
-            proposedChildCount: concretePlan.childTasks.length
-          });
-        }
-
-        this.resolveCoveredQuestions(currentNode, {
-          abstractPlanSummary: abstractPlan.summary,
-          gatherSummary: gather.summary,
-          concretePlanSummary: concretePlan.summary,
-          outputs: [],
-          verifySummaries: [concretePlan.summary],
-          evidenceBundles: [consolidatedEvidence]
-        });
-        this.markPendingAcceptanceCriteriaMet(currentNode.id);
-        this.throwIfCancelled(currentNode.runId, currentNode.id);
-        currentNode = this.engine.transitionNode(nodeId, "done");
-
-        return {
-          node: currentNode,
-          phaseResults,
-          outputs: [],
-          verifySummaries: [concretePlan.summary]
-        };
-      }
-
-      const canDecomposeFurther = this.canDecomposeFurther(currentNode);
-      const shouldSkipTrivialDecomposition = allowDecomposition && this.shouldSkipDecompositionForShortTestGoal(currentNode);
-      if (allowDecomposition && concretePlan.childTasks.length > 0 && canDecomposeFurther && !shouldSkipTrivialDecomposition) {
-        const childTitles = concretePlan.childTasks.map((task) => task.title);
-        this.engine.appendEvent(currentNode.runId, currentNode.id, "node_decomposed", {
-          childCount: concretePlan.childTasks.length,
-          childTitles
-        });
-
-        const outputs: string[] = [];
-        const verifySummaries: string[] = [];
-
-        const childOutcomes = await this.scheduler.executeChildrenInOrder(
-          concretePlan.childTasks,
-          async (childTask, index) => {
-            this.throwIfCancelled(currentNode.runId, currentNode.id);
-            const { childNode } = this.engine.createChildNode(currentNode.id, {
-              title: childTask.title,
-              objective: childTask.objective,
-              assignedModels: childTask.assignedModels,
-              reviewPolicy: childTask.reviewPolicy,
-              acceptanceCriteria: childTask.acceptanceCriteria,
-              executionBudget: childTask.executionBudget
-            });
-
-            this.engine.appendEvent(currentNode.runId, childNode.id, "scheduler_progress", {
-              message: "Executing child subtree",
-              parentNodeId: currentNode.id,
-              childIndex: index,
-              childCount: concretePlan.childTasks.length
-            });
-
-            return this.executeNode(childNode.id, allowDecomposition);
-          }
-        );
-
-        for (const childOutcome of childOutcomes) {
-          this.throwIfCancelled(currentNode.runId, currentNode.id);
-          outputs.push(...childOutcome.outputs);
-          verifySummaries.push(...childOutcome.verifySummaries);
-        }
-
-        this.resolveCoveredQuestions(currentNode, {
-          abstractPlanSummary: abstractPlan.summary,
-          gatherSummary: gather.summary,
-          concretePlanSummary: concretePlan.summary,
-          outputs,
-          verifySummaries,
-          evidenceBundles: [consolidatedEvidence]
-        });
-        this.markPendingAcceptanceCriteriaMet(currentNode.id);
-        currentNode = this.engine.transitionNode(nodeId, "done");
-
-        return {
-          node: currentNode,
-          phaseResults,
-          outputs,
-          verifySummaries
-        };
-      }
-
-      if (allowDecomposition && concretePlan.childTasks.length > 0 && shouldSkipTrivialDecomposition) {
-        this.engine.appendEvent(currentNode.runId, currentNode.id, "scheduler_progress", {
-          message: "Skipping decomposition because the goal requested a short test tree",
-          nodeDepth: currentNode.depth,
-          proposedChildCount: concretePlan.childTasks.length
-        });
-      }
-
-      if (allowDecomposition && concretePlan.childTasks.length > 0 && !canDecomposeFurther) {
-        const maxDepth = this.getMaxDecompositionDepth(currentNode);
-        this.engine.appendEvent(currentNode.runId, currentNode.id, "scheduler_progress", {
-          message: "Skipping decomposition because max depth was reached",
-          nodeDepth: currentNode.depth,
-          maxDepth,
-          proposedChildCount: concretePlan.childTasks.length
-        });
-      }
-
-      let review: ReviewResult | undefined;
-      if (this.shouldRunReview(currentNode)) {
-        this.throwIfCancelled(currentNode.runId, currentNode.id);
-        currentNode = this.engine.transitionNode(nodeId, "review");
-        review = await this.invokeCapability<ReviewResult>(currentNode, "reviewer", "review", [consolidatedEvidence]);
-        phaseResults.review = review;
-        this.recordDecision(currentNode.runId, currentNode.id, "Review completed", review.summary);
-
-        if (!review.approved) {
-          throw new ReviewRejectedError(currentNode.id, review.summary);
-        }
-      }
-
-      this.throwIfCancelled(currentNode.runId, currentNode.id);
-      currentNode = this.engine.transitionNode(nodeId, "execute");
-      const execute = await this.invokeCapability<ExecuteResult>(currentNode, "executor", "execute", [consolidatedEvidence]);
-      phaseResults.execute = execute;
-      this.recordDecision(currentNode.runId, currentNode.id, "Execution completed", execute.summary);
-
-      this.throwIfCancelled(currentNode.runId, currentNode.id);
-      currentNode = this.engine.transitionNode(nodeId, "verify");
-      const verify = await this.invokeCapability<VerifyResult>(currentNode, "verifier", "verify", [consolidatedEvidence]);
-      phaseResults.verify = verify;
-      this.recordDecision(currentNode.runId, currentNode.id, "Verification completed", verify.summary);
-
-      if (!verify.passed) {
-        throw new VerificationFailedError(currentNode.id, verify.summary);
-      }
-
-      this.resolveCoveredQuestions(currentNode, {
-        abstractPlanSummary: abstractPlan.summary,
-        gatherSummary: gather.summary,
-        concretePlanSummary: concretePlan.summary,
-        reviewSummary: review?.summary,
-        executeSummary: execute.summary,
-        outputs: execute.outputs,
-        verifySummaries: [verify.summary, ...verify.findings],
-        evidenceBundles: [consolidatedEvidence]
-      });
-      this.markPendingAcceptanceCriteriaMet(currentNode.id);
-      this.throwIfCancelled(currentNode.runId, currentNode.id);
-      currentNode = this.engine.transitionNode(nodeId, "done");
-
-      return {
-        node: currentNode,
-        phaseResults,
-        outputs: execute.outputs.length > 0 ? execute.outputs : [execute.summary],
-        verifySummaries: [verify.summary]
-      };
+      return await (startingNode.kind === "execution"
+        ? this.executeExecutionNode(startingNode)
+        : this.executePlanningNode(startingNode, allowDecomposition));
     } catch (error) {
       if (this.isCancellationError(error)) {
         throw this.toCancellationError(error, startingNode.runId, nodeId);
@@ -564,6 +351,386 @@ export class OrchestratorRuntime {
       this.escalateRunIfPossible(nodeId);
       throw error;
     }
+  }
+
+  private async executePlanningNode(startingNode: PlanNode, allowDecomposition: boolean): Promise<NodeExecutionOutcome> {
+    const nodeId = startingNode.id;
+    const isProjectStructureInspection = this.isProjectStructureInspectionNode(startingNode);
+    const seededEvidence = this.getNodeEvidenceBundles(startingNode);
+    let currentNode = this.engine.transitionNode(nodeId, "abstract_plan");
+    const abstractPlan = await this.invokeCapability<AbstractPlanResult>(
+      currentNode,
+      "abstractPlanner",
+      "abstractPlan",
+      seededEvidence
+    );
+    this.recordAbstractPlanning(currentNode, abstractPlan);
+
+    this.throwIfCancelled(currentNode.runId, currentNode.id);
+    currentNode = this.engine.transitionNode(nodeId, "gather");
+    const gather = await this.invokeCapability<GatherResult>(currentNode, "gatherer", "gather", seededEvidence);
+    this.mergeProjectStructureReport(currentNode, gather.projectStructure);
+    const gatheredBundles = gather.evidenceBundles.map((bundleDraft) =>
+      this.materializeEvidenceBundle(currentNode, bundleDraft)
+    );
+
+    for (const bundle of gatheredBundles) {
+      this.evidenceStore.upsertBundle(bundle);
+      this.engine.attachEvidenceBundle(currentNode.id, bundle.id);
+      this.ingestEvidenceBundle(currentNode.id, bundle);
+    }
+
+    this.throwIfCancelled(currentNode.runId, currentNode.id);
+    currentNode = this.engine.transitionNode(nodeId, "evidence_consolidation");
+    const bundleIdsForConsolidation = [
+      ...seededEvidence.map((bundle) => bundle.id),
+      ...gatheredBundles.map((bundle) => bundle.id)
+    ];
+    const consolidatedEvidence = this.evidenceStore.mergeBundles({
+      runId: currentNode.runId,
+      nodeId: currentNode.id,
+      bundleIds: bundleIdsForConsolidation,
+      summary: gather.summary
+    });
+    this.evidenceStore.upsertBundle(consolidatedEvidence);
+    this.engine.attachEvidenceBundle(currentNode.id, consolidatedEvidence.id);
+
+    this.throwIfCancelled(currentNode.runId, currentNode.id);
+    currentNode = this.engine.transitionNode(nodeId, "concrete_plan");
+    let concretePlan = await this.invokeCapability<ConcretePlanResult>(
+      currentNode,
+      "concretePlanner",
+      "concretePlan",
+      [consolidatedEvidence]
+    );
+    this.recordDecision(currentNode.runId, currentNode.id, "Concrete plan created", concretePlan.summary);
+    if (!isProjectStructureInspection && currentNode.depth === 0) {
+      const inspectedPlan = await this.resolveProjectStructureInspectionLoop(
+        currentNode,
+        consolidatedEvidence,
+        concretePlan
+      );
+      currentNode = inspectedPlan.node;
+      concretePlan = inspectedPlan.concretePlan;
+    }
+
+    const phaseResults: NodePhaseResults = {
+      abstractPlan,
+      gather,
+      consolidatedEvidence,
+      concretePlan
+    };
+
+    if (isProjectStructureInspection) {
+      if (concretePlan.childTasks.length > 0) {
+        this.engine.appendEvent(currentNode.runId, currentNode.id, "scheduler_progress", {
+          message: "Ignoring inspection child tasks because inspection nodes only refresh project structure memory",
+          proposedChildCount: concretePlan.childTasks.length
+        });
+      }
+
+      this.resolveCoveredQuestions(currentNode, {
+        abstractPlanSummary: abstractPlan.summary,
+        gatherSummary: gather.summary,
+        concretePlanSummary: concretePlan.summary,
+        outputs: [],
+        verifySummaries: [concretePlan.summary],
+        evidenceBundles: [consolidatedEvidence]
+      });
+      this.markPendingAcceptanceCriteriaMet(currentNode.id);
+      this.throwIfCancelled(currentNode.runId, currentNode.id);
+      currentNode = this.engine.transitionNode(nodeId, "done");
+
+      return {
+        node: currentNode,
+        phaseResults,
+        outputs: [],
+        verifySummaries: [concretePlan.summary]
+      };
+    }
+
+    const canDecomposeFurther = this.canDecomposeFurther(currentNode);
+    const shouldSkipTrivialDecomposition = allowDecomposition && this.shouldSkipDecompositionForShortTestGoal(currentNode);
+    if (allowDecomposition && concretePlan.childTasks.length > 0 && canDecomposeFurther && !shouldSkipTrivialDecomposition) {
+      const childTitles = concretePlan.childTasks.map((task) => task.title);
+      this.engine.appendEvent(currentNode.runId, currentNode.id, "node_decomposed", {
+        childCount: concretePlan.childTasks.length,
+        childTitles
+      });
+
+      const outputs: string[] = [];
+      const verifySummaries: string[] = [];
+
+      const childOutcomes = await this.scheduler.executeChildrenInOrder(
+        concretePlan.childTasks,
+        async (childTask, index) => {
+          this.throwIfCancelled(currentNode.runId, currentNode.id);
+          const { childNode } = this.engine.createChildNode(currentNode.id, {
+            title: childTask.title,
+            objective: childTask.objective,
+            kind: "planning",
+            assignedModels: this.requirePlanningChildTaskAssignedModels(currentNode, childTask),
+            reviewPolicy: childTask.reviewPolicy,
+            acceptanceCriteria: childTask.acceptanceCriteria,
+            executionBudget: childTask.executionBudget
+          });
+
+          this.engine.appendEvent(currentNode.runId, childNode.id, "scheduler_progress", {
+            message: "Executing child subtree",
+            parentNodeId: currentNode.id,
+            childIndex: index,
+            childCount: concretePlan.childTasks.length
+          });
+
+          return this.executeNode(childNode.id, allowDecomposition);
+        }
+      );
+
+      for (const childOutcome of childOutcomes) {
+        this.throwIfCancelled(currentNode.runId, currentNode.id);
+        outputs.push(...childOutcome.outputs);
+        verifySummaries.push(...childOutcome.verifySummaries);
+        phaseResults.review ??= childOutcome.phaseResults.review;
+        phaseResults.execute ??= childOutcome.phaseResults.execute;
+        phaseResults.verify ??= childOutcome.phaseResults.verify;
+      }
+
+      this.resolveCoveredQuestions(currentNode, {
+        abstractPlanSummary: abstractPlan.summary,
+        gatherSummary: gather.summary,
+        concretePlanSummary: concretePlan.summary,
+        reviewSummary: phaseResults.review?.summary,
+        executeSummary: phaseResults.execute?.summary,
+        outputs,
+        verifySummaries,
+        evidenceBundles: [consolidatedEvidence]
+      });
+      this.markPendingAcceptanceCriteriaMet(currentNode.id);
+      currentNode = this.engine.transitionNode(nodeId, "done");
+
+      return {
+        node: currentNode,
+        phaseResults,
+        outputs,
+        verifySummaries
+      };
+    }
+
+    if (allowDecomposition && concretePlan.childTasks.length > 0 && shouldSkipTrivialDecomposition) {
+      this.engine.appendEvent(currentNode.runId, currentNode.id, "scheduler_progress", {
+        message: "Skipping decomposition because the goal requested a short test tree",
+        nodeDepth: currentNode.depth,
+        proposedChildCount: concretePlan.childTasks.length
+      });
+    }
+
+    if (allowDecomposition && concretePlan.childTasks.length > 0 && !canDecomposeFurther) {
+      const maxDepth = this.getMaxDecompositionDepth(currentNode);
+      this.engine.appendEvent(currentNode.runId, currentNode.id, "scheduler_progress", {
+        message: "Skipping decomposition because max depth was reached",
+        nodeDepth: currentNode.depth,
+        maxDepth,
+        proposedChildCount: concretePlan.childTasks.length
+      });
+    }
+
+    const executionOutcome = await this.executeExecutionLeafForPlan(currentNode, consolidatedEvidence, concretePlan);
+    phaseResults.review = executionOutcome.phaseResults.review;
+    phaseResults.execute = executionOutcome.phaseResults.execute;
+    phaseResults.verify = executionOutcome.phaseResults.verify;
+
+    this.resolveCoveredQuestions(currentNode, {
+      abstractPlanSummary: abstractPlan.summary,
+      gatherSummary: gather.summary,
+      concretePlanSummary: concretePlan.summary,
+      reviewSummary: executionOutcome.phaseResults.review?.summary,
+      executeSummary: executionOutcome.phaseResults.execute?.summary,
+      outputs: executionOutcome.outputs,
+      verifySummaries: executionOutcome.verifySummaries,
+      evidenceBundles: [consolidatedEvidence]
+    });
+    this.markPendingAcceptanceCriteriaMet(currentNode.id);
+    this.throwIfCancelled(currentNode.runId, currentNode.id);
+    currentNode = this.engine.transitionNode(nodeId, "done");
+
+    return {
+      node: currentNode,
+      phaseResults,
+      outputs: executionOutcome.outputs,
+      verifySummaries: executionOutcome.verifySummaries
+    };
+  }
+
+  private async executeExecutionNode(startingNode: PlanNode): Promise<NodeExecutionOutcome> {
+    const nodeId = startingNode.id;
+    const executionEvidence = this.getNodeEvidenceBundles(startingNode);
+    let currentNode = startingNode;
+    let review: ReviewResult | undefined;
+    const phaseResults: NodePhaseResults = {};
+
+    if (this.shouldRunReview(currentNode)) {
+      this.throwIfCancelled(currentNode.runId, currentNode.id);
+      currentNode = this.engine.transitionNode(nodeId, "review");
+      review = await this.invokeCapability<ReviewResult>(currentNode, "reviewer", "review", executionEvidence);
+      phaseResults.review = review;
+      this.recordDecision(currentNode.runId, currentNode.id, "Review completed", review.summary);
+
+      if (!review.approved) {
+        throw new ReviewRejectedError(currentNode.id, review.summary);
+      }
+    }
+
+    this.throwIfCancelled(currentNode.runId, currentNode.id);
+    currentNode = this.engine.transitionNode(nodeId, "execute");
+    const execute = await this.invokeCapability<ExecuteResult>(currentNode, "executor", "execute", executionEvidence);
+    phaseResults.execute = execute;
+    this.recordDecision(currentNode.runId, currentNode.id, "Execution completed", execute.summary);
+
+    this.throwIfCancelled(currentNode.runId, currentNode.id);
+    currentNode = this.engine.transitionNode(nodeId, "verify");
+    const verify = await this.invokeCapability<VerifyResult>(currentNode, "verifier", "verify", executionEvidence);
+    phaseResults.verify = verify;
+    this.recordDecision(currentNode.runId, currentNode.id, "Verification completed", verify.summary);
+
+    if (!verify.passed) {
+      throw new VerificationFailedError(currentNode.id, verify.summary);
+    }
+
+    this.resolveCoveredQuestions(currentNode, {
+      reviewSummary: review?.summary,
+      executeSummary: execute.summary,
+      outputs: execute.outputs,
+      verifySummaries: [verify.summary, ...verify.findings],
+      evidenceBundles: executionEvidence
+    });
+    this.markPendingAcceptanceCriteriaMet(currentNode.id);
+    this.throwIfCancelled(currentNode.runId, currentNode.id);
+    currentNode = this.engine.transitionNode(nodeId, "done");
+
+    return {
+      node: currentNode,
+      phaseResults,
+      outputs: execute.outputs.length > 0 ? execute.outputs : [execute.summary],
+      verifySummaries: [verify.summary]
+    };
+  }
+
+  private async executeExecutionLeafForPlan(
+    planNode: PlanNode,
+    consolidatedEvidence: EvidenceBundle,
+    concretePlan: ConcretePlanResult
+  ): Promise<NodeExecutionOutcome> {
+    this.throwIfCancelled(planNode.runId, planNode.id);
+    const { childNode } = this.engine.createChildNode(planNode.id, {
+      title: `${planNode.title} / execution`,
+      objective: this.buildExecutionObjective(planNode, concretePlan),
+      kind: "execution",
+      assignedModels: this.buildExecutionAssignedModels(planNode),
+      reviewPolicy: planNode.reviewPolicy
+    });
+    this.engine.attachEvidenceBundle(childNode.id, consolidatedEvidence.id);
+    this.engine.appendEvent(planNode.runId, childNode.id, "scheduler_progress", {
+      message: "Executing dedicated execution node",
+      parentNodeId: planNode.id
+    });
+
+    return this.executeNode(childNode.id, false);
+  }
+
+  private buildExecutionObjective(node: PlanNode, concretePlan: ConcretePlanResult): string {
+    const sections = [node.objective.trim()];
+
+    if (concretePlan.summary.trim().length > 0) {
+      sections.push(`Execution plan summary: ${concretePlan.summary.trim()}`);
+    }
+
+    if (concretePlan.executionNotes.length > 0) {
+      sections.push(`Execution notes:\n${concretePlan.executionNotes.map((note) => `- ${note}`).join("\n")}`);
+    }
+
+    return sections.filter((section) => section.length > 0).join("\n\n");
+  }
+
+  private buildExecutionAssignedModels(node: PlanNode): ModelAssignment {
+    const executor = node.assignedModels.executor;
+    if (!this.isValidModelRef(executor)) {
+      throw new MissingModelAssignmentError(node.id, "executor");
+    }
+
+    const verifier = node.assignedModels.verifier;
+    if (!this.isValidModelRef(verifier)) {
+      throw new MissingModelAssignmentError(node.id, "verifier");
+    }
+
+    const assignment: ModelAssignment = {
+      executor,
+      verifier
+    };
+
+    if (node.reviewPolicy !== "none") {
+      const reviewer = node.assignedModels.reviewer;
+      if (!this.isValidModelRef(reviewer)) {
+        throw new MissingModelAssignmentError(node.id, "reviewer");
+      }
+      assignment.reviewer = reviewer;
+    }
+
+    return assignment;
+  }
+
+  private requirePlanningChildTaskAssignedModels(
+    parentNode: PlanNode,
+    childTask: ConcretePlanResult["childTasks"][number]
+  ): ModelAssignment {
+    const assignedModels = childTask.assignedModels;
+    const effectiveReviewPolicy = childTask.reviewPolicy ?? parentNode.reviewPolicy;
+    const requiredRoles: AssignedModelRole[] = [
+      "abstractPlanner",
+      "gatherer",
+      "concretePlanner",
+      "executor",
+      "verifier"
+    ];
+
+    if (effectiveReviewPolicy !== "none") {
+      requiredRoles.push("reviewer");
+    }
+
+    for (const role of requiredRoles) {
+      if (!this.isValidModelRef(assignedModels?.[role])) {
+        throw new MissingChildTaskModelAssignmentError(parentNode.id, childTask.title, role);
+      }
+    }
+
+    return assignedModels!;
+  }
+
+  private isValidModelRef(value: ModelRef | undefined): value is ModelRef {
+    return Boolean(
+      value
+      && typeof value.id === "string"
+      && value.id.trim().length > 0
+      && typeof value.provider === "string"
+      && value.provider.trim().length > 0
+      && typeof value.model === "string"
+      && value.model.trim().length > 0
+    );
+  }
+
+  private requireRootPhaseResults(phaseResults: NodePhaseResults, nodeId: string): RootPhaseResults {
+    if (!phaseResults.abstractPlan || !phaseResults.gather || !phaseResults.consolidatedEvidence || !phaseResults.concretePlan) {
+      throw new Error(`Root planning node ${nodeId} did not produce the required planning phase results`);
+    }
+
+    return {
+      abstractPlan: phaseResults.abstractPlan,
+      gather: phaseResults.gather,
+      consolidatedEvidence: phaseResults.consolidatedEvidence,
+      concretePlan: phaseResults.concretePlan,
+      review: phaseResults.review,
+      execute: phaseResults.execute,
+      verify: phaseResults.verify
+    };
   }
 
   private shouldRunReview(node: PlanNode): boolean {
@@ -614,45 +781,19 @@ export class OrchestratorRuntime {
       throw new MissingModelAssignmentError(node.id, role);
     }
 
-    const modelForInvocation = this.resolveModelForInvocation(node, capability, assignedModel);
-    const adapter = this.adapterRegistry.resolve(modelForInvocation, capability);
-    const context = this.buildInvocationContext(node, modelForInvocation, capability, evidenceBundles);
+    const adapter = this.adapterRegistry.resolve(assignedModel, capability);
+    const context = this.buildInvocationContext(node, assignedModel, capability, evidenceBundles);
     const invocation = this.getInvocation(adapter, capability);
     try {
       const result = await invocation(context) as TResult;
       this.throwIfCancelled(node.runId, node.id);
-      this.recordModelInvocation(node, role, capability, modelForInvocation, result.debug, result);
+      this.recordModelInvocation(node, role, capability, assignedModel, result.debug, result);
       return result;
     } catch (error) {
       if (this.isCancellationError(error)) {
         throw this.toCancellationError(error, node.runId, node.id);
       }
-
-      if (modelForInvocation.id !== assignedModel.id) {
-        throw error;
-      }
-
-      const fallbackModel = this.resolveFallbackModel(node, capability, assignedModel, error);
-      if (!fallbackModel) {
-        throw error;
-      }
-
-      this.disableModelForRun(node.runId, assignedModel.id);
-      this.engine.appendEvent(node.runId, node.id, "scheduler_progress", {
-        message: "Retrying capability with fallback model",
-        capability,
-        failedModelId: assignedModel.id,
-        fallbackModelId: fallbackModel.id,
-        error: this.formatRuntimeError(error)
-      });
-
-      const fallbackAdapter = this.adapterRegistry.resolve(fallbackModel, capability);
-      const fallbackContext = this.buildInvocationContext(node, fallbackModel, capability, evidenceBundles);
-      const fallbackInvocation = this.getInvocation(fallbackAdapter, capability);
-      const fallbackResult = await fallbackInvocation(fallbackContext) as TResult;
-      this.throwIfCancelled(node.runId, node.id);
-      this.recordModelInvocation(node, role, capability, fallbackModel, fallbackResult.debug, fallbackResult);
-      return fallbackResult;
+      throw error;
     }
   }
 
@@ -859,6 +1000,7 @@ export class OrchestratorRuntime {
     const { childNode } = this.engine.createChildNode(parentNode.id, {
       title: `${parentNode.title} / inspection-${attempt}`,
       objective: inspectionObjective,
+      kind: "planning",
       assignedModels: this.buildInspectionAssignedModels(parentNode),
       reviewPolicy: "none",
       executionBudget: {
@@ -875,7 +1017,11 @@ export class OrchestratorRuntime {
     });
 
     const outcome = await this.executeNode(childNode.id, false);
-    inspectionSummaries.push(outcome.phaseResults.concretePlan.summary);
+    const inspectionConcretePlan = outcome.phaseResults.concretePlan;
+    if (!inspectionConcretePlan) {
+      throw new Error(`Inspection node ${childNode.id} completed without a concrete plan summary`);
+    }
+    inspectionSummaries.push(inspectionConcretePlan.summary);
 
     const resolution = this.dedupeTextEntries(inspectionSummaries).join(" | ") || "Project structure inspection completed";
     const projectStructure = this.requireProjectStructureMemory(parentNode.runId);
@@ -899,25 +1045,59 @@ export class OrchestratorRuntime {
   }
 
   private buildInspectionAssignedModels(parentNode: PlanNode): ModelAssignment | undefined {
-    const inspectionModel = Object.values(parentNode.assignedModels)
-      .filter((model): model is ModelRef => Boolean(model))
-      .sort((left, right) => this.scoreInspectionModel(right) - this.scoreInspectionModel(left))[0];
-
-    if (!inspectionModel) {
+    const allAssignedModels = this.uniqueInspectionModels(Object.values(parentNode.assignedModels));
+    if (allAssignedModels.length === 0) {
       return undefined;
     }
 
+    const planningCandidates = this.uniqueInspectionModels([
+      parentNode.assignedModels.abstractPlanner,
+      parentNode.assignedModels.concretePlanner,
+      parentNode.assignedModels.reviewer,
+      parentNode.assignedModels.verifier,
+      ...allAssignedModels
+    ]);
+    const workerCandidates = this.uniqueInspectionModels([
+      parentNode.assignedModels.gatherer,
+      parentNode.assignedModels.executor,
+      ...allAssignedModels
+    ]);
+
+    const planningModel = [...planningCandidates]
+      .sort((left, right) => this.scoreInspectionPlanningModel(right) - this.scoreInspectionPlanningModel(left))[0]
+      ?? [...allAssignedModels]
+        .sort((left, right) => this.scoreInspectionPlanningModel(right) - this.scoreInspectionPlanningModel(left))[0];
+    const workerModel = [...workerCandidates]
+      .sort((left, right) => this.scoreInspectionWorkerModel(right) - this.scoreInspectionWorkerModel(left))[0]
+      ?? planningModel;
+
     return {
-      abstractPlanner: inspectionModel,
-      gatherer: inspectionModel,
-      concretePlanner: inspectionModel,
-      reviewer: inspectionModel,
-      executor: inspectionModel,
-      verifier: inspectionModel
+      abstractPlanner: planningModel,
+      gatherer: workerModel,
+      concretePlanner: planningModel,
+      reviewer: planningModel,
+      executor: workerModel,
+      verifier: planningModel
     };
   }
 
-  private scoreInspectionModel(model: ModelRef): number {
+  private uniqueInspectionModels(models: Array<ModelRef | undefined>): ModelRef[] {
+    const seen = new Set<string>();
+    const unique: ModelRef[] = [];
+
+    for (const model of models) {
+      if (!model || seen.has(model.id)) {
+        continue;
+      }
+
+      seen.add(model.id);
+      unique.push(model);
+    }
+
+    return unique;
+  }
+
+  private scoreInspectionPlanningModel(model: ModelRef): number {
     const reasoningScore = model.reasoningEffort === "xhigh"
       ? 400
       : model.reasoningEffort === "high"
@@ -932,8 +1112,27 @@ export class OrchestratorRuntime {
       : model.tier === "reviewer"
         ? 30
         : 10;
-    const miniPenalty = /\bmini\b|\bnano\b/i.test(model.model) ? -50 : 0;
-    return reasoningScore + tierScore + miniPenalty;
+    const lightweightPenalty = /\bmini\b|\bnano\b|flash|lite/i.test(model.model) ? -50 : 0;
+    return reasoningScore + tierScore + lightweightPenalty;
+  }
+
+  private scoreInspectionWorkerModel(model: ModelRef): number {
+    const lightweightBonus = /\bmini\b|\bnano\b|flash|lite/i.test(model.model) ? 250 : 0;
+    const tierBonus = model.tier === "lower"
+      ? 150
+      : model.tier === "reviewer"
+        ? 50
+        : 0;
+    const reasoningBonus = model.reasoningEffort === "low"
+      ? 160
+      : model.reasoningEffort === "medium"
+        ? 130
+        : model.reasoningEffort === "high"
+          ? 70
+          : model.reasoningEffort === "xhigh"
+            ? 20
+            : 90;
+    return lightweightBonus + tierBonus + reasoningBonus;
   }
 
   private seedContinuationContext(node: PlanNode, continuation: ContinuationSeed | undefined): number {
@@ -1274,89 +1473,6 @@ export class OrchestratorRuntime {
     if (node.phase === "done" || node.phase === "escalated") return;
     if (!this.engine.canTransition(node.phase, "escalated")) return;
     this.engine.transitionNode(nodeId, "escalated");
-  }
-
-  private resolveFallbackModel(
-    node: PlanNode,
-    capability: OrchestratorCapability,
-    assignedModel: ModelRef,
-    error: unknown
-  ): ModelRef | null {
-    if (!this.shouldRetryManagedGeminiWithCodex(capability, assignedModel, error)) {
-      return null;
-    }
-
-    return this.findFallbackModel(node, capability, assignedModel.id);
-  }
-
-  private resolveModelForInvocation(
-    node: PlanNode,
-    capability: OrchestratorCapability,
-    assignedModel: ModelRef
-  ): ModelRef {
-    if (!this.isModelDisabledForRun(node.runId, assignedModel.id)) {
-      return assignedModel;
-    }
-
-    const fallbackModel = this.findFallbackModel(node, capability, assignedModel.id);
-    if (!fallbackModel) {
-      return assignedModel;
-    }
-
-    this.engine.appendEvent(node.runId, node.id, "scheduler_progress", {
-      message: "Using fallback model because the primary model was disabled earlier in the run",
-      capability,
-      disabledModelId: assignedModel.id,
-      fallbackModelId: fallbackModel.id
-    });
-
-    return fallbackModel;
-  }
-
-  private findFallbackModel(
-    node: PlanNode,
-    capability: OrchestratorCapability,
-    excludedModelId: string
-  ): ModelRef | null {
-    for (const candidate of [
-      node.assignedModels.concretePlanner,
-      node.assignedModels.abstractPlanner,
-      node.assignedModels.reviewer,
-      node.assignedModels.verifier
-    ]) {
-      if (!candidate || candidate.id === excludedModelId) continue;
-      const adapter = this.adapterRegistry.get(candidate.id);
-      if (!adapter?.supports(capability)) continue;
-      return candidate;
-    }
-
-    return null;
-  }
-
-  private disableModelForRun(runId: string, modelId: string) {
-    const disabledModelIds = this.disabledModelIdsByRun.get(runId);
-    if (!disabledModelIds) return;
-    disabledModelIds.add(modelId);
-  }
-
-  private isModelDisabledForRun(runId: string, modelId: string): boolean {
-    return this.disabledModelIdsByRun.get(runId)?.has(modelId) ?? false;
-  }
-
-  private shouldRetryManagedGeminiWithCodex(
-    _capability: OrchestratorCapability,
-    assignedModel: ModelRef,
-    error: unknown
-  ): boolean {
-    const provider = assignedModel.provider.trim().toLowerCase();
-    const modelName = assignedModel.model.trim().toLowerCase();
-    if (provider !== "google" && !modelName.includes("gemini")) {
-      return false;
-    }
-
-    const message = this.formatRuntimeError(error);
-    return message.includes("Failed to parse gemini output")
-      || message.includes("Gemini CLI exited without writing any JSON to stdout");
   }
 
   private formatRuntimeError(error: unknown): string {
