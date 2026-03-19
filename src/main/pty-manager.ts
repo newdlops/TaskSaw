@@ -4,17 +4,30 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import * as pty from "node-pty";
 import { BrowserWindow } from "electron";
-import { CreateSessionInput, SessionInfo, SessionKind } from "./types";
+import { CreateSessionInput, ManagedToolId, SessionInfo, SessionKind } from "./types";
+import { ToolManager } from "./tool-manager";
+import { WorkspaceAccessManager } from "./workspace-access";
+import { BrowserBridge } from "./browser-bridge";
 
 type SessionRecord = {
   info: SessionInfo;
   ptyProcess: pty.IPty;
+  sessionDirectory: string;
+  outputBuffer: string;
+  ansiCarryover: string;
+  rawOutputCarryover: string;
+  pendingBrowserUrl: string | null;
+  pendingBrowserOpenTimer: NodeJS.Timeout | null;
+  recentlyHandledBrowserKeys: Map<string, number>;
 };
 
 type SessionPaths = {
   workspaceDirectory: string;
   sessionDirectory: string;
   homeDirectory: string;
+  runtimeDirectory: string;
+  zshDirectory: string;
+  tmuxDirectory: string;
   tempDirectory: string;
   sandboxProfilePath: string;
 };
@@ -24,56 +37,91 @@ export class PtyManager {
 
   constructor(
     private mainWindow: BrowserWindow,
-    private userDataDirectory: string
-  ) {}
+    private userDataDirectory: string,
+    private toolManager: ToolManager,
+    private workspaceAccessManager: WorkspaceAccessManager,
+    private browserBridge: BrowserBridge
+  ) {
+    this.cleanupStaleSessionDirectories();
+  }
 
-  createSession(input: CreateSessionInput): SessionInfo {
+  async createSession(input: CreateSessionInput): Promise<SessionInfo | null> {
     this.ensureNodePtySpawnHelperExecutable();
 
-    const workspaceDirectory = this.resolveWorkspaceDirectory(input.cwd);
-    const id = randomUUID();
-    const sessionPaths = this.prepareSessionPaths(id, workspaceDirectory);
+    const authorizedWorkspacePath = await this.workspaceAccessManager.acquireWorkspace(
+      input.cwd,
+      this.mainWindow,
+      input.workspaceAccessDialog
+    );
+    if (!authorizedWorkspacePath) return null;
 
-    const info: SessionInfo = {
-      id,
-      kind: input.kind,
-      title: this.makeTitle(input.kind),
-      cwd: workspaceDirectory
-    };
-
-    const sessionEnv = this.buildSessionEnv(sessionPaths);
-    const { command, args } = this.resolveCommand(input.kind, sessionEnv, sessionPaths);
-
-    let ptyProcess: pty.IPty;
+    let sessionPaths: SessionPaths | null = null;
 
     try {
-      ptyProcess = pty.spawn(command, args, {
+      const workspaceDirectory = this.resolveWorkspaceDirectory(authorizedWorkspacePath);
+      const id = randomUUID();
+      sessionPaths = this.prepareSessionPaths(id, workspaceDirectory);
+
+      const info: SessionInfo = {
+        id,
+        kind: input.kind,
+        title: this.makeTitle(input.kind),
+        cwd: workspaceDirectory
+      };
+
+      const sessionEnv = this.buildSessionEnv(sessionPaths);
+      const { command, args, env: launchEnv } = await this.resolveCommand(input.kind, sessionEnv, sessionPaths);
+      const ptyProcess = pty.spawn(command, args, {
         name: "xterm-256color",
         cols: 120,
         rows: 32,
         cwd: workspaceDirectory,
-        env: sessionEnv
+        env: launchEnv
       });
+
+      const record: SessionRecord = {
+        info,
+        ptyProcess,
+        sessionDirectory: sessionPaths.sessionDirectory,
+        outputBuffer: "",
+        ansiCarryover: "",
+        rawOutputCarryover: "",
+        pendingBrowserUrl: null,
+        pendingBrowserOpenTimer: null,
+        recentlyHandledBrowserKeys: new Map<string, number>()
+      };
+
+      ptyProcess.onData((data) => {
+        void this.handleSessionOutput(record, data);
+        this.mainWindow.webContents.send("terminal:data", { sessionId: id, data });
+      });
+
+      ptyProcess.onExit(({ exitCode, signal }) => {
+        this.releaseSession(id);
+        this.mainWindow.webContents.send("terminal:exit", {
+          sessionId: id,
+          exitCode,
+          signal
+        });
+      });
+
+      this.sessions.set(id, {
+        ...record
+      });
+      return info;
     } catch (error) {
+      this.workspaceAccessManager.releaseWorkspace(authorizedWorkspacePath);
+      if (sessionPaths) {
+        this.removeSessionDirectory(sessionPaths.sessionDirectory);
+      }
+
+      if (error instanceof Error && error.message.startsWith(`Failed to start ${input.kind} session with "`)) {
+        throw error;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to start ${input.kind} session with "${command}": ${message}`);
+      throw new Error(`Failed to start ${input.kind} session: ${message}`);
     }
-
-    ptyProcess.onData((data) => {
-      this.mainWindow.webContents.send("terminal:data", { sessionId: id, data });
-    });
-
-    ptyProcess.onExit(({ exitCode, signal }) => {
-      this.sessions.delete(id);
-      this.mainWindow.webContents.send("terminal:exit", {
-        sessionId: id,
-        exitCode,
-        signal
-      });
-    });
-
-    this.sessions.set(id, { info, ptyProcess });
-    return info;
   }
 
   listSessions(): SessionInfo[] {
@@ -96,7 +144,20 @@ export class PtyManager {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.ptyProcess.kill();
+  }
+
+  private releaseSession(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    if (session.pendingBrowserOpenTimer) {
+      clearTimeout(session.pendingBrowserOpenTimer);
+      session.pendingBrowserOpenTimer = null;
+    }
+
     this.sessions.delete(sessionId);
+    this.workspaceAccessManager.releaseWorkspace(session.info.cwd);
+    this.removeSessionDirectory(session.sessionDirectory);
   }
 
   private resolveWorkspaceDirectory(cwd: string): string {
@@ -116,18 +177,31 @@ export class PtyManager {
 
   private prepareSessionPaths(sessionId: string, workspaceDirectory: string): SessionPaths {
     const sessionDirectory = path.join(this.userDataDirectory, "sandbox-sessions", sessionId);
-    const homeDirectory = path.join(sessionDirectory, "home");
+    const homeDirectory = this.toolManager.getHomeDirectory();
+    const runtimeDirectory = this.toolManager.getRuntimeDirectory();
+    const zshDirectory = path.join(runtimeDirectory, "zsh");
+    const tmuxDirectory = path.join(runtimeDirectory, "tmux");
     const tempDirectory = path.join(sessionDirectory, "tmp");
     const sandboxProfilePath = path.join(sessionDirectory, "workspace.sb");
 
     fs.mkdirSync(sessionDirectory, { recursive: true });
     fs.mkdirSync(homeDirectory, { recursive: true });
+    fs.mkdirSync(runtimeDirectory, { recursive: true });
+    fs.mkdirSync(zshDirectory, { recursive: true });
+    fs.mkdirSync(tmuxDirectory, { recursive: true });
+    fs.mkdirSync(path.join(runtimeDirectory, "xdg-cache"), { recursive: true });
+    fs.mkdirSync(path.join(runtimeDirectory, "xdg-config"), { recursive: true });
+    fs.mkdirSync(path.join(runtimeDirectory, "xdg-state"), { recursive: true });
     fs.mkdirSync(tempDirectory, { recursive: true });
+    this.ensureRuntimeShellFiles(zshDirectory);
 
     this.writeSandboxProfile({
       workspaceDirectory,
       sessionDirectory,
       homeDirectory,
+      runtimeDirectory,
+      zshDirectory,
+      tmuxDirectory,
       tempDirectory,
       sandboxProfilePath
     });
@@ -136,6 +210,9 @@ export class PtyManager {
       workspaceDirectory,
       sessionDirectory,
       homeDirectory,
+      runtimeDirectory,
+      zshDirectory,
+      tmuxDirectory,
       tempDirectory,
       sandboxProfilePath
     };
@@ -145,22 +222,79 @@ export class PtyManager {
     const writableSubpaths = [
       sessionPaths.workspaceDirectory,
       sessionPaths.homeDirectory,
+      sessionPaths.runtimeDirectory,
+      sessionPaths.tmuxDirectory,
       sessionPaths.tempDirectory
-    ]
-      .map((subpath) => `(subpath "${this.escapeSandboxPath(subpath)}")`)
-      .join(" ");
+    ];
 
     const sandboxProfile = [
       "(version 1)",
       "(deny default)",
       '(import "system.sb")',
       "(allow file-read*)",
+      "(allow file-read-metadata)",
+      '(allow file-ioctl (regex #"^/dev/tty.*"))',
       "(allow process*)",
+      "(allow signal (target self))",
+      '(allow mach-lookup (global-name "com.apple.SecurityServer"))',
+      '(allow mach-lookup (global-name "com.apple.securityd.xpc"))',
+      '(allow mach-lookup (global-name "com.apple.SystemConfiguration.PPPController"))',
+      '(allow mach-lookup (global-name "com.apple.SystemConfiguration.SCNetworkReachability"))',
+      '(allow mach-lookup (global-name "com.apple.cfnetwork.cfnetworkagent"))',
+      '(allow mach-lookup (global-name "com.apple.dnssd.service"))',
+      '(allow mach-lookup (global-name "com.apple.nehelper"))',
+      '(allow mach-lookup (global-name "com.apple.nesessionmanager"))',
+      '(allow mach-lookup (global-name "com.apple.networkd"))',
+      '(allow mach-lookup (global-name "com.apple.networkscored"))',
+      '(allow mach-lookup (global-name "com.apple.sysmond"))',
+      '(allow mach-lookup (global-name "com.apple.symptomsd"))',
+      '(allow mach-lookup (global-name "com.apple.SystemConfiguration.configd"))',
+      '(allow mach-lookup (global-name "com.apple.usymptomsd"))',
+      '(allow network-outbound (control-name "com.apple.netsrc"))',
+      '(allow network-outbound (control-name "com.apple.network.statistics"))',
+      "(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)) (socket-domain AF_ROUTE))",
+      "(allow sysctl-read)",
+      '(allow user-preference-read (preference-domain "com.apple.CFNetwork" "com.apple.SystemConfiguration"))',
       "(allow network*)",
-      `(allow file-write* ${writableSubpaths})`
+      `(allow file-write* ${writableSubpaths
+        .map((subpath) => `(subpath "${this.escapeSandboxPath(subpath)}")`)
+        .join(" ")})`
     ].join("\n");
 
     fs.writeFileSync(sessionPaths.sandboxProfilePath, sandboxProfile);
+  }
+
+  private ensureRuntimeShellFiles(zshDirectory: string) {
+    const zshEnvPath = path.join(zshDirectory, ".zshenv");
+    const zshRcPath = path.join(zshDirectory, ".zshrc");
+
+    const zshEnvContent = [
+      "# Generated by TaskSaw.",
+      "export ZDOTDIR=${ZDOTDIR:-$HOME}",
+      ""
+    ].join("\n");
+
+    const zshRcContent = [
+      "# Generated by TaskSaw.",
+      "PROMPT='%F{39}tasksaw%f %1~ %# '",
+      ""
+    ].join("\n");
+
+    fs.writeFileSync(zshEnvPath, zshEnvContent);
+    fs.writeFileSync(zshRcPath, zshRcContent);
+  }
+
+  private cleanupStaleSessionDirectories() {
+    const sessionRootDirectory = path.join(this.userDataDirectory, "sandbox-sessions");
+    if (!fs.existsSync(sessionRootDirectory)) return;
+
+    for (const entry of fs.readdirSync(sessionRootDirectory)) {
+      this.removeSessionDirectory(path.join(sessionRootDirectory, entry));
+    }
+  }
+
+  private removeSessionDirectory(sessionDirectory: string) {
+    fs.rmSync(sessionDirectory, { recursive: true, force: true });
   }
 
   private escapeSandboxPath(targetPath: string): string {
@@ -176,12 +310,16 @@ export class PtyManager {
     kind: SessionKind,
     env: Record<string, string>,
     sessionPaths: SessionPaths
-  ): { command: string; args: string[] } {
+  ): Promise<{ command: string; args: string[]; env: Record<string, string> }> | { command: string; args: string[]; env: Record<string, string> } {
+    if (kind === "codex" || kind === "gemini") {
+      return this.resolveManagedToolCommand(kind, env, sessionPaths);
+    }
+
     const shell = this.resolveShellCommand(env);
-    const shellArgs = this.resolveShellArgs(kind);
+    const shellArgs = this.resolveShellArgs(shell);
 
     if (os.platform() !== "darwin") {
-      return { command: shell, args: shellArgs };
+      return { command: shell, args: shellArgs, env };
     }
 
     const sandboxCommand = this.resolveExecutable("/usr/bin/sandbox-exec", env)
@@ -193,20 +331,368 @@ export class PtyManager {
 
     return {
       command: sandboxCommand,
-      args: ["-f", sessionPaths.sandboxProfilePath, shell, ...shellArgs]
+      args: ["-f", sessionPaths.sandboxProfilePath, shell, ...shellArgs],
+      env
     };
   }
 
-  private resolveShellArgs(kind: SessionKind): string[] {
-    if (kind === "shell") {
-      return ["-i"];
+  private async resolveManagedToolCommand(
+    kind: ManagedToolId,
+    env: Record<string, string>,
+    sessionPaths: SessionPaths
+  ): Promise<{ command: string; args: string[]; env: Record<string, string> }> {
+    const toolCommand = await this.toolManager.resolveLaunchCommand(kind);
+    const launchEnv = {
+      ...env,
+      ...this.buildManagedToolEnv(kind),
+      ...toolCommand.env
+    };
+
+    if (os.platform() !== "darwin") {
+      return {
+        command: toolCommand.command,
+        args: toolCommand.args,
+        env: launchEnv
+      };
+    }
+
+    const sandboxCommand = this.resolveExecutable("/usr/bin/sandbox-exec", launchEnv)
+      ?? this.resolveExecutable("sandbox-exec", launchEnv);
+
+    if (!sandboxCommand) {
+      throw new Error("macOS workspace sandbox is unavailable on this system");
+    }
+
+    return {
+      command: sandboxCommand,
+      args: ["-f", sessionPaths.sandboxProfilePath, toolCommand.command, ...toolCommand.args],
+      env: launchEnv
+    };
+  }
+
+  private buildManagedToolEnv(kind: ManagedToolId): Record<string, string> {
+    const sharedEnv: Record<string, string> = {};
+
+    if (this.browserBridge.isStarted()) {
+      sharedEnv.BROWSER = path.join(this.toolManager.getBinDirectory(), "browser-open");
+      sharedEnv.TASKSAW_BROWSER_BRIDGE_TOKEN = this.browserBridge.getToken();
+      sharedEnv.TASKSAW_BROWSER_BRIDGE_URL = this.browserBridge.getEndpointUrl();
     }
 
     if (kind === "codex") {
-      return ["-ic", "exec codex"];
+      return {
+        ...sharedEnv,
+        ALL_PROXY: "",
+        HTTP_PROXY: "",
+        HTTPS_PROXY: "",
+        NO_PROXY: "*",
+        OTEL_SDK_DISABLED: "true"
+      };
     }
 
-    return ["-ic", "exec gemini"];
+    return {
+      ...sharedEnv,
+      GEMINI_TELEMETRY_ENABLED: "0",
+      OTEL_SDK_DISABLED: "true"
+    };
+  }
+
+  private async handleSessionOutput(session: SessionRecord, data: string) {
+    if (session.info.kind !== "codex") return;
+
+    const rawWindow = `${session.rawOutputCarryover}${data}`;
+    const rawAuthUrls = this.extractCodexAuthUrlsFromRaw(rawWindow);
+    session.rawOutputCarryover = rawWindow.slice(-8_192);
+
+    const strippedChunk = this.stripAnsiChunk(`${session.ansiCarryover}${data}`);
+    session.ansiCarryover = strippedChunk.remainder;
+    if (strippedChunk.plainText) {
+      session.outputBuffer = `${session.outputBuffer}${strippedChunk.plainText}`.slice(-32_000);
+    }
+
+    const plainAuthUrls = this.extractCodexAuthUrlsFromPlainText(session.outputBuffer);
+    const latestAuthUrl = [...rawAuthUrls, ...plainAuthUrls].at(-1);
+    if (!latestAuthUrl) return;
+
+    session.pendingBrowserUrl = latestAuthUrl;
+    if (session.pendingBrowserOpenTimer) {
+      clearTimeout(session.pendingBrowserOpenTimer);
+    }
+
+    session.pendingBrowserOpenTimer = setTimeout(() => {
+      void this.openPendingCodexAuthUrl(session);
+    }, 400);
+  }
+
+  private async openPendingCodexAuthUrl(session: SessionRecord) {
+    session.pendingBrowserOpenTimer = null;
+
+    const authUrl = session.pendingBrowserUrl;
+    session.pendingBrowserUrl = null;
+    if (!authUrl) return;
+
+    if (this.shouldSuppressSessionBrowserOpen(session, authUrl)) {
+      console.log("[TaskSaw] Suppressed duplicate Codex auth browser open:", authUrl);
+      return;
+    }
+
+    try {
+      const opened = await this.browserBridge.openExternal(authUrl);
+      console.log(
+        `[TaskSaw] ${opened ? "Opened" : "Suppressed"} Codex auth URL via browser bridge:`,
+        authUrl
+      );
+    } catch (error) {
+      console.error("[TaskSaw] Failed to open Codex auth URL via browser bridge:", authUrl, error);
+      // Codex also prints the URL in the terminal, so ignore open failures here.
+    }
+  }
+
+  private extractCodexAuthUrlsFromRaw(rawOutput: string): string[] {
+    const matches = new Set<string>();
+    const osc8LinkPattern = new RegExp(String.raw`\u001B\]8;;([^\u0007\u001B]+)(?:\u0007|\u001B\\)`, "g");
+
+    for (const match of rawOutput.matchAll(osc8LinkPattern)) {
+      const normalizedUrl = this.normalizeCodexAuthUrl(match[1]);
+      if (normalizedUrl) {
+        matches.add(normalizedUrl);
+      }
+    }
+
+    return [...matches];
+  }
+
+  private extractCodexAuthUrlsFromPlainText(output: string): string[] {
+    const matches = new Set<string>();
+    const urlPattern = /https?:\/\/[^\s<>"'`]+/gi;
+
+    for (const match of output.matchAll(urlPattern)) {
+      const rawUrl = this.trimUrlPunctuation(match[0]);
+      const normalizedUrl = this.normalizeCodexAuthUrl(rawUrl);
+      if (!normalizedUrl) continue;
+
+      const startIndex = match.index ?? 0;
+      const context = output.slice(
+        Math.max(0, startIndex - 240),
+        Math.min(output.length, startIndex + rawUrl.length + 160)
+      );
+
+      if (!this.looksLikeCodexAuthPrompt(context)) {
+        continue;
+      }
+
+      matches.add(normalizedUrl);
+    }
+
+    return [...matches];
+  }
+
+  private normalizeCodexAuthUrl(rawUrl: string): string | null {
+    let targetUrl: URL;
+
+    try {
+      targetUrl = new URL(rawUrl);
+    } catch {
+      return null;
+    }
+
+    if (targetUrl.hostname.toLowerCase() !== "auth.openai.com") {
+      return null;
+    }
+
+    if (targetUrl.pathname !== "/oauth/authorize") {
+      return null;
+    }
+
+    if (rawUrl.includes("\u0007") || rawUrl.includes("\u001B") || /%07|%1B/i.test(targetUrl.toString())) {
+      return null;
+    }
+
+    const requiredParams = [
+      "response_type",
+      "client_id",
+      "redirect_uri",
+      "scope",
+      "code_challenge",
+      "code_challenge_method",
+      "state"
+    ];
+
+    const paramCounts = new Map<string, number>();
+    for (const [key] of targetUrl.searchParams) {
+      paramCounts.set(key, (paramCounts.get(key) ?? 0) + 1);
+    }
+
+    if ([...paramCounts.values()].some((count) => count > 1)) {
+      return null;
+    }
+
+    if (targetUrl.searchParams.get("response_type") !== "code") {
+      return null;
+    }
+
+    for (const key of requiredParams) {
+      if (!targetUrl.searchParams.get(key)) {
+        return null;
+      }
+    }
+
+    const redirectUrl = targetUrl.searchParams.get("redirect_uri");
+    if (!redirectUrl?.startsWith("http://localhost:") && !redirectUrl?.startsWith("http://127.0.0.1:")) {
+      return null;
+    }
+
+    return targetUrl.toString();
+  }
+
+  private looksLikeCodexAuthPrompt(context: string): boolean {
+    const normalizedContext = context.toLowerCase();
+
+    if (/(if your browser did not open|navigate to this url to authenticate|failed to open browser for|follow instructions in your browser|open this url in your browser)/.test(normalizedContext)) {
+      return true;
+    }
+
+    return /(oauth|auth|login|authorize|consent|deviceauth)/.test(normalizedContext);
+  }
+
+  private shouldSuppressSessionBrowserOpen(session: SessionRecord, rawUrl: string): boolean {
+    let targetUrl: URL;
+    try {
+      targetUrl = new URL(rawUrl);
+    } catch {
+      return true;
+    }
+
+    const dedupeKey = targetUrl.toString();
+    const now = Date.now();
+
+    for (const [key, handledAt] of session.recentlyHandledBrowserKeys) {
+      if (now - handledAt > 15_000) {
+        session.recentlyHandledBrowserKeys.delete(key);
+      }
+    }
+
+    const previousHandledAt = session.recentlyHandledBrowserKeys.get(dedupeKey);
+    if (previousHandledAt && now - previousHandledAt < 15_000) {
+      return true;
+    }
+
+    session.recentlyHandledBrowserKeys.set(dedupeKey, now);
+    return false;
+  }
+
+  private trimUrlPunctuation(rawUrl: string): string {
+    return rawUrl.replace(/[),.;:!?]+$/g, "");
+  }
+
+  private stripAnsiChunk(value: string): { plainText: string; remainder: string } {
+    let result = "";
+
+    for (let index = 0; index < value.length; index += 1) {
+      const character = value[index];
+      if (character !== "\u001B") {
+        result += character;
+        continue;
+      }
+
+      const nextCharacter = value[index + 1];
+      if (!nextCharacter) {
+        return {
+          plainText: result,
+          remainder: value.slice(index)
+        };
+      }
+
+      if (nextCharacter === "[") {
+        index += 2;
+        while (index < value.length && !/[@-~]/.test(value[index])) {
+          index += 1;
+        }
+
+        if (index >= value.length) {
+          return {
+            plainText: result,
+            remainder: value.slice(index - 2)
+          };
+        }
+        continue;
+      }
+
+      if (nextCharacter === "]") {
+        index += 2;
+        let foundTerminator = false;
+
+        while (index < value.length) {
+          if (value[index] === "\u0007") {
+            foundTerminator = true;
+            break;
+          }
+          if (value[index] === "\u001B" && value[index + 1] === "\\") {
+            index += 1;
+            foundTerminator = true;
+            break;
+          }
+          index += 1;
+        }
+
+        if (!foundTerminator) {
+          return {
+            plainText: result,
+            remainder: value.slice(index - 2)
+          };
+        }
+        continue;
+      }
+
+      index += 1;
+    }
+
+    return {
+      plainText: result,
+      remainder: ""
+    };
+  }
+
+  private stripAnsi(value: string): string {
+    let result = "";
+
+    for (let index = 0; index < value.length; index += 1) {
+      const character = value[index];
+      if (character !== "\u001B") {
+        result += character;
+        continue;
+      }
+
+      const nextCharacter = value[index + 1];
+      if (nextCharacter === "[") {
+        index += 2;
+        while (index < value.length && !/[@-~]/.test(value[index])) {
+          index += 1;
+        }
+        continue;
+      }
+
+      if (nextCharacter === "]") {
+        index += 2;
+        while (index < value.length) {
+          if (value[index] === "\u0007") break;
+          if (value[index] === "\u001B" && value[index + 1] === "\\") {
+            index += 1;
+            break;
+          }
+          index += 1;
+        }
+        continue;
+      }
+    }
+
+    return result;
+  }
+
+  private resolveShellArgs(shell: string): string[] {
+    const isSandboxedZsh = os.platform() === "darwin" && path.basename(shell) === "zsh";
+    const baseArgs = isSandboxedZsh ? ["-o", "no_monitor"] : [];
+    return [...baseArgs, "-i"];
   }
 
   private buildSessionEnv(sessionPaths: SessionPaths): Record<string, string> {
@@ -215,16 +701,17 @@ export class PtyManager {
     const env: Record<string, string> = {
       COLORTERM: "truecolor",
       HOME: sessionPaths.homeDirectory,
-      HISTFILE: path.join(sessionPaths.homeDirectory, ".tasksaw_history"),
+      HISTFILE: path.join(sessionPaths.zshDirectory, ".tasksaw_history"),
       LANG: process.env.LANG ?? "en_US.UTF-8",
       LOGNAME: process.env.LOGNAME ?? process.env.USER ?? "tasksaw",
       PATH: pathValue,
       PWD: sessionPaths.workspaceDirectory,
       SHELL: this.resolveShellCommand({ PATH: pathValue }),
       TASKSAW_SANDBOX_MODE: "workspace-write",
-      TASKSAW_SESSION_HOME: sessionPaths.homeDirectory,
+      TASKSAW_SESSION_HOME: sessionPaths.runtimeDirectory,
       TASKSAW_WORKSPACE_ROOT: sessionPaths.workspaceDirectory,
       TERM: "xterm-256color",
+      TMUX_TMPDIR: sessionPaths.tmuxDirectory,
       TMPDIR: sessionPaths.tempDirectory,
       USER: process.env.USER ?? "tasksaw"
     };
@@ -234,7 +721,10 @@ export class PtyManager {
     }
 
     if (os.platform() !== "win32") {
-      env.ZDOTDIR = sessionPaths.homeDirectory;
+      env.XDG_CACHE_HOME = path.join(sessionPaths.runtimeDirectory, "xdg-cache");
+      env.XDG_CONFIG_HOME = path.join(sessionPaths.runtimeDirectory, "xdg-config");
+      env.XDG_STATE_HOME = path.join(sessionPaths.runtimeDirectory, "xdg-state");
+      env.ZDOTDIR = sessionPaths.zshDirectory;
     }
 
     if (os.platform() === "win32") {
@@ -247,7 +737,6 @@ export class PtyManager {
   }
 
   private buildPathEntries(): string[] {
-    const homeDirectory = os.homedir();
     const pathEntries = new Set<string>();
     const appendPath = (value?: string) => {
       if (!value) return;
@@ -255,10 +744,9 @@ export class PtyManager {
     };
 
     appendPath(path.dirname(process.execPath));
+    appendPath(this.toolManager.getBinDirectory());
 
     for (const entry of [
-      path.join(homeDirectory, ".codex", "bin"),
-      path.join(homeDirectory, ".local", "bin"),
       "/opt/homebrew/bin",
       "/opt/homebrew/sbin",
       "/usr/local/bin",

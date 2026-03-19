@@ -1,16 +1,16 @@
-import fs from "node:fs";
 import { BrowserWindow, dialog, ipcMain } from "electron";
 import { PtyManager } from "./pty-manager";
-import { CreateSessionInput } from "./types";
+import { CreateSessionInput, DirectoryDialogOptions } from "./types";
+import { ToolManager } from "./tool-manager";
+import { WorkspaceAccessManager } from "./workspace-access";
 
-type DirectoryDialogOptions = {
-  defaultPath?: string;
-  title?: string;
-  buttonLabel?: string;
-};
-
-export function registerIpc(mainWindow: BrowserWindow, ptyManager: PtyManager) {
-  ipcMain.handle("session:create", (_event, input: CreateSessionInput) => {
+export function registerIpc(
+  mainWindow: BrowserWindow,
+  ptyManager: PtyManager,
+  workspaceAccessManager: WorkspaceAccessManager,
+  toolManager: ToolManager
+) {
+  ipcMain.handle("session:create", async (_event, input: CreateSessionInput) => {
     return ptyManager.createSession(input);
   });
 
@@ -18,34 +18,42 @@ export function registerIpc(mainWindow: BrowserWindow, ptyManager: PtyManager) {
     return ptyManager.listSessions();
   });
 
+  ipcMain.handle("tools:update", async () => {
+    return toolManager.updateAll();
+  });
+
   ipcMain.handle("dialog:select-directory", async (_event, payload: DirectoryDialogOptions = {}) => {
     const result = await dialog.showOpenDialog(mainWindow, {
       defaultPath: payload.defaultPath,
       title: payload.title,
       buttonLabel: payload.buttonLabel,
-      properties: ["openDirectory"]
+      message: payload.message,
+      properties: ["openDirectory"],
+      securityScopedBookmarks: process.platform === "darwin"
     });
 
     if (result.canceled) return null;
-    return result.filePaths[0] ?? null;
+    const selectedPath = result.filePaths[0];
+    if (!selectedPath) return null;
+
+    return workspaceAccessManager.registerSelectedDirectory(selectedPath, result.bookmarks?.[0]);
   });
 
   ipcMain.handle("dialog:create-directory", async (_event, payload: DirectoryDialogOptions = {}) => {
-    const result = await dialog.showSaveDialog(mainWindow, {
+    const result = await dialog.showOpenDialog(mainWindow, {
       defaultPath: payload.defaultPath,
       title: payload.title,
       buttonLabel: payload.buttonLabel,
-      showsTagField: false
+      message: payload.message,
+      properties: ["openDirectory", "createDirectory"],
+      securityScopedBookmarks: process.platform === "darwin"
     });
 
-    if (result.canceled || !result.filePath) return null;
+    if (result.canceled) return null;
+    const selectedPath = result.filePaths[0];
+    if (!selectedPath) return null;
 
-    if (fs.existsSync(result.filePath) && !fs.statSync(result.filePath).isDirectory()) {
-      throw new Error(`Path already exists and is not a directory: ${result.filePath}`);
-    }
-
-    fs.mkdirSync(result.filePath, { recursive: true });
-    return fs.realpathSync(result.filePath);
+    return workspaceAccessManager.registerSelectedDirectory(selectedPath, result.bookmarks?.[0]);
   });
 
   ipcMain.on("terminal:write", (_event, payload: { sessionId: string; data: string }) => {

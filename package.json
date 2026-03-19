@@ -1,5 +1,6 @@
 {
   "name": "tasksaw",
+  "productName": "TaskSaw",
   "version": "0.1.0",
   "private": true,
   "main": "dist/main/main.js",

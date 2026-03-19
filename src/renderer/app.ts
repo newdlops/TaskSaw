@@ -14,15 +14,27 @@ type SessionInfo = {
 
 type TerminalDataPayload = { sessionId: string; data: string };
 type TerminalExitPayload = { sessionId: string; exitCode: number; signal: number };
+type ManagedToolStatus = {
+  id: "codex" | "gemini";
+  displayName: string;
+  installed: boolean;
+  version: string | null;
+};
 type DirectoryDialogOptions = {
   defaultPath?: string;
   title?: string;
   buttonLabel?: string;
+  message?: string;
 };
 
 type TasksawApi = {
-  createSession(input: { kind: SessionKind; cwd: string }): Promise<SessionInfo>;
+  createSession(input: {
+    kind: SessionKind;
+    cwd: string;
+    workspaceAccessDialog?: DirectoryDialogOptions;
+  }): Promise<SessionInfo | null>;
   listSessions(): Promise<SessionInfo[]>;
+  updateManagedTools(): Promise<ManagedToolStatus[]>;
   selectDirectory(options?: DirectoryDialogOptions): Promise<string | null>;
   createDirectory(options?: DirectoryDialogOptions): Promise<string | null>;
   writeTerminal(sessionId: string, data: string): void;
@@ -59,12 +71,18 @@ const TEXT = {
       openDialogButton: "Open Folder",
       createDialogTitle: "Create workspace",
       createDialogButton: "Create Folder",
+      permissionDialogTitle: "Grant workspace access",
+      permissionDialogButton: "Grant Access",
+      permissionDialogMessage: "TaskSaw needs folder access before starting this terminal. Select the workspace folder.",
+      toolsUpdate: "Update AI Tools",
       close: "Close",
       statusLive: "live",
       statusExited: "exited"
     },
     logs: {
       workspaceReady: "workspace ready: {cwd}",
+      preparingTool: "preparing {tool}…",
+      toolsUpdated: "managed tools updated: {details}",
       created: "created: {title} @ {cwd}",
       closed: "closed: {title} @ {cwd}",
       exited: "session exited: {sessionId} (code={exitCode}, signal={signal})"
@@ -100,12 +118,18 @@ const TEXT = {
       openDialogButton: "폴더 열기",
       createDialogTitle: "워크스페이스 만들기",
       createDialogButton: "폴더 만들기",
+      permissionDialogTitle: "워크스페이스 접근 권한 부여",
+      permissionDialogButton: "권한 부여",
+      permissionDialogMessage: "이 터미널을 시작하려면 TaskSaw가 폴더 접근 권한을 받아야 합니다. 워크스페이스 폴더를 선택하세요.",
+      toolsUpdate: "AI 도구 업데이트",
       close: "닫기",
       statusLive: "실행 중",
       statusExited: "종료됨"
     },
     logs: {
       workspaceReady: "워크스페이스 준비됨: {cwd}",
+      preparingTool: "{tool} 준비 중…",
+      toolsUpdated: "관리형 도구 업데이트 완료: {details}",
       created: "생성됨: {title} @ {cwd}",
       closed: "닫힘: {title} @ {cwd}",
       exited: "세션 종료: {sessionId} (code={exitCode}, signal={signal})"
@@ -133,6 +157,7 @@ const workspaceCreateButton = document.getElementById("workspace-create") as HTM
 const newShellButton = document.getElementById("new-shell") as HTMLButtonElement;
 const newCodexButton = document.getElementById("new-codex") as HTMLButtonElement;
 const newGeminiButton = document.getElementById("new-gemini") as HTMLButtonElement;
+const toolsUpdateButton = document.getElementById("tools-update") as HTMLButtonElement;
 const sessionSectionTitle = document.getElementById("session-section-title") as HTMLDivElement;
 const sessionListEl = document.getElementById("session-list") as HTMLUListElement;
 const terminalRoot = document.getElementById("terminal-root") as HTMLDivElement;
@@ -208,6 +233,7 @@ let themePreference: ThemePreference = getInitialThemePreference();
 let languagePreference: LanguageCode = getInitialLanguagePreference();
 let currentWorkspacePath: string | null = getInitialWorkspacePath();
 let lastLogMessage: UiMessage = null;
+let isToolUpdateRunning = false;
 
 function translate(key: string, params: Record<string, string> = {}): string {
   const resolvedValue = key.split(".").reduce<unknown>((current, part) => {
@@ -372,6 +398,7 @@ function updateWorkspaceSummary() {
   workspaceLabelEl.textContent = translate("ui.workspaceLabel");
   workspaceOpenButton.textContent = translate("ui.workspaceOpen");
   workspaceCreateButton.textContent = translate("ui.workspaceCreate");
+  toolsUpdateButton.textContent = translate("ui.toolsUpdate");
   workspacePathEl.textContent = currentWorkspacePath ?? translate("ui.workspaceUnset");
   workspacePathEl.classList.toggle("empty", currentWorkspacePath === null);
   workspacePathEl.title = currentWorkspacePath ?? "";
@@ -380,8 +407,9 @@ function updateWorkspaceSummary() {
 function updateSessionCreationState() {
   const disabled = currentWorkspacePath === null;
   newShellButton.disabled = disabled;
-  newCodexButton.disabled = disabled;
-  newGeminiButton.disabled = disabled;
+  newCodexButton.disabled = disabled || isToolUpdateRunning;
+  newGeminiButton.disabled = disabled || isToolUpdateRunning;
+  toolsUpdateButton.disabled = isToolUpdateRunning;
 }
 
 function refreshTerminalPaneCopy() {
@@ -700,17 +728,50 @@ async function createSession(kind: SessionKind) {
     return;
   }
 
-  const session = await appWindow.tasksaw.createSession({ kind, cwd: currentWorkspacePath });
+  if (kind !== "shell") {
+    logLocalized("logs.preparingTool", { tool: translateKind(kind) });
+  }
+
+  const session = await appWindow.tasksaw.createSession({
+    kind,
+    cwd: currentWorkspacePath,
+    workspaceAccessDialog: {
+      defaultPath: currentWorkspacePath,
+      title: translate("ui.permissionDialogTitle"),
+      buttonLabel: translate("ui.permissionDialogButton"),
+      message: translate("ui.permissionDialogMessage")
+    }
+  });
+  if (!session) return;
+
+  setCurrentWorkspacePath(session.cwd);
   sessions.push(session);
   renderSessionList();
   mountTerminal(session);
   setActiveSession(session.id);
   scheduleFitAllSessions();
-  persistWorkspacePath(currentWorkspacePath);
+  persistWorkspacePath(session.cwd);
   logLocalized("logs.created", {
     title: session.title,
     cwd: session.cwd
   });
+}
+
+async function updateManagedTools() {
+  isToolUpdateRunning = true;
+  updateSessionCreationState();
+  logRaw("Updating managed Codex/Gemini...");
+
+  try {
+    const statuses = await appWindow.tasksaw.updateManagedTools();
+    const details = statuses
+      .map((status) => `${status.displayName} ${status.version ?? "unknown"}`)
+      .join(", ");
+    logLocalized("logs.toolsUpdated", { details });
+  } finally {
+    isToolUpdateRunning = false;
+    updateSessionCreationState();
+  }
 }
 
 async function handleCreateSession(kind: SessionKind) {
@@ -767,6 +828,7 @@ workspaceCreateButton.addEventListener("click", () => void createWorkspaceDirect
 newShellButton.addEventListener("click", () => void handleCreateSession("shell"));
 newCodexButton.addEventListener("click", () => void handleCreateSession("codex"));
 newGeminiButton.addEventListener("click", () => void handleCreateSession("gemini"));
+toolsUpdateButton.addEventListener("click", () => void updateManagedTools());
 
 for (const button of themeButtons) {
   const themeOption = button.dataset.themeOption;
