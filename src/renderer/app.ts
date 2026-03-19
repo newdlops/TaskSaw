@@ -1,7 +1,9 @@
 type SessionKind = "shell" | "codex" | "gemini";
-type ThemePreference = "system" | "light" | "dark";
+type ManagedToolId = Extract<SessionKind, "codex" | "gemini">;
+type ThemePreference = "light" | "dark";
 type ResolvedTheme = "light" | "dark";
 type LanguageCode = "en" | "ko";
+type OrchestratorMode = "gemini_only" | "codex_only" | "cross_review";
 type XtermTerminal = import("@xterm/xterm").Terminal;
 type XtermTheme = NonNullable<import("@xterm/xterm").ITerminalOptions["theme"]>;
 
@@ -14,6 +16,7 @@ type SessionInfo = {
 
 type TerminalDataPayload = { sessionId: string; data: string };
 type TerminalExitPayload = { sessionId: string; exitCode: number; signal: number };
+type RunStatus = "pending" | "running" | "done" | "failed" | "paused" | "escalated";
 type ManagedToolStatus = {
   id: "codex" | "gemini";
   displayName: string;
@@ -26,6 +29,120 @@ type DirectoryDialogOptions = {
   buttonLabel?: string;
   message?: string;
 };
+type OrchestratorRunSummary = {
+  id: string;
+  goal: string;
+  status: RunStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  finalSummary: string | null;
+};
+type OrchestratorAcceptanceCriterion = {
+  description: string;
+  status: string;
+};
+type OrchestratorModelRef = {
+  id: string;
+  provider: string;
+  model: string;
+  tier?: string;
+  reasoningEffort?: string;
+};
+type OrchestratorModelAssignment = {
+  abstractPlanner?: OrchestratorModelRef;
+  gatherer?: OrchestratorModelRef;
+  concretePlanner?: OrchestratorModelRef;
+  reviewer?: OrchestratorModelRef;
+  executor?: OrchestratorModelRef;
+  verifier?: OrchestratorModelRef;
+};
+type OrchestratorPlanNode = {
+  id: string;
+  parentId: string | null;
+  title: string;
+  objective: string;
+  depth: number;
+  phase: string;
+  assignedModels?: OrchestratorModelAssignment;
+  acceptanceCriteria: {
+    items: OrchestratorAcceptanceCriterion[];
+  };
+};
+type OrchestratorEvent = {
+  id: string;
+  runId: string;
+  nodeId: string | null;
+  type: string;
+  createdAt: string;
+  payload: Record<string, unknown>;
+};
+type OrchestratorWorkingMemory = {
+  facts: Array<{ statement: string }>;
+  openQuestions: Array<{ question: string; status: string }>;
+  unknowns: Array<{ description: string; status: string }>;
+  conflicts: Array<{ summary: string; status: string }>;
+  decisions: Array<{ summary: string; rationale: string }>;
+};
+type OrchestratorRunDetail = {
+  run: {
+    id: string;
+    goal: string;
+    status: RunStatus;
+    continuedFromRunId?: string | null;
+    createdAt: string;
+    updatedAt: string;
+    completedAt: string | null;
+  };
+  nodes: OrchestratorPlanNode[];
+  events: OrchestratorEvent[];
+  workingMemory: OrchestratorWorkingMemory;
+  evidenceBundles: Array<{ summary: string }>;
+  finalReport?: {
+    summary: string;
+    outcomes: string[];
+    unresolvedRisks: string[];
+  };
+};
+type OrchestratorRunResponse =
+  | {
+    status: "completed";
+    detail: OrchestratorRunDetail;
+  }
+  | {
+    status: "cancelled";
+    detail: OrchestratorRunDetail;
+  }
+  | {
+    status: "login_required";
+    missingToolIds: ManagedToolId[];
+    loginSessions: SessionInfo[];
+  };
+
+type OrchestratorProgressTone = "idle" | "active" | "done" | "failed" | "paused" | "escalated";
+type OrchestratorNodeProgressStepState = "done" | "active" | "pending" | "failed";
+type OrchestratorNodeProgressStep = {
+  phase: string;
+  label: string;
+  state: OrchestratorNodeProgressStepState;
+  detail: string;
+};
+type OrchestratorNodeProgressView = {
+  tone: OrchestratorProgressTone;
+  summary: string;
+  detail: string;
+  objective: string;
+  model: string;
+  updatedAt: string;
+  completionRatio: number;
+  steps: OrchestratorNodeProgressStep[];
+};
+type SelectedNodeLiveView = {
+  status: string;
+  progress: OrchestratorNodeProgressView | null;
+  command: string;
+  log: string;
+};
 
 type TasksawApi = {
   createSession(input: {
@@ -35,6 +152,17 @@ type TasksawApi = {
   }): Promise<SessionInfo | null>;
   listSessions(): Promise<SessionInfo[]>;
   updateManagedTools(): Promise<ManagedToolStatus[]>;
+  resetAppState(): Promise<void>;
+  runOrchestrator(input: {
+    goal: string;
+    mode: OrchestratorMode;
+    workspacePath?: string | null;
+    continueFromRunId?: string | null;
+    workspaceAccessDialog?: DirectoryDialogOptions;
+  }): Promise<OrchestratorRunResponse | null>;
+  cancelOrchestratorRun(runId: string): Promise<boolean>;
+  listOrchestratorRuns(): Promise<OrchestratorRunSummary[]>;
+  getOrchestratorRun(runId: string): Promise<OrchestratorRunDetail>;
   selectDirectory(options?: DirectoryDialogOptions): Promise<string | null>;
   createDirectory(options?: DirectoryDialogOptions): Promise<string | null>;
   writeTerminal(sessionId: string, data: string): void;
@@ -42,6 +170,7 @@ type TasksawApi = {
   killSession(sessionId: string): void;
   onTerminalData(handler: (payload: TerminalDataPayload) => void): void;
   onTerminalExit(handler: (payload: TerminalExitPayload) => void): void;
+  onOrchestratorEvent(handler: (payload: OrchestratorEvent) => void): void;
 };
 
 type RendererWindow = Window & {
@@ -61,7 +190,6 @@ const TEXT = {
       sessionsTitle: "Sessions",
       themeGroupLabel: "Theme",
       languageGroupLabel: "Language",
-      themeSystem: "Auto",
       themeLight: "Light",
       themeDark: "Dark",
       languageEnglish: "English",
@@ -75,6 +203,54 @@ const TEXT = {
       permissionDialogButton: "Grant Access",
       permissionDialogMessage: "TaskSaw needs folder access before starting this terminal. Select the workspace folder.",
       toolsUpdate: "Update AI Tools",
+      resetApp: "Reset All Data",
+      resetAppConfirm: "Delete all TaskSaw records and log out managed tool sessions? This cannot be undone.",
+      orchestratorTitle: "Orchestrator",
+      orchestratorSubtitle: "Run the ordered DFS orchestrator with the live Gemini and Codex CLI model catalogs and inspect node prompts.",
+      orchestratorGoalLabel: "Goal",
+      orchestratorModeLabel: "Mode",
+      orchestratorModeCrossReview: "Cross Review: live Codex + live Gemini",
+      orchestratorModeGeminiOnly: "Gemini Only: live Gemini model",
+      orchestratorModeCodexOnly: "Codex Only: live Codex model",
+      orchestratorGoalPlaceholder: "Describe the task you want the orchestrator to run",
+      orchestratorRun: "Run Orchestrator",
+      orchestratorStop: "Stop Run",
+      orchestratorContinue: "Continue Selected",
+      orchestratorRefresh: "Refresh Runs",
+      orchestratorRunsTitle: "Recent Runs",
+      orchestratorDetailTitle: "Run Detail",
+      orchestratorDetailCopy: "Copy",
+      orchestratorOpenViewer: "Large View",
+      orchestratorNodeLiveTitle: "Selected Node Live",
+      orchestratorNodeProgressCurrent: "Current Work",
+      orchestratorNodeProgressObjective: "Objective",
+      orchestratorNodeProgressModel: "Active Model",
+      orchestratorNodeProgressUpdated: "Latest Update",
+      orchestratorNodeProgressTrack: "Phase Track",
+      orchestratorNodeCommandTitle: "Command",
+      orchestratorNodeLogTitle: "Node Log",
+      orchestratorLogTitle: "Orchestrator Log",
+      orchestratorTreeTitle: "Node Graph",
+      orchestratorTreeEmpty: "No nodes yet.",
+      orchestratorTreeMeta: "{count} nodes",
+      orchestratorSelectedNodeTitle: "Selected Node",
+      orchestratorSelectedNodeEvents: "Node Events",
+      orchestratorNoRuns: "No orchestrator runs yet.",
+      orchestratorNoDetail: "Select a run to inspect its nodes, live command flow, and working memory.",
+      orchestratorNodeLiveEmpty: "Select a node to inspect its live command flow.",
+      orchestratorNodeCommandEmpty: "No command has been dispatched yet.",
+      orchestratorNodeLogEmpty: "No node events yet.",
+      orchestratorLogEmpty: "No orchestrator events yet.",
+      orchestratorCommandStatusIdle: "Queued",
+      orchestratorCommandStatusDispatched: "Dispatched",
+      orchestratorCommandStatusResponded: "Response received",
+      orchestratorCommandStatusFailed: "Failed",
+      workspaceTabsLabel: "Workspace Tabs",
+      openOrchestratorTab: "Open Orchestrator",
+      focusOrchestratorTab: "Focus Orchestrator",
+      noOpenTabsTitle: "No open tabs",
+      noOpenTabsCopy: "Open the orchestrator tab or start a terminal session.",
+      logViewerTitle: "Log Viewer",
       close: "Close",
       statusLive: "live",
       statusExited: "exited"
@@ -85,13 +261,33 @@ const TEXT = {
       toolsUpdated: "managed tools updated: {details}",
       created: "created: {title} @ {cwd}",
       closed: "closed: {title} @ {cwd}",
-      exited: "session exited: {sessionId} (code={exitCode}, signal={signal})"
+      exited: "session exited: {sessionId} (code={exitCode}, signal={signal})",
+      resetStarted: "resetting TaskSaw data…",
+      resetCompleted: "TaskSaw data reset completed",
+      orchestratorRunning: "running {mode} orchestrator…",
+      orchestratorStopping: "stopping orchestrator run: {runId}",
+      orchestratorCancelled: "orchestrator run cancelled: {runId}",
+      orchestratorCompleted: "orchestrator run completed: {runId}",
+      orchestratorLoaded: "loaded orchestrator run: {runId}",
+      orchestratorDetailCopied: "run detail copied",
+      clipboardCopied: "{title} copied"
     },
     errors: {
       selectFolder: "Select the workspace folder first.",
       failedCreate: "Failed to create {kind} session: {message}",
       failedRestore: "Failed to restore sessions: {message}",
-      failedXterm: "Renderer failed to initialize xterm"
+      failedXterm: "Renderer failed to initialize xterm",
+      failedReset: "Failed to reset TaskSaw data: {message}",
+      orchestratorGoalMissing: "Enter an orchestrator goal first.",
+      orchestratorContinueMissing: "Select an orchestrator run to continue.",
+      orchestratorWorkspaceMissing: "Select the workspace folder before running the orchestrator.",
+      orchestratorStopUnavailable: "There is no active orchestrator run to stop.",
+      orchestratorLoginRequired: "Missing login session for {tools}. Log in from a TaskSaw terminal tab, then retry.",
+      failedOrchestratorRun: "Failed to run orchestrator: {message}",
+      failedOrchestratorStop: "Failed to stop orchestrator: {message}",
+      failedLoadOrchestratorRuns: "Failed to load orchestrator runs: {message}",
+      failedCopyOrchestratorDetail: "Failed to copy run detail: {message}",
+      failedCopyClipboard: "Failed to copy {title}: {message}"
     },
     kinds: {
       shell: "Shell",
@@ -108,7 +304,6 @@ const TEXT = {
       sessionsTitle: "세션",
       themeGroupLabel: "테마",
       languageGroupLabel: "언어",
-      themeSystem: "자동",
       themeLight: "라이트",
       themeDark: "다크",
       languageEnglish: "영어",
@@ -122,6 +317,54 @@ const TEXT = {
       permissionDialogButton: "권한 부여",
       permissionDialogMessage: "이 터미널을 시작하려면 TaskSaw가 폴더 접근 권한을 받아야 합니다. 워크스페이스 폴더를 선택하세요.",
       toolsUpdate: "AI 도구 업데이트",
+      resetApp: "전체 초기화",
+      resetAppConfirm: "TaskSaw의 모든 기록을 삭제하고 관리형 도구 로그인 세션도 종료합니다. 되돌릴 수 없습니다.",
+      orchestratorTitle: "오케스트레이터",
+      orchestratorSubtitle: "실시간 Gemini/Codex CLI 모델 카탈로그를 사용해 ordered DFS orchestrator를 실행하고 노드 프롬프트를 확인합니다.",
+      orchestratorGoalLabel: "목표",
+      orchestratorModeLabel: "모드",
+      orchestratorModeCrossReview: "상호 리뷰: 실시간 Codex + 실시간 Gemini",
+      orchestratorModeGeminiOnly: "Gemini 단독: 실시간 Gemini 모델",
+      orchestratorModeCodexOnly: "Codex 단독: 실시간 Codex 모델",
+      orchestratorGoalPlaceholder: "오케스트레이터가 수행할 작업을 입력하세요",
+      orchestratorRun: "오케스트레이터 실행",
+      orchestratorStop: "실행 중단",
+      orchestratorContinue: "선택 실행 이어서",
+      orchestratorRefresh: "실행 목록 새로고침",
+      orchestratorRunsTitle: "최근 실행",
+      orchestratorDetailTitle: "실행 상세",
+      orchestratorDetailCopy: "복사",
+      orchestratorOpenViewer: "크게 보기",
+      orchestratorNodeLiveTitle: "선택 노드 실시간 상태",
+      orchestratorNodeProgressCurrent: "현재 작업",
+      orchestratorNodeProgressObjective: "목표",
+      orchestratorNodeProgressModel: "실행 모델",
+      orchestratorNodeProgressUpdated: "최근 업데이트",
+      orchestratorNodeProgressTrack: "단계 진행",
+      orchestratorNodeCommandTitle: "전달 명령",
+      orchestratorNodeLogTitle: "노드 로그",
+      orchestratorLogTitle: "오케스트레이터 로그",
+      orchestratorTreeTitle: "노드 그래프",
+      orchestratorTreeEmpty: "아직 생성된 노드가 없습니다.",
+      orchestratorTreeMeta: "노드 {count}개",
+      orchestratorSelectedNodeTitle: "선택한 노드",
+      orchestratorSelectedNodeEvents: "노드 이벤트",
+      orchestratorNoRuns: "아직 오케스트레이터 실행이 없습니다.",
+      orchestratorNoDetail: "실행 하나를 선택하면 노드, 실시간 명령 흐름, working memory를 볼 수 있습니다.",
+      orchestratorNodeLiveEmpty: "노드를 선택하면 명령 전달 상태와 실시간 로그를 볼 수 있습니다.",
+      orchestratorNodeCommandEmpty: "아직 전달된 명령이 없습니다.",
+      orchestratorNodeLogEmpty: "아직 노드 이벤트가 없습니다.",
+      orchestratorLogEmpty: "아직 오케스트레이터 이벤트가 없습니다.",
+      orchestratorCommandStatusIdle: "대기 중",
+      orchestratorCommandStatusDispatched: "전달됨",
+      orchestratorCommandStatusResponded: "응답 수신",
+      orchestratorCommandStatusFailed: "실패",
+      workspaceTabsLabel: "워크스페이스 탭",
+      openOrchestratorTab: "오케스트레이터 열기",
+      focusOrchestratorTab: "오케스트레이터 보기",
+      noOpenTabsTitle: "열린 탭이 없습니다",
+      noOpenTabsCopy: "오케스트레이터 탭을 열거나 터미널 세션을 시작하세요.",
+      logViewerTitle: "로그 보기",
       close: "닫기",
       statusLive: "실행 중",
       statusExited: "종료됨"
@@ -132,13 +375,33 @@ const TEXT = {
       toolsUpdated: "관리형 도구 업데이트 완료: {details}",
       created: "생성됨: {title} @ {cwd}",
       closed: "닫힘: {title} @ {cwd}",
-      exited: "세션 종료: {sessionId} (code={exitCode}, signal={signal})"
+      exited: "세션 종료: {sessionId} (code={exitCode}, signal={signal})",
+      resetStarted: "TaskSaw 데이터를 초기화하는 중…",
+      resetCompleted: "TaskSaw 데이터 초기화 완료",
+      orchestratorRunning: "{mode} 오케스트레이터 실행 중…",
+      orchestratorStopping: "오케스트레이터 실행 중단 중: {runId}",
+      orchestratorCancelled: "오케스트레이터 실행 중단됨: {runId}",
+      orchestratorCompleted: "오케스트레이터 실행 완료: {runId}",
+      orchestratorLoaded: "오케스트레이터 실행 로드됨: {runId}",
+      orchestratorDetailCopied: "실행 상세를 복사했습니다",
+      clipboardCopied: "{title} 내용을 복사했습니다"
     },
     errors: {
       selectFolder: "먼저 워크스페이스 폴더를 선택하세요.",
       failedCreate: "{kind} 세션 생성 실패: {message}",
       failedRestore: "세션 복원 실패: {message}",
-      failedXterm: "renderer에서 xterm 초기화에 실패했습니다"
+      failedXterm: "renderer에서 xterm 초기화에 실패했습니다",
+      failedReset: "TaskSaw 데이터 초기화 실패: {message}",
+      orchestratorGoalMissing: "먼저 오케스트레이터 목표를 입력하세요.",
+      orchestratorContinueMissing: "이어갈 오케스트레이터 실행을 먼저 선택하세요.",
+      orchestratorWorkspaceMissing: "오케스트레이터를 실행하기 전에 워크스페이스 폴더를 선택하세요.",
+      orchestratorStopUnavailable: "중단할 활성 오케스트레이터 실행이 없습니다.",
+      orchestratorLoginRequired: "{tools} 로그인 세션이 없습니다. TaskSaw 터미널에서 로그인한 뒤 다시 실행하세요.",
+      failedOrchestratorRun: "오케스트레이터 실행 실패: {message}",
+      failedOrchestratorStop: "오케스트레이터 중단 실패: {message}",
+      failedLoadOrchestratorRuns: "오케스트레이터 실행 목록 로드 실패: {message}",
+      failedCopyOrchestratorDetail: "실행 상세 복사 실패: {message}",
+      failedCopyClipboard: "{title} 내용을 복사하지 못했습니다: {message}"
     },
     kinds: {
       shell: "쉘",
@@ -150,6 +413,8 @@ const TEXT = {
 
 const appWindow = window as unknown as RendererWindow;
 
+const layoutEl = document.getElementById("layout") as HTMLDivElement;
+const sidebarEl = document.getElementById("sidebar") as HTMLElement;
 const workspaceLabelEl = document.getElementById("workspace-label") as HTMLSpanElement;
 const workspacePathEl = document.getElementById("workspace-path") as HTMLElement;
 const workspaceOpenButton = document.getElementById("workspace-open") as HTMLButtonElement;
@@ -158,15 +423,59 @@ const newShellButton = document.getElementById("new-shell") as HTMLButtonElement
 const newCodexButton = document.getElementById("new-codex") as HTMLButtonElement;
 const newGeminiButton = document.getElementById("new-gemini") as HTMLButtonElement;
 const toolsUpdateButton = document.getElementById("tools-update") as HTMLButtonElement;
+const resetAppButton = document.getElementById("app-reset") as HTMLButtonElement;
 const sessionSectionTitle = document.getElementById("session-section-title") as HTMLDivElement;
 const sessionListEl = document.getElementById("session-list") as HTMLUListElement;
+const orchestratorTitleEl = document.getElementById("orchestrator-title") as HTMLDivElement;
+const orchestratorSubtitleEl = document.getElementById("orchestrator-subtitle") as HTMLDivElement;
+const orchestratorGoalLabelEl = document.getElementById("orchestrator-goal-label") as HTMLSpanElement;
+const orchestratorModeLabelEl = document.getElementById("orchestrator-mode-label") as HTMLSpanElement;
+const orchestratorGoalInput = document.getElementById("orchestrator-goal") as HTMLTextAreaElement;
+const orchestratorModeSelect = document.getElementById("orchestrator-mode") as HTMLSelectElement;
+const orchestratorRefreshButton = document.getElementById("orchestrator-refresh") as HTMLButtonElement;
+const orchestratorStopButton = document.getElementById("orchestrator-stop") as HTMLButtonElement;
+const orchestratorContinueButton = document.getElementById("orchestrator-continue") as HTMLButtonElement;
+const orchestratorRunButton = document.getElementById("orchestrator-run") as HTMLButtonElement;
+const orchestratorRunsTitleEl = document.getElementById("orchestrator-runs-title") as HTMLDivElement;
+const orchestratorRunListEl = document.getElementById("orchestrator-run-list") as HTMLUListElement;
+const orchestratorDetailTitleEl = document.getElementById("orchestrator-detail-title") as HTMLDivElement;
+const orchestratorNodeLiveTitleEl = document.getElementById("orchestrator-node-live-title") as HTMLDivElement;
+const orchestratorNodeLiveStatusEl = document.getElementById("orchestrator-node-live-status") as HTMLSpanElement;
+const orchestratorNodeLiveMetaEl = document.getElementById("orchestrator-node-live-meta") as HTMLDivElement;
+const orchestratorNodeCommandTitleEl = document.getElementById("orchestrator-node-command-title") as HTMLDivElement;
+const orchestratorNodeCommandOpenButton = document.getElementById("orchestrator-node-command-open") as HTMLButtonElement;
+const orchestratorNodeCommandCopyButton = document.getElementById("orchestrator-node-command-copy") as HTMLButtonElement;
+const orchestratorNodeCommandEl = document.getElementById("orchestrator-node-command") as HTMLPreElement;
+const orchestratorNodeLogTitleEl = document.getElementById("orchestrator-node-log-title") as HTMLDivElement;
+const orchestratorNodeLogOpenButton = document.getElementById("orchestrator-node-log-open") as HTMLButtonElement;
+const orchestratorNodeLogCopyButton = document.getElementById("orchestrator-node-log-copy") as HTMLButtonElement;
+const orchestratorNodeLogEl = document.getElementById("orchestrator-node-log") as HTMLPreElement;
+const orchestratorLogTitleEl = document.getElementById("orchestrator-log-title") as HTMLDivElement;
+const orchestratorLogOpenButton = document.getElementById("orchestrator-log-open") as HTMLButtonElement;
+const orchestratorLogCopyButton = document.getElementById("orchestrator-log-copy") as HTMLButtonElement;
+const orchestratorLogEl = document.getElementById("orchestrator-log") as HTMLPreElement;
+const orchestratorTreeTitleEl = document.getElementById("orchestrator-tree-title") as HTMLDivElement;
+const orchestratorTreeMetaEl = document.getElementById("orchestrator-tree-meta") as HTMLSpanElement;
+const orchestratorTreeEl = document.getElementById("orchestrator-tree") as HTMLDivElement;
+const mainEl = document.getElementById("main") as HTMLElement;
+const workspaceTabsEl = document.getElementById("workspace-tabs") as HTMLDivElement;
+const workspaceOpenOrchestratorButton = document.getElementById("workspace-open-orchestrator") as HTMLButtonElement;
+const workspaceEmptyEl = document.getElementById("workspace-empty") as HTMLElement;
+const workspaceEmptyTitleEl = document.getElementById("workspace-empty-title") as HTMLDivElement;
+const workspaceEmptyCopyEl = document.getElementById("workspace-empty-copy") as HTMLParagraphElement;
+const workspaceEmptyOpenOrchestratorButton = document.getElementById("workspace-empty-open-orchestrator") as HTMLButtonElement;
+const logViewerDialogEl = document.getElementById("log-viewer-dialog") as HTMLDivElement;
+const logViewerTitleEl = document.getElementById("log-viewer-title") as HTMLDivElement;
+const logViewerCopyButton = document.getElementById("log-viewer-copy") as HTMLButtonElement;
+const logViewerCloseButton = document.getElementById("log-viewer-close") as HTMLButtonElement;
+const logViewerContentEl = document.getElementById("log-viewer-content") as HTMLPreElement;
+const mainSplitterEl = document.getElementById("main-splitter") as HTMLDivElement;
 const terminalRoot = document.getElementById("terminal-root") as HTMLDivElement;
 const logbar = document.getElementById("logbar") as HTMLDivElement;
 const themeSwitcher = document.getElementById("theme-switcher") as HTMLDivElement;
 const languageSwitcher = document.getElementById("language-switcher") as HTMLDivElement;
 const themeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-theme-option]"));
 const languageButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-language-option]"));
-const darkThemeMedia = appWindow.matchMedia("(prefers-color-scheme: dark)");
 
 const terminals = new Map<string, XtermTerminal>();
 const terminalPanes = new Map<string, HTMLElement>();
@@ -174,11 +483,27 @@ const terminalContainers = new Map<string, HTMLDivElement>();
 const sessionStatusBadges = new Map<string, HTMLSpanElement>();
 const sessionKindBadges = new Map<string, HTMLSpanElement>();
 const sessionCloseButtons = new Map<string, HTMLButtonElement>();
+const terminalDimensions = new Map<string, { cols: number; rows: number }>();
 const sessions: SessionInfo[] = [];
+const orchestratorRuns: OrchestratorRunSummary[] = [];
 
 const THEME_STORAGE_KEY = "tasksaw-theme";
 const WORKSPACE_STORAGE_KEY = "tasksaw-last-workspace";
 const LANGUAGE_STORAGE_KEY = "tasksaw-language";
+const MAIN_SPLITTER_RATIO_STORAGE_KEY = "tasksaw-main-splitter-ratio";
+const MAIN_SPLITTER_MIN_RATIO = 0;
+const MAIN_SPLITTER_MAX_RATIO = 1;
+const ORCHESTRATOR_NODE_LOG_EVENT_LIMIT = 24;
+const ORCHESTRATOR_RUN_LOG_EVENT_LIMIT = 180;
+const ORCHESTRATOR_PHASE_TRACK = [
+  "abstract_plan",
+  "gather",
+  "evidence_consolidation",
+  "concrete_plan",
+  "review",
+  "execute",
+  "verify"
+] as const;
 const XTERM_THEMES = {
   light: {
     background: "#fffaf0",
@@ -234,6 +559,31 @@ let languagePreference: LanguageCode = getInitialLanguagePreference();
 let currentWorkspacePath: string | null = getInitialWorkspacePath();
 let lastLogMessage: UiMessage = null;
 let isToolUpdateRunning = false;
+let isResetting = false;
+let selectedOrchestratorRunId: string | null = null;
+let selectedOrchestratorRun: OrchestratorRunDetail | null = null;
+let isOrchestratorRunning = false;
+let isOrchestratorStopRequested = false;
+let orchestratorMode: OrchestratorMode = "cross_review";
+let liveOrchestratorRunId: string | null = null;
+let liveOrchestratorRefreshHandle: number | null = null;
+let mainSplitterRatio = getInitialMainSplitterRatio();
+let orchestratorRenderHandle: number | null = null;
+let orchestratorRunListRenderPending = false;
+let orchestratorDetailRenderPending = false;
+let orchestratorTreeRenderPending = false;
+let lastOrchestratorRunListSignature = "";
+let lastOrchestratorDetailSignature = "";
+let lastOrchestratorTreeSignature = "";
+let fitAllSessionsHandle: number | null = null;
+let activeWorkspaceTabId: string | null = "orchestrator";
+let isOrchestratorTabOpen = true;
+let selectedOrchestratorNodeId: string | null = null;
+let activeLogViewerSource: {
+  titleElement: HTMLElement;
+  contentElement: HTMLElement;
+  emptyMessage: string;
+} | null = null;
 
 function translate(key: string, params: Record<string, string> = {}): string {
   const resolvedValue = key.split(".").reduce<unknown>((current, part) => {
@@ -249,6 +599,18 @@ function translate(key: string, params: Record<string, string> = {}): string {
 
 function translateKind(kind: SessionKind): string {
   return translate(`kinds.${kind}`);
+}
+
+function translateOrchestratorMode(mode: OrchestratorMode): string {
+  if (mode === "gemini_only") {
+    return translate("ui.orchestratorModeGeminiOnly");
+  }
+
+  if (mode === "codex_only") {
+    return translate("ui.orchestratorModeCodexOnly");
+  }
+
+  return translate("ui.orchestratorModeCrossReview");
 }
 
 function renderMessage(target: HTMLElement, message: UiMessage) {
@@ -276,8 +638,1288 @@ function refreshLogbar() {
   renderMessage(logbar, lastLogMessage);
 }
 
+function formatTimestamp(timestamp: string | null): string {
+  if (!timestamp) return "n/a";
+
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return timestamp;
+
+  return date.toLocaleString(languagePreference === "ko" ? "ko-KR" : "en-US", {
+    hour12: false
+  });
+}
+
+function truncateText(value: string, maxLength = 320): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}…`;
+}
+
+function tryBeautifyJsonString(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.length < 2) {
+    return null;
+  }
+
+  const looksLikeJson = (
+    (trimmed.startsWith("{") && trimmed.endsWith("}"))
+    || (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  );
+
+  if (!looksLikeJson) {
+    return null;
+  }
+
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return null;
+  }
+}
+
+function formatDisplayString(value: string, maxLength = 320): string {
+  return truncateText(tryBeautifyJsonString(value) ?? value, maxLength);
+}
+
+function formatDisplayValue(value: unknown, maxLength = 320): string {
+  if (typeof value === "string") {
+    return formatDisplayString(value, maxLength);
+  }
+
+  if (value === null) {
+    return "null";
+  }
+
+  if (value === undefined) {
+    return "undefined";
+  }
+
+  return truncateText(JSON.stringify(value, null, 2), maxLength);
+}
+
+function createEmptyWorkingMemory(): OrchestratorWorkingMemory {
+  return {
+    facts: [],
+    openQuestions: [],
+    unknowns: [],
+    conflicts: [],
+    decisions: []
+  };
+}
+
+function deriveRunStatusFromEvent(currentStatus: RunStatus, event: OrchestratorEvent): RunStatus {
+  if (event.type === "run_completed") return "done";
+  if (event.type === "run_failed") return "failed";
+  if (event.type === "run_paused") return "paused";
+  if (currentStatus === "done" || currentStatus === "failed" || currentStatus === "paused" || currentStatus === "escalated") return currentStatus;
+  return "running";
+}
+
+function createLiveOrchestratorRunDetail(event: OrchestratorEvent): OrchestratorRunDetail {
+  const goal = typeof event.payload.goal === "string"
+    ? event.payload.goal
+    : ((selectedOrchestratorRun?.run.goal ?? orchestratorGoalInput.value.trim()) || "Running orchestrator");
+
+  return {
+    run: {
+      id: event.runId,
+      goal,
+      status: deriveRunStatusFromEvent("pending", event),
+      continuedFromRunId: typeof event.payload.continuedFromRunId === "string"
+        ? event.payload.continuedFromRunId
+        : null,
+      createdAt: event.createdAt,
+      updatedAt: event.createdAt,
+      completedAt: event.type === "run_completed" ? event.createdAt : null
+    },
+    nodes: [],
+    events: [event],
+    workingMemory: createEmptyWorkingMemory(),
+    evidenceBundles: []
+  };
+}
+
+function upsertLiveOrchestratorNode(detail: OrchestratorRunDetail, event: OrchestratorEvent) {
+  if (!event.nodeId) {
+    return;
+  }
+
+  if (event.type === "node_created") {
+    const existingNodeIndex = detail.nodes.findIndex((node) => node.id === event.nodeId);
+    const title = typeof event.payload.title === "string" ? event.payload.title : event.nodeId;
+    const objective = typeof event.payload.objective === "string" ? event.payload.objective : title;
+    const phase = typeof event.payload.phase === "string" ? event.payload.phase : "init";
+    const depth = typeof event.payload.depth === "number" ? event.payload.depth : 0;
+    const parentId = typeof event.payload.parentId === "string" ? event.payload.parentId : null;
+
+    const nextNode: OrchestratorPlanNode = {
+      id: event.nodeId,
+      parentId,
+      title,
+      objective,
+      depth,
+      phase,
+      assignedModels: existingNodeIndex === -1 ? undefined : detail.nodes[existingNodeIndex]!.assignedModels,
+      acceptanceCriteria: {
+        items: existingNodeIndex === -1 ? [] : detail.nodes[existingNodeIndex]!.acceptanceCriteria.items
+      }
+    };
+
+    if (existingNodeIndex === -1) {
+      detail.nodes.push(nextNode);
+    } else {
+      detail.nodes[existingNodeIndex] = nextNode;
+    }
+
+    return;
+  }
+
+  const node = detail.nodes.find((candidate) => candidate.id === event.nodeId);
+  if (!node) {
+    return;
+  }
+
+  if (event.type === "phase_transition" && typeof event.payload.to === "string") {
+    node.phase = event.payload.to;
+    return;
+  }
+
+  if (event.type === "node_failed" && typeof event.payload.phase === "string") {
+    node.phase = event.payload.phase;
+  }
+}
+
+function mergeLiveOrchestratorEvent(detail: OrchestratorRunDetail, event: OrchestratorEvent): OrchestratorRunDetail {
+  const alreadyIncluded = detail.events.some((existingEvent) => existingEvent.id === event.id);
+  const goal = typeof event.payload.goal === "string" ? event.payload.goal : detail.run.goal;
+  const continuedFromRunId = typeof event.payload.continuedFromRunId === "string"
+    ? event.payload.continuedFromRunId
+    : detail.run.continuedFromRunId;
+
+  detail.run.goal = goal;
+  detail.run.continuedFromRunId = continuedFromRunId;
+  detail.run.status = deriveRunStatusFromEvent(detail.run.status, event);
+  detail.run.updatedAt = event.createdAt;
+  detail.run.completedAt = event.type === "run_completed" ? event.createdAt : detail.run.completedAt;
+
+  if (!alreadyIncluded) {
+    detail.events.push(event);
+  }
+
+  upsertLiveOrchestratorNode(detail, event);
+
+  return detail;
+}
+
+function toOrchestratorRunSummary(detail: OrchestratorRunDetail): OrchestratorRunSummary {
+  return {
+    id: detail.run.id,
+    goal: detail.run.goal,
+    status: detail.run.status,
+    createdAt: detail.run.createdAt,
+    updatedAt: detail.run.updatedAt,
+    completedAt: detail.run.completedAt,
+    finalSummary: detail.finalReport?.summary ?? null
+  };
+}
+
+function upsertOrchestratorRunSummary(summary: OrchestratorRunSummary) {
+  const index = orchestratorRuns.findIndex((run) => run.id === summary.id);
+  if (index === -1) {
+    orchestratorRuns.push(summary);
+  } else {
+    orchestratorRuns[index] = summary;
+  }
+
+  orchestratorRuns.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  scheduleOrchestratorRender({ list: true, detail: false });
+}
+
+async function refreshLiveOrchestratorRun(runId: string) {
+  try {
+    const detail = await appWindow.tasksaw.getOrchestratorRun(runId);
+    upsertOrchestratorRunSummary(toOrchestratorRunSummary(detail));
+
+    if (selectedOrchestratorRunId === runId || liveOrchestratorRunId === runId) {
+      selectedOrchestratorRunId = runId;
+      selectedOrchestratorRun = detail;
+      scheduleOrchestratorRender();
+    }
+  } catch {
+    // Ignore live refresh misses while the snapshot is being written.
+  }
+}
+
+function scheduleLiveOrchestratorRunRefresh(runId: string) {
+  if (liveOrchestratorRefreshHandle !== null) {
+    window.clearTimeout(liveOrchestratorRefreshHandle);
+  }
+
+  liveOrchestratorRefreshHandle = window.setTimeout(() => {
+    liveOrchestratorRefreshHandle = null;
+    void refreshLiveOrchestratorRun(runId);
+  }, 120);
+}
+
+function scheduleOrchestratorRender(options: { list?: boolean; detail?: boolean } = {}) {
+  if (options.list ?? true) {
+    orchestratorRunListRenderPending = true;
+  }
+
+  if (options.detail ?? true) {
+    orchestratorDetailRenderPending = true;
+  }
+
+  if (options.detail ?? true) {
+    orchestratorTreeRenderPending = true;
+  }
+
+  if (orchestratorRenderHandle !== null) {
+    return;
+  }
+
+  orchestratorRenderHandle = appWindow.requestAnimationFrame(() => {
+    orchestratorRenderHandle = null;
+
+    const shouldRenderList = orchestratorRunListRenderPending;
+    const shouldRenderDetail = orchestratorDetailRenderPending;
+    const shouldRenderTree = orchestratorTreeRenderPending;
+    orchestratorRunListRenderPending = false;
+    orchestratorDetailRenderPending = false;
+    orchestratorTreeRenderPending = false;
+
+    if (shouldRenderList) {
+      renderOrchestratorRunList();
+    }
+
+    if (shouldRenderDetail) {
+      renderOrchestratorDetail();
+    }
+
+    if (shouldRenderTree) {
+      renderOrchestratorTree();
+    }
+  });
+}
+
+function summarizeEvent(event: OrchestratorEvent): string[] {
+  const payload = event.payload;
+
+  if (event.type === "run_created") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] run created`,
+      String(payload.goal ?? event.runId)
+    ];
+  }
+
+  if (event.type === "node_created") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] node created`,
+      `${String(payload.title ?? event.nodeId ?? "unknown node")} (depth ${String(payload.depth ?? "n/a")})`
+    ];
+  }
+
+  if (event.type === "phase_transition") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] phase`,
+      `${formatNodePhaseLabel(String(payload.from ?? "unknown"))} -> ${formatNodePhaseLabel(String(payload.to ?? "unknown"))}`
+    ];
+  }
+
+  if (event.type === "acceptance_updated") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] acceptance`,
+      `${String(payload.criterionId ?? "unknown")} => ${String(payload.status ?? "unknown")}`
+    ];
+  }
+
+  if (event.type === "evidence_attached") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] evidence attached`,
+      String(payload.bundleId ?? "unknown bundle")
+    ];
+  }
+
+  if (event.type === "scheduler_progress") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] scheduler`,
+      String(payload.message ?? "scheduler progress")
+    ];
+  }
+
+  if (event.type === "node_decomposed") {
+    const childTitles = Array.isArray(payload.childTitles) ? payload.childTitles.join(", ") : "";
+    return [
+      `[${formatTimestamp(event.createdAt)}] decomposed`,
+      `children: ${childTitles || "n/a"}`
+    ];
+  }
+
+  if (event.type === "model_invocation") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] invoke ${String(payload.capability ?? "unknown")} via ${formatModelLabel(
+        typeof payload.modelId === "string" ? payload.modelId : undefined,
+        typeof payload.model === "string" ? payload.model : undefined,
+        typeof payload.provider === "string" ? payload.provider : undefined
+      )}`,
+      typeof payload.objective === "string"
+        ? formatDisplayString(payload.objective, 320)
+        : (languagePreference === "ko" ? "모델 호출 시작" : "Model invocation started")
+    ];
+  }
+
+  if (event.type === "model_response") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] response ${String(payload.capability ?? "unknown")} via ${formatModelLabel(
+        typeof payload.modelId === "string" ? payload.modelId : undefined,
+        typeof payload.model === "string" ? payload.model : undefined,
+        typeof payload.provider === "string" ? payload.provider : undefined
+      )}`,
+      extractModelResultSummary(payload.result)
+    ];
+  }
+
+  if (event.type === "node_failed") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] node failed`,
+      `${formatNodePhaseLabel(String(payload.phase ?? "unknown"))}: ${formatDisplayValue(payload.error ?? "unknown error", 2400)}`
+    ];
+  }
+
+  if (event.type === "run_failed") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] run failed`,
+      formatDisplayValue(payload.error ?? "unknown error", 2400)
+    ];
+  }
+
+  if (event.type === "run_paused") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] run paused`,
+      formatDisplayValue(payload.reason ?? "paused", 2400)
+    ];
+  }
+
+  if (event.type === "run_completed") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] run completed`,
+      formatDisplayValue(payload.summary ?? "completed", 2400)
+    ];
+  }
+
+  return [
+    `[${formatTimestamp(event.createdAt)}] ${event.type}`,
+    formatDisplayValue(payload, 2400)
+  ];
+}
+
+function formatLiveOrchestratorEvent(event: OrchestratorEvent): string {
+  const [header, body] = withLogLevel(summarizeEvent(event), getEventLogLevel(event));
+  return `${header}: ${body}`;
+}
+
+function formatNodePhaseLabel(phase: string): string {
+  const labels = languagePreference === "ko"
+    ? {
+      init: "시작 전",
+      abstract_plan: "방향 설정",
+      gather: "정보 수집",
+      evidence_consolidation: "근거 정리",
+      concrete_plan: "실행 계획",
+      review: "검토",
+      execute: "실행 중",
+      verify: "검증",
+      done: "완료",
+      replan: "재계획",
+      escalated: "상위 판단 필요"
+    }
+    : {
+      init: "Queued",
+      abstract_plan: "Scoping",
+      gather: "Gathering",
+      evidence_consolidation: "Consolidating",
+      concrete_plan: "Planning",
+      review: "Reviewing",
+      execute: "Executing",
+      verify: "Verifying",
+      done: "Done",
+      replan: "Replanning",
+      escalated: "Escalated"
+    };
+
+  return labels[phase as keyof typeof labels] ?? phase.replaceAll("_", " ");
+}
+
+function formatModelLabel(modelId: string | null | undefined, modelName?: string | null, provider?: string | null): string {
+  const parts = [modelName, provider, modelId]
+    .map((value) => value?.trim())
+    .filter((value): value is string => Boolean(value && value.length > 0));
+
+  const uniqueParts = Array.from(new Set(parts));
+  return uniqueParts[0] ? uniqueParts.join(" · ") : "unknown";
+}
+
+function extractModelResultSummary(result: unknown): string {
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+    if (summary.length > 0) {
+      return formatDisplayString(summary, 320);
+    }
+
+    const findings = Array.isArray(record.findings)
+      ? record.findings.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      : [];
+    if (findings.length > 0) {
+      return formatDisplayString(findings.join(" | "), 320);
+    }
+  }
+
+  if (result === undefined) {
+    return languagePreference === "ko" ? "모델 응답 수신" : "Model response received";
+  }
+
+  return formatDisplayValue(result, 320);
+}
+
+function formatAssignedModelLabel(model: OrchestratorModelRef): string {
+  const label = formatModelLabel(model.id, model.model, model.provider);
+  const tier = model.tier?.trim();
+  const reasoning = model.reasoningEffort?.trim();
+  const parts = [label];
+  if (tier) parts.push(tier);
+  if (reasoning) parts.push(`${reasoning} reasoning`);
+  return parts.join(" · ");
+}
+
+function getAssignedNodeModels(node: OrchestratorPlanNode): string[] {
+  const assignedModels = node.assignedModels ? Object.values(node.assignedModels) : [];
+
+  return Array.from(new Set(
+    assignedModels
+      .filter((model): model is OrchestratorModelRef => Boolean(model))
+      .map((model) => formatAssignedModelLabel(model))
+  ));
+}
+
+function getUsedNodeModels(detail: OrchestratorRunDetail, node: OrchestratorPlanNode): string[] {
+  const assignedModelsById = new Map(
+    (node.assignedModels ? Object.values(node.assignedModels) : [])
+      .filter((model): model is OrchestratorModelRef => Boolean(model))
+      .map((model) => [model.id, model] as const)
+  );
+
+  return Array.from(new Set(
+    detail.events
+      .filter((event) => event.nodeId === node.id && event.type === "model_invocation")
+      .map((event) => {
+        const modelId = typeof event.payload.modelId === "string" ? event.payload.modelId : undefined;
+        const assignedModel = modelId ? assignedModelsById.get(modelId) : undefined;
+        return assignedModel
+          ? formatAssignedModelLabel(assignedModel)
+          : formatModelLabel(
+            modelId,
+            typeof event.payload.model === "string" ? event.payload.model : undefined,
+            typeof event.payload.provider === "string" ? event.payload.provider : undefined
+          );
+      })
+  ));
+}
+
+function getNodeModelLabels(detail: OrchestratorRunDetail, node: OrchestratorPlanNode): string[] {
+  const usedModels = getUsedNodeModels(detail, node);
+  if (usedModels.length > 0) {
+    return usedModels;
+  }
+
+  return getAssignedNodeModels(node);
+}
+
+function formatCommand(command: string[]): string {
+  if (command.length === 0) {
+    return translate("ui.orchestratorNodeCommandEmpty");
+  }
+
+  return command
+    .map((part) => (/^[a-zA-Z0-9._/:=-]+$/.test(part) ? part : JSON.stringify(part)))
+    .join(" ");
+}
+
+function getNodeEvents(detail: OrchestratorRunDetail, nodeId: string): OrchestratorEvent[] {
+  return detail.events.filter((event) => event.nodeId === nodeId);
+}
+
+function getLatestEventFromList(events: OrchestratorEvent[], type: string): OrchestratorEvent | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type === type) {
+      return event;
+    }
+  }
+
+  return null;
+}
+
+function parseEventTimestamp(event: OrchestratorEvent | null): number {
+  if (!event) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const timestamp = Date.parse(event.createdAt);
+  return Number.isNaN(timestamp) ? Number.NEGATIVE_INFINITY : timestamp;
+}
+
+function mapCapabilityToPhase(capability: string | null | undefined): string | null {
+  const normalized = capability?.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === "abstractPlan") return "abstract_plan";
+  if (normalized === "gather") return "gather";
+  if (normalized === "concretePlan") return "concrete_plan";
+  if (normalized === "review") return "review";
+  if (normalized === "execute") return "execute";
+  if (normalized === "verify") return "verify";
+  return null;
+}
+
+function getNodeSchedulerMessage(event: OrchestratorEvent | null): string {
+  if (!event) {
+    return "";
+  }
+
+  return typeof event.payload.message === "string"
+    ? event.payload.message.trim()
+    : "";
+}
+
+function isNodeDetailEvent(event: OrchestratorEvent): boolean {
+  return event.type === "phase_transition"
+    || event.type === "acceptance_updated"
+    || event.type === "evidence_attached"
+    || event.type === "model_invocation"
+    || event.type === "model_response"
+    || event.type === "node_failed";
+}
+
+function humanizePayloadKey(key: string): string {
+  return key
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replaceAll("_", " ");
+}
+
+function formatPayloadDetails(
+  payload: Record<string, unknown>,
+  excludedKeys: string[] = [],
+  maxLength = 480
+): string[] {
+  const excluded = new Set(excludedKeys);
+  const orderedEntries = Object.entries(payload)
+    .filter(([key, value]) => {
+      if (excluded.has(key)) {
+        return false;
+      }
+
+      if (value === null || value === undefined) {
+        return false;
+      }
+
+      if (Array.isArray(value) && value.length === 0) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort(([left], [right]) => left.localeCompare(right));
+
+  return orderedEntries.map(([key, value]) => `${humanizePayloadKey(key)}: ${formatDisplayValue(value, maxLength)}`);
+}
+
+function formatModelInvocationDebugLog(event: OrchestratorEvent): string[] {
+  const lines = summarizeEvent(event);
+  const command = Array.isArray(event.payload.command)
+    ? event.payload.command.filter((value): value is string => typeof value === "string")
+    : [];
+  const prompt = typeof event.payload.prompt === "string"
+    ? event.payload.prompt.trim()
+    : formatDisplayValue(event.payload.prompt ?? {}, 2400);
+
+  if (command.length > 0) {
+    lines.push(`command: ${formatCommand(command)}`);
+  }
+
+  if (prompt.length > 0) {
+    lines.push("");
+    lines.push("prompt");
+    lines.push(formatDisplayString(prompt, 2400));
+  }
+
+  return lines;
+}
+
+function formatModelResponseDebugLog(event: OrchestratorEvent): string[] {
+  const lines = summarizeEvent(event);
+  const result = formatDisplayValue(event.payload.result ?? {}, 2400);
+  const rawStdout = typeof event.payload.rawStdout === "string" ? event.payload.rawStdout.trim() : "";
+  const rawStderr = typeof event.payload.rawStderr === "string" ? event.payload.rawStderr.trim() : "";
+
+  if (result.length > 0) {
+    lines.push("");
+    lines.push("result");
+    lines.push(result);
+  }
+
+  if (rawStdout.length > 0) {
+    lines.push("");
+    lines.push("stdout");
+    lines.push(formatDisplayString(rawStdout, 2400));
+  }
+
+  if (rawStderr.length > 0) {
+    lines.push("");
+    lines.push("stderr");
+    lines.push(formatDisplayString(rawStderr, 2400));
+  }
+
+  return lines;
+}
+
+function getEventLogLevel(event: OrchestratorEvent): "DEBUG" | "INFO" | "WARN" | "ERROR" {
+  if (event.type === "model_invocation" || event.type === "model_response") {
+    return "DEBUG";
+  }
+
+  if (event.type === "run_paused") {
+    return "WARN";
+  }
+
+  if (event.type === "node_failed" || event.type === "run_failed") {
+    return "ERROR";
+  }
+
+  return "INFO";
+}
+
+function withLogLevel(lines: string[], level: ReturnType<typeof getEventLogLevel>): string[] {
+  if (lines.length === 0) {
+    return [`[${level}]`];
+  }
+
+  return [`[${level}] ${lines[0]}`, ...lines.slice(1)];
+}
+
+function isOrchestratorOverviewEvent(event: OrchestratorEvent): boolean {
+  return event.type !== "";
+}
+
+function formatOrchestratorLogEntry(detail: OrchestratorRunDetail, event: OrchestratorEvent): string {
+  const [header, body] = withLogLevel(summarizeEvent(event), getEventLogLevel(event));
+  const nodeTitle = event.nodeId
+    ? detail.nodes.find((node) => node.id === event.nodeId)?.title ?? event.nodeId
+    : null;
+  const headerWithNode = nodeTitle ? `${header} · ${nodeTitle}` : header;
+  const detailLines: string[] = [];
+
+  if (event.type === "scheduler_progress") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["message"], 600));
+  } else if (event.type === "node_created") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["title", "depth"], 360));
+  } else if (event.type === "phase_transition") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["from", "to"], 360));
+  } else if (event.type === "node_decomposed") {
+    detailLines.push(...formatPayloadDetails(event.payload, [], 360));
+  } else if (event.type === "model_invocation") {
+    const command = Array.isArray(event.payload.command)
+      ? event.payload.command.filter((value): value is string => typeof value === "string")
+      : [];
+    if (command.length > 0) {
+      detailLines.push(`command: ${formatCommand(command)}`);
+    }
+    if (typeof event.payload.prompt === "string" && event.payload.prompt.trim().length > 0) {
+      detailLines.push(`prompt preview: ${formatDisplayString(event.payload.prompt, 560)}`);
+    }
+  } else if (event.type === "model_response") {
+    detailLines.push(`result preview: ${extractModelResultSummary(event.payload.result)}`);
+    if (typeof event.payload.rawStderr === "string" && event.payload.rawStderr.trim().length > 0) {
+      detailLines.push(`stderr preview: ${formatDisplayString(event.payload.rawStderr, 360)}`);
+    }
+  } else if (event.type === "node_failed" || event.type === "run_failed") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["error", "phase"], 600));
+  } else if (event.type === "run_completed" || event.type === "run_paused" || event.type === "acceptance_updated") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["summary", "reason", "criterionId", "status"], 480));
+  } else if (event.type === "evidence_attached") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["bundleId"], 360));
+  }
+
+  return [headerWithNode, body, ...detailLines]
+    .filter((line) => line.length > 0)
+    .join("\n");
+}
+
+function buildNodeProgressView(
+  detail: OrchestratorRunDetail,
+  node: OrchestratorPlanNode,
+  nodeEvents: OrchestratorEvent[]
+): OrchestratorNodeProgressView {
+  const selectedNodeModels = getNodeModelLabels(detail, node);
+  const lastScheduler = getLatestEventFromList(nodeEvents, "scheduler_progress");
+  const lastInvocation = getLatestEventFromList(nodeEvents, "model_invocation");
+  const lastResponse = getLatestEventFromList(nodeEvents, "model_response");
+  const lastFailure = getLatestEventFromList(nodeEvents, "node_failed");
+  const lastEvent = nodeEvents[nodeEvents.length - 1] ?? null;
+  const currentCapabilityPhase = mapCapabilityToPhase(
+    typeof lastInvocation?.payload.capability === "string" ? lastInvocation.payload.capability : undefined
+  );
+  const invocationInFlight = parseEventTimestamp(lastInvocation) > parseEventTimestamp(lastResponse)
+    && parseEventTimestamp(lastInvocation) > parseEventTimestamp(lastFailure);
+  const schedulerMessage = getNodeSchedulerMessage(lastScheduler);
+  const defaultDetail = schedulerMessage || formatDisplayString(node.objective, 220);
+  const responseSummary = lastResponse ? extractModelResultSummary(lastResponse.payload.result) : "";
+  const failurePhase = typeof lastFailure?.payload.phase === "string" ? lastFailure.payload.phase : node.phase;
+  const modelLabel = selectedNodeModels.join(", ") || (languagePreference === "ko" ? "모델 미정" : "Model pending");
+
+  let tone: OrchestratorProgressTone = "idle";
+  let summary = formatNodePhaseLabel(node.phase);
+  let detailLine = defaultDetail;
+
+  if (lastFailure) {
+    tone = "failed";
+    summary = `${formatNodePhaseLabel(failurePhase)} · ${languagePreference === "ko" ? "실패" : "Failed"}`;
+    detailLine = formatDisplayValue(lastFailure.payload.error ?? "unknown error", 240);
+  } else if (node.phase === "done") {
+    tone = "done";
+    summary = languagePreference === "ko" ? "노드 완료" : "Node completed";
+    detailLine = responseSummary || defaultDetail;
+  } else if (node.phase === "escalated") {
+    tone = "escalated";
+    summary = languagePreference === "ko" ? "상위 판단 대기" : "Waiting for escalation";
+    detailLine = defaultDetail;
+  } else if (detail.run.status === "paused") {
+    tone = "paused";
+    summary = languagePreference === "ko" ? "실행 일시중지" : "Run paused";
+    detailLine = defaultDetail;
+  } else if (node.phase === "replan") {
+    tone = "paused";
+    summary = languagePreference === "ko" ? "inspection 뒤 재계획 중" : "Replanning after inspection";
+    detailLine = defaultDetail;
+  } else if (invocationInFlight && lastInvocation) {
+    tone = "active";
+    const activeModelLabel = formatModelLabel(
+      typeof lastInvocation.payload.modelId === "string" ? lastInvocation.payload.modelId : undefined,
+      typeof lastInvocation.payload.model === "string" ? lastInvocation.payload.model : undefined,
+      typeof lastInvocation.payload.provider === "string" ? lastInvocation.payload.provider : undefined
+    );
+    summary = `${formatNodePhaseLabel(currentCapabilityPhase ?? node.phase)} · ${activeModelLabel}`;
+    detailLine = schedulerMessage || (languagePreference === "ko" ? "모델 응답 대기 중" : "Waiting for model response");
+  } else if (node.phase !== "init") {
+    tone = "active";
+    summary = formatNodePhaseLabel(node.phase);
+    detailLine = responseSummary || defaultDetail;
+  }
+
+  const completedPhases = new Set(
+    nodeEvents
+      .filter((event) => event.type === "phase_transition")
+      .map((event) => String(event.payload.from ?? ""))
+      .filter((phase): phase is string => ORCHESTRATOR_PHASE_TRACK.includes(phase as (typeof ORCHESTRATOR_PHASE_TRACK)[number]))
+  );
+  const observedPhases = new Set(
+    nodeEvents
+      .flatMap((event) => {
+        if (event.type !== "phase_transition") {
+          return [];
+        }
+
+        return [String(event.payload.from ?? ""), String(event.payload.to ?? "")];
+      })
+      .filter((phase): phase is string => ORCHESTRATOR_PHASE_TRACK.includes(phase as (typeof ORCHESTRATOR_PHASE_TRACK)[number]))
+  );
+
+  if (currentCapabilityPhase) {
+    observedPhases.add(currentCapabilityPhase);
+  }
+
+  if (ORCHESTRATOR_PHASE_TRACK.includes(node.phase as (typeof ORCHESTRATOR_PHASE_TRACK)[number])) {
+    observedPhases.add(node.phase);
+  }
+
+  const maxObservedIndex = Math.max(
+    ...Array.from(observedPhases).map((phase) => ORCHESTRATOR_PHASE_TRACK.indexOf(phase as (typeof ORCHESTRATOR_PHASE_TRACK)[number])),
+    0
+  );
+  const visiblePhases = (node.phase === "done" || node.phase === "escalated")
+    ? ORCHESTRATOR_PHASE_TRACK.slice(0, maxObservedIndex + 1)
+    : ORCHESTRATOR_PHASE_TRACK;
+  const activePhase = ORCHESTRATOR_PHASE_TRACK.includes(node.phase as (typeof ORCHESTRATOR_PHASE_TRACK)[number])
+    ? node.phase
+    : currentCapabilityPhase;
+  const failureMessage = lastFailure
+    ? formatDisplayValue(lastFailure.payload.error ?? "unknown error", 140)
+    : "";
+  const activeMessage = schedulerMessage || (
+    invocationInFlight
+      ? (languagePreference === "ko" ? "응답 대기 중" : "Waiting for response")
+      : responseSummary
+  );
+  const steps = visiblePhases.map((phase) => {
+    let state: OrchestratorNodeProgressStepState = "pending";
+    let stepDetail = "";
+
+    if (lastFailure && phase === failurePhase) {
+      state = "failed";
+      stepDetail = failureMessage;
+    } else if (activePhase === phase && node.phase !== "done" && node.phase !== "escalated") {
+      state = "active";
+      stepDetail = activeMessage;
+    } else if (completedPhases.has(phase) || (node.phase === "done" && observedPhases.has(phase))) {
+      state = "done";
+      if (phase === currentCapabilityPhase && responseSummary) {
+        stepDetail = responseSummary;
+      }
+    }
+
+    return {
+      phase,
+      label: formatNodePhaseLabel(phase),
+      state,
+      detail: stepDetail
+    };
+  });
+  const completedStepCount = steps.filter((step) => step.state === "done").length;
+  const activeStepCount = steps.some((step) => step.state === "active" || step.state === "failed") ? 1 : 0;
+  const completionRatio = steps.length === 0
+    ? 0
+    : Math.min(1, (completedStepCount + (tone === "done" ? 1 : activeStepCount * 0.55)) / steps.length);
+
+  return {
+    tone,
+    summary,
+    detail: detailLine,
+    objective: node.objective,
+    model: modelLabel,
+    updatedAt: formatTimestamp(lastEvent?.createdAt ?? detail.run.updatedAt),
+    completionRatio,
+    steps
+  };
+}
+
+function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): SelectedNodeLiveView {
+  if (!detail) {
+    return {
+      status: translate("ui.orchestratorCommandStatusIdle"),
+      progress: null,
+      command: translate("ui.orchestratorNodeCommandEmpty"),
+      log: translate("ui.orchestratorNodeLogEmpty")
+    };
+  }
+
+  const selectedNode = resolveSelectedOrchestratorNode(detail);
+  if (!selectedNode) {
+    return {
+      status: translate("ui.orchestratorCommandStatusIdle"),
+      progress: null,
+      command: translate("ui.orchestratorNodeCommandEmpty"),
+      log: translate("ui.orchestratorNodeLogEmpty")
+    };
+  }
+
+  const nodeEvents = getNodeEvents(detail, selectedNode.id);
+  const progress = buildNodeProgressView(detail, selectedNode, nodeEvents);
+  const lastInvocation = getLatestEventFromList(nodeEvents, "model_invocation");
+  const lastResponse = getLatestEventFromList(nodeEvents, "model_response");
+  const lastFailure = getLatestEventFromList(nodeEvents, "node_failed");
+  const command = Array.isArray(lastInvocation?.payload.command)
+    ? lastInvocation.payload.command.filter((value): value is string => typeof value === "string")
+    : [];
+
+  let status = translate("ui.orchestratorCommandStatusIdle");
+  if (lastFailure) {
+    status = translate("ui.orchestratorCommandStatusFailed");
+  } else if (lastResponse) {
+    status = translate("ui.orchestratorCommandStatusResponded");
+  } else if (lastInvocation) {
+    status = translate("ui.orchestratorCommandStatusDispatched");
+  } else if (selectedNode.phase === "done") {
+    status = translate("ui.orchestratorCommandStatusResponded");
+  }
+
+  const nodeLogEvents = nodeEvents
+    .filter((event) => isNodeDetailEvent(event))
+    .slice(-ORCHESTRATOR_NODE_LOG_EVENT_LIMIT);
+  const logLines: string[] = [];
+  for (const event of nodeLogEvents) {
+    let lines: string[];
+    if (event.type === "model_invocation") {
+      lines = formatModelInvocationDebugLog(event);
+    } else if (event.type === "model_response") {
+      lines = formatModelResponseDebugLog(event);
+    } else {
+      lines = summarizeEvent(event);
+    }
+    logLines.push(...withLogLevel(lines, getEventLogLevel(event)));
+    logLines.push("");
+  }
+
+  return {
+    status,
+    progress,
+    command: command.length > 0 ? formatCommand(command) : translate("ui.orchestratorNodeCommandEmpty"),
+    log: logLines.join("\n").trim() || translate("ui.orchestratorNodeLogEmpty")
+  };
+}
+
+function buildOrchestratorLog(detail: OrchestratorRunDetail | null): string {
+  if (!detail) {
+    return translate("ui.orchestratorLogEmpty");
+  }
+
+  const visibleEvents = detail.events
+    .filter((event) => isOrchestratorOverviewEvent(event))
+    .slice(-ORCHESTRATOR_RUN_LOG_EVENT_LIMIT);
+  if (visibleEvents.length === 0) {
+    return translate("ui.orchestratorLogEmpty");
+  }
+
+  return visibleEvents
+    .map((event) => formatOrchestratorLogEntry(detail, event))
+    .join("\n\n")
+    .trim();
+}
+
+function renderNodeProgressPanel(container: HTMLDivElement, progress: OrchestratorNodeProgressView | null) {
+  container.replaceChildren();
+
+  if (!progress) {
+    container.textContent = translate("ui.orchestratorNodeLiveEmpty");
+    return;
+  }
+
+  const shell = document.createElement("div");
+  shell.className = `orchestrator-progress-shell tone-${progress.tone}`;
+
+  const overview = document.createElement("div");
+  overview.className = "orchestrator-progress-overview";
+
+  const kicker = document.createElement("div");
+  kicker.className = "orchestrator-progress-kicker";
+  kicker.textContent = translate("ui.orchestratorNodeProgressCurrent");
+
+  const summary = document.createElement("div");
+  summary.className = "orchestrator-progress-summary";
+
+  const pulse = document.createElement("span");
+  pulse.className = "orchestrator-progress-pulse";
+
+  const summaryText = document.createElement("strong");
+  summaryText.textContent = progress.summary;
+
+  summary.append(pulse, summaryText);
+
+  const detail = document.createElement("div");
+  detail.className = "orchestrator-progress-detail";
+  detail.textContent = progress.detail;
+
+  overview.append(kicker, summary, detail);
+
+  const stats = document.createElement("dl");
+  stats.className = "orchestrator-progress-stats";
+
+  const appendStat = (label: string, value: string) => {
+    const row = document.createElement("div");
+    row.className = "orchestrator-progress-stat";
+
+    const term = document.createElement("dt");
+    term.textContent = label;
+
+    const description = document.createElement("dd");
+    description.textContent = value;
+
+    row.append(term, description);
+    stats.appendChild(row);
+  };
+
+  appendStat(translate("ui.orchestratorNodeProgressObjective"), progress.objective);
+  appendStat(translate("ui.orchestratorNodeProgressModel"), progress.model);
+  appendStat(translate("ui.orchestratorNodeProgressUpdated"), progress.updatedAt);
+
+  const track = document.createElement("div");
+  track.className = "orchestrator-progress-track";
+
+  const trackHeader = document.createElement("div");
+  trackHeader.className = "orchestrator-progress-kicker";
+  trackHeader.textContent = translate("ui.orchestratorNodeProgressTrack");
+
+  const bar = document.createElement("div");
+  bar.className = "orchestrator-progress-bar";
+
+  const fill = document.createElement("div");
+  fill.className = "orchestrator-progress-bar-fill";
+  fill.style.width = `${Math.max(0, Math.min(100, progress.completionRatio * 100))}%`;
+
+  bar.appendChild(fill);
+
+  const steps = document.createElement("ol");
+  steps.className = "orchestrator-progress-steps";
+
+  for (const step of progress.steps) {
+    const item = document.createElement("li");
+    item.className = `orchestrator-progress-step state-${step.state}`;
+
+    const marker = document.createElement("span");
+    marker.className = "orchestrator-progress-step-marker";
+
+    const body = document.createElement("div");
+    body.className = "orchestrator-progress-step-body";
+
+    const title = document.createElement("div");
+    title.className = "orchestrator-progress-step-title";
+    title.textContent = step.label;
+
+    body.appendChild(title);
+
+    if (step.detail.length > 0) {
+      const subtitle = document.createElement("div");
+      subtitle.className = "orchestrator-progress-step-detail";
+      subtitle.textContent = step.detail;
+      body.appendChild(subtitle);
+    }
+
+    item.append(marker, body);
+    steps.appendChild(item);
+  }
+
+  track.append(trackHeader, bar, steps);
+  shell.append(overview, stats, track);
+  container.appendChild(shell);
+}
+
+function getNodeActivityPreview(detail: OrchestratorRunDetail, node: OrchestratorPlanNode): {
+  tone: OrchestratorProgressTone;
+  summary: string;
+} {
+  const progress = buildNodeProgressView(detail, node, getNodeEvents(detail, node.id));
+  return {
+    tone: progress.tone,
+    summary: progress.detail.length > 0
+      ? `${progress.summary} · ${truncateText(progress.detail, 96)}`
+      : progress.summary
+  };
+}
+
+function resolveSelectedOrchestratorNode(detail: OrchestratorRunDetail | null): OrchestratorPlanNode | null {
+  if (!detail || detail.nodes.length === 0) {
+    selectedOrchestratorNodeId = null;
+    return null;
+  }
+
+  const existingNode = selectedOrchestratorNodeId
+    ? detail.nodes.find((node) => node.id === selectedOrchestratorNodeId) ?? null
+    : null;
+  if (existingNode) {
+    return existingNode;
+  }
+
+  const defaultNode = detail.nodes.find((node) => node.parentId === null) ?? detail.nodes[0] ?? null;
+  selectedOrchestratorNodeId = defaultNode?.id ?? null;
+  return defaultNode;
+}
+
+function renderOrchestratorRunList() {
+  const signature = `${languagePreference}|${selectedOrchestratorRunId ?? ""}|${orchestratorRuns
+    .map((run) => `${run.id}:${run.status}:${run.updatedAt}`)
+    .join("|")}`;
+  if (signature === lastOrchestratorRunListSignature) {
+    return;
+  }
+
+  lastOrchestratorRunListSignature = signature;
+  orchestratorRunListEl.innerHTML = "";
+
+  if (orchestratorRuns.length === 0) {
+    const emptyItem = document.createElement("li");
+    emptyItem.className = "empty";
+    emptyItem.textContent = translate("ui.orchestratorNoRuns");
+    orchestratorRunListEl.appendChild(emptyItem);
+    return;
+  }
+
+  for (const run of orchestratorRuns) {
+    const item = document.createElement("li");
+    if (run.id === selectedOrchestratorRunId) item.classList.add("active");
+
+    const goal = document.createElement("strong");
+    goal.className = "orchestrator-run-goal";
+    goal.textContent = run.goal;
+
+    const meta = document.createElement("span");
+    meta.className = "orchestrator-run-meta";
+    meta.textContent = `${run.status} · ${formatTimestamp(run.updatedAt)}`;
+
+    item.append(goal, meta);
+    item.addEventListener("click", () => {
+      void selectOrchestratorRun(run.id);
+    });
+    orchestratorRunListEl.appendChild(item);
+  }
+}
+
+function renderOrchestratorDetail() {
+  const selectedNode = resolveSelectedOrchestratorNode(selectedOrchestratorRun);
+  const signature = selectedOrchestratorRun
+    ? [
+      languagePreference,
+      selectedOrchestratorRun.run.id,
+      selectedOrchestratorRun.run.status,
+      selectedOrchestratorRun.run.updatedAt,
+      selectedOrchestratorRun.run.completedAt ?? "",
+      String(selectedOrchestratorRun.nodes.length),
+      String(selectedOrchestratorRun.events.length),
+      selectedOrchestratorRun.finalReport?.summary ?? "",
+      selectedNode?.id ?? "",
+      String(selectedOrchestratorRun.workingMemory.openQuestions.filter((question) => question.status === "open").length),
+      String(selectedOrchestratorRun.workingMemory.unknowns.filter((unknown) => unknown.status === "open").length)
+    ].join("|")
+    : `__empty__:${languagePreference}`;
+
+  if (signature === lastOrchestratorDetailSignature) {
+    return;
+  }
+
+  lastOrchestratorDetailSignature = signature;
+  const liveView = buildSelectedNodeLiveView(selectedOrchestratorRun);
+  orchestratorNodeLiveStatusEl.textContent = liveView.status;
+  renderNodeProgressPanel(orchestratorNodeLiveMetaEl, liveView.progress);
+  orchestratorNodeCommandEl.textContent = liveView.command;
+  orchestratorNodeLogEl.textContent = liveView.log;
+  orchestratorLogEl.textContent = buildOrchestratorLog(selectedOrchestratorRun);
+  syncLogViewerContent();
+}
+
+function renderOrchestratorTree() {
+  const selectedNode = resolveSelectedOrchestratorNode(selectedOrchestratorRun);
+  const signature = selectedOrchestratorRun
+    ? [
+      languagePreference,
+      selectedOrchestratorRun.run.id,
+      selectedOrchestratorRun.run.updatedAt,
+      selectedNode?.id ?? "",
+      selectedOrchestratorRun.nodes
+        .map((node) => `${node.id}:${node.parentId ?? "root"}:${node.phase}:${node.depth}:${node.title}`)
+        .join("|")
+    ].join("|")
+    : `__empty__:${languagePreference}`;
+
+  if (signature === lastOrchestratorTreeSignature) {
+    return;
+  }
+
+  lastOrchestratorTreeSignature = signature;
+  orchestratorTreeTitleEl.textContent = translate("ui.orchestratorTreeTitle");
+
+  const detail = selectedOrchestratorRun;
+  const nodes = selectedOrchestratorRun?.nodes ?? [];
+  orchestratorTreeMetaEl.textContent = translate("ui.orchestratorTreeMeta", { count: String(nodes.length) });
+  orchestratorTreeEl.innerHTML = "";
+
+  if (!detail || nodes.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "orchestrator-tree-empty";
+    empty.textContent = translate("ui.orchestratorTreeEmpty");
+    orchestratorTreeEl.appendChild(empty);
+    return;
+  }
+
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const childMap = new Map<string | null, OrchestratorPlanNode[]>();
+
+  for (const node of nodes) {
+    const parentKey = node.parentId && nodeById.has(node.parentId) ? node.parentId : null;
+    const siblings = childMap.get(parentKey) ?? [];
+    siblings.push(node);
+    childMap.set(parentKey, siblings);
+  }
+
+  const buildTreeList = (parentId: string | null): HTMLUListElement | null => {
+    const children = childMap.get(parentId);
+    if (!children || children.length === 0) {
+      return null;
+    }
+
+    const list = document.createElement("ul");
+    list.className = parentId === null ? "orchestrator-tree-list" : "orchestrator-tree-children";
+
+    for (const node of children) {
+      const item = document.createElement("li");
+      item.className = "orchestrator-tree-item";
+
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = `orchestrator-tree-node phase-${node.phase}`;
+      if (selectedNode?.id === node.id) {
+        card.classList.add("active");
+      }
+      card.title = node.objective;
+      card.addEventListener("click", () => {
+        selectedOrchestratorNodeId = node.id;
+        renderOrchestratorTree();
+        renderOrchestratorDetail();
+      });
+
+      const head = document.createElement("div");
+      head.className = "orchestrator-tree-node-head";
+
+      const title = document.createElement("strong");
+      title.className = "orchestrator-tree-node-title";
+      title.textContent = node.title;
+
+      const phase = document.createElement("span");
+      phase.className = "orchestrator-tree-node-phase";
+      phase.textContent = formatNodePhaseLabel(node.phase);
+
+      head.append(title, phase);
+
+      const depth = document.createElement("div");
+      depth.className = "orchestrator-tree-node-depth";
+      depth.textContent = `depth ${node.depth}`;
+
+      const objective = document.createElement("div");
+      objective.className = "orchestrator-tree-node-objective";
+      objective.textContent = node.objective;
+
+      const models = getNodeModelLabels(detail, node);
+      const modelSummary = document.createElement("div");
+      modelSummary.className = "orchestrator-tree-node-models";
+      modelSummary.textContent = models.length > 0
+        ? models.join(", ")
+        : (languagePreference === "ko" ? "모델 미정" : "Model pending");
+
+      const activity = getNodeActivityPreview(detail, node);
+      const activitySummary = document.createElement("div");
+      activitySummary.className = `orchestrator-tree-node-activity tone-${activity.tone}`;
+      activitySummary.textContent = activity.summary;
+
+      card.append(head, depth, objective, modelSummary, activitySummary);
+      item.append(card);
+
+      const branch = buildTreeList(node.id);
+      if (branch) {
+        item.append(branch);
+      }
+
+      list.appendChild(item);
+    }
+
+    return list;
+  };
+
+  const rootList = buildTreeList(null);
+  if (rootList) {
+    orchestratorTreeEl.appendChild(rootList);
+  }
+}
+
 function isThemePreference(value: string | undefined): value is ThemePreference {
-  return value === "system" || value === "light" || value === "dark";
+  return value === "light" || value === "dark";
 }
 
 function isLanguageCode(value: string | undefined): value is LanguageCode {
@@ -291,11 +1933,17 @@ function getInitialThemePreference(): ThemePreference {
   try {
     const storedPreference = window.localStorage.getItem(THEME_STORAGE_KEY) ?? undefined;
     if (isThemePreference(storedPreference)) return storedPreference;
+
+    if (storedPreference === "system") {
+      const resolvedTheme: ThemePreference = appWindow.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      window.localStorage.setItem(THEME_STORAGE_KEY, resolvedTheme);
+      return resolvedTheme;
+    }
   } catch {
-    // Ignore storage access failures and fall back to the system theme.
+    // Ignore storage access failures and fall back to the default theme.
   }
 
-  return "system";
+  return "light";
 }
 
 function getInitialLanguagePreference(): LanguageCode {
@@ -319,17 +1967,11 @@ function getInitialWorkspacePath(): string | null {
 }
 
 function resolveTheme(preference: ThemePreference): ResolvedTheme {
-  if (preference === "light" || preference === "dark") return preference;
-  return darkThemeMedia.matches ? "dark" : "light";
+  return preference;
 }
 
 function persistThemePreference(preference: ThemePreference) {
   try {
-    if (preference === "system") {
-      window.localStorage.removeItem(THEME_STORAGE_KEY);
-      return;
-    }
-
     window.localStorage.setItem(THEME_STORAGE_KEY, preference);
   } catch {
     // Ignore storage access failures and continue with an in-memory selection.
@@ -365,13 +2007,187 @@ function persistWorkspacePath(workspacePath: string) {
   }
 }
 
+function getInitialMainSplitterRatio(): number | null {
+  try {
+    const storedRatio = window.localStorage.getItem(MAIN_SPLITTER_RATIO_STORAGE_KEY);
+    if (!storedRatio) return null;
+
+    const ratio = Number.parseFloat(storedRatio);
+    if (!Number.isFinite(ratio)) return null;
+    if (ratio < MAIN_SPLITTER_MIN_RATIO || ratio > MAIN_SPLITTER_MAX_RATIO) return null;
+    return ratio;
+  } catch {
+    return null;
+  }
+}
+
+function persistMainSplitterRatio(ratio: number) {
+  try {
+    window.localStorage.setItem(MAIN_SPLITTER_RATIO_STORAGE_KEY, ratio.toFixed(4));
+  } catch {
+    // Ignore storage access failures and keep the in-memory size.
+  }
+}
+
+function clearMainSplitterRatio() {
+  try {
+    window.localStorage.removeItem(MAIN_SPLITTER_RATIO_STORAGE_KEY);
+  } catch {
+    // Ignore storage access failures and keep the computed size.
+  }
+}
+
+function isDesktopMainSplitterEnabled(): boolean {
+  return false;
+}
+
+function setMainSplitterRatio(ratio: number, persist = true) {
+  const clampedRatio = Math.min(MAIN_SPLITTER_MAX_RATIO, Math.max(MAIN_SPLITTER_MIN_RATIO, ratio));
+  mainSplitterRatio = clampedRatio;
+
+  if (!isDesktopMainSplitterEnabled()) {
+    mainEl.style.removeProperty("--orchestrator-panel-height");
+    return;
+  }
+
+  const computedStyle = appWindow.getComputedStyle(mainEl);
+  const splitterSize = Number.parseFloat(computedStyle.getPropertyValue("--main-splitter-size")) || 12;
+  const paddingTop = Number.parseFloat(computedStyle.paddingTop) || 0;
+  const paddingBottom = Number.parseFloat(computedStyle.paddingBottom) || 0;
+  const minHeight = Number.parseFloat(computedStyle.getPropertyValue("--orchestrator-panel-min-height")) || 280;
+  const maxHeight = Math.max(
+    minHeight,
+    mainEl.clientHeight
+      - paddingTop
+      - paddingBottom
+      - splitterSize
+      - (Number.parseFloat(computedStyle.getPropertyValue("--terminal-panel-min-height")) || 220)
+  );
+  const availableHeight = Math.max(0, maxHeight);
+  const nextHeight = Math.min(maxHeight, Math.max(minHeight, availableHeight * clampedRatio));
+  mainEl.style.setProperty("--orchestrator-panel-height", `${nextHeight}px`);
+
+  if (persist) {
+    persistMainSplitterRatio(clampedRatio);
+  }
+}
+
+function syncMainSplitterLayout(persist = false) {
+  if (!isDesktopMainSplitterEnabled()) {
+    mainEl.style.removeProperty("--orchestrator-panel-height");
+    if (!persist) return;
+    clearMainSplitterRatio();
+    return;
+  }
+
+  if (mainSplitterRatio === null) {
+    mainSplitterRatio = 0.46;
+  }
+
+  setMainSplitterRatio(mainSplitterRatio, persist);
+}
+
+function updateMainSplitterAria() {
+  if (!isDesktopMainSplitterEnabled()) {
+    mainSplitterEl.setAttribute("aria-valuenow", "0");
+    return;
+  }
+
+  const rect = mainEl.getBoundingClientRect();
+  mainSplitterEl.setAttribute("aria-valuemin", String(MAIN_SPLITTER_MIN_RATIO * 100));
+  mainSplitterEl.setAttribute("aria-valuemax", String(MAIN_SPLITTER_MAX_RATIO * 100));
+  if (rect.height <= 0) return;
+
+  const computedStyle = appWindow.getComputedStyle(mainEl);
+  const currentHeightValue = mainEl.style.getPropertyValue("--orchestrator-panel-height");
+  const currentHeight = Number.parseFloat(currentHeightValue) || Number.parseFloat(computedStyle.getPropertyValue("--orchestrator-panel-height"));
+  if (!Number.isFinite(currentHeight)) return;
+
+  const splitterSize = Number.parseFloat(computedStyle.getPropertyValue("--main-splitter-size")) || 12;
+  const paddingTop = Number.parseFloat(computedStyle.paddingTop) || 0;
+  const paddingBottom = Number.parseFloat(computedStyle.paddingBottom) || 0;
+  const usableHeight = Math.max(1, rect.height - paddingTop - paddingBottom - splitterSize);
+  const valueNow = Math.round((currentHeight / usableHeight) * 100);
+  mainSplitterEl.setAttribute(
+    "aria-valuenow",
+    String(Math.min(MAIN_SPLITTER_MAX_RATIO * 100, Math.max(MAIN_SPLITTER_MIN_RATIO * 100, valueNow)))
+  );
+}
+
+function initializeMainSplitter() {
+  syncMainSplitterLayout();
+  updateMainSplitterAria();
+
+  const updateFromClientY = (clientY: number, persist = true) => {
+    const rect = mainEl.getBoundingClientRect();
+    const computedStyle = appWindow.getComputedStyle(mainEl);
+    const splitterSize = Number.parseFloat(computedStyle.getPropertyValue("--main-splitter-size")) || 12;
+    const paddingTop = Number.parseFloat(computedStyle.paddingTop) || 0;
+    const paddingBottom = Number.parseFloat(computedStyle.paddingBottom) || 0;
+    const usableHeight = rect.height - paddingTop - paddingBottom - splitterSize;
+    if (usableHeight <= 0) return;
+
+    const offset = clientY - rect.top - paddingTop;
+    const ratio = offset / usableHeight;
+    setMainSplitterRatio(ratio, persist);
+    updateMainSplitterAria();
+    scheduleFitAllSessions();
+  };
+
+  mainSplitterEl.addEventListener("pointerdown", (event) => {
+    if (!isDesktopMainSplitterEnabled()) return;
+    event.preventDefault();
+    document.body.dataset.mainSplitterDragging = "true";
+    mainSplitterEl.setPointerCapture(event.pointerId);
+  });
+
+  mainSplitterEl.addEventListener("pointermove", (event) => {
+    if (document.body.dataset.mainSplitterDragging !== "true") return;
+    updateFromClientY(event.clientY, false);
+  });
+
+  const finishDrag = (event: PointerEvent) => {
+    if (document.body.dataset.mainSplitterDragging !== "true") return;
+    document.body.dataset.mainSplitterDragging = "false";
+    if (mainSplitterEl.hasPointerCapture(event.pointerId)) {
+      mainSplitterEl.releasePointerCapture(event.pointerId);
+    }
+    updateFromClientY(event.clientY, true);
+  };
+
+  mainSplitterEl.addEventListener("pointerup", finishDrag);
+  mainSplitterEl.addEventListener("pointercancel", finishDrag);
+
+  mainSplitterEl.addEventListener("keydown", (event) => {
+    if (!isDesktopMainSplitterEnabled()) return;
+
+    if (mainSplitterRatio === null) {
+      mainSplitterRatio = 0.46;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setMainSplitterRatio(mainSplitterRatio - 0.03);
+      updateMainSplitterAria();
+      scheduleFitAllSessions();
+      return;
+    }
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setMainSplitterRatio(mainSplitterRatio + 0.03);
+      updateMainSplitterAria();
+      scheduleFitAllSessions();
+    }
+  });
+}
+
 function updateThemeControls(preference: ThemePreference) {
   for (const button of themeButtons) {
     const isActive = button.dataset.themeOption === preference;
     button.classList.toggle("active", isActive);
     button.setAttribute("aria-pressed", String(isActive));
 
-    if (button.dataset.themeOption === "system") button.textContent = translate("ui.themeSystem");
     if (button.dataset.themeOption === "light") button.textContent = translate("ui.themeLight");
     if (button.dataset.themeOption === "dark") button.textContent = translate("ui.themeDark");
   }
@@ -405,11 +2221,25 @@ function updateWorkspaceSummary() {
 }
 
 function updateSessionCreationState() {
-  const disabled = currentWorkspacePath === null;
+  const disabled = currentWorkspacePath === null || isResetting;
+  workspaceOpenButton.disabled = isResetting;
+  workspaceCreateButton.disabled = isResetting;
   newShellButton.disabled = disabled;
   newCodexButton.disabled = disabled || isToolUpdateRunning;
   newGeminiButton.disabled = disabled || isToolUpdateRunning;
-  toolsUpdateButton.disabled = isToolUpdateRunning;
+  toolsUpdateButton.disabled = isToolUpdateRunning || isResetting || isOrchestratorRunning;
+  resetAppButton.disabled = isToolUpdateRunning || isResetting || isOrchestratorRunning;
+}
+
+function updateOrchestratorControls() {
+  const missingWorkspace = currentWorkspacePath === null;
+  const controlsDisabled = isOrchestratorRunning || isResetting;
+  orchestratorRunButton.disabled = controlsDisabled || missingWorkspace;
+  orchestratorStopButton.disabled = !isOrchestratorRunning || !liveOrchestratorRunId || isOrchestratorStopRequested || isResetting;
+  orchestratorContinueButton.disabled = controlsDisabled || !selectedOrchestratorRunId || missingWorkspace;
+  orchestratorRefreshButton.disabled = controlsDisabled;
+  orchestratorModeSelect.disabled = controlsDisabled;
+  resetAppButton.disabled = isToolUpdateRunning || isResetting || isOrchestratorRunning;
 }
 
 function refreshTerminalPaneCopy() {
@@ -434,7 +2264,41 @@ function refreshLocalizedContent() {
   newShellButton.textContent = `+${translateKind("shell")}`;
   newCodexButton.textContent = `+${translateKind("codex")}`;
   newGeminiButton.textContent = `+${translateKind("gemini")}`;
+  resetAppButton.textContent = translate("ui.resetApp");
   sessionSectionTitle.textContent = translate("ui.sessionsTitle");
+  orchestratorTitleEl.textContent = translate("ui.orchestratorTitle");
+  orchestratorSubtitleEl.textContent = translate("ui.orchestratorSubtitle");
+  orchestratorGoalLabelEl.textContent = translate("ui.orchestratorGoalLabel");
+  orchestratorModeLabelEl.textContent = translate("ui.orchestratorModeLabel");
+  orchestratorGoalInput.placeholder = translate("ui.orchestratorGoalPlaceholder");
+  orchestratorContinueButton.textContent = translate("ui.orchestratorContinue");
+  orchestratorStopButton.textContent = translate("ui.orchestratorStop");
+  orchestratorRunButton.textContent = translate("ui.orchestratorRun");
+  orchestratorRefreshButton.textContent = translate("ui.orchestratorRefresh");
+  orchestratorRunsTitleEl.textContent = translate("ui.orchestratorRunsTitle");
+  orchestratorDetailTitleEl.textContent = translate("ui.orchestratorDetailTitle");
+  orchestratorNodeLiveTitleEl.textContent = translate("ui.orchestratorNodeLiveTitle");
+  orchestratorNodeCommandTitleEl.textContent = translate("ui.orchestratorNodeCommandTitle");
+  orchestratorNodeCommandOpenButton.textContent = translate("ui.orchestratorOpenViewer");
+  orchestratorNodeCommandCopyButton.textContent = translate("ui.orchestratorDetailCopy");
+  orchestratorNodeLogTitleEl.textContent = translate("ui.orchestratorNodeLogTitle");
+  orchestratorNodeLogOpenButton.textContent = translate("ui.orchestratorOpenViewer");
+  orchestratorNodeLogCopyButton.textContent = translate("ui.orchestratorDetailCopy");
+  orchestratorLogTitleEl.textContent = translate("ui.orchestratorLogTitle");
+  orchestratorLogOpenButton.textContent = translate("ui.orchestratorOpenViewer");
+  orchestratorLogCopyButton.textContent = translate("ui.orchestratorDetailCopy");
+  logViewerTitleEl.textContent = activeLogViewerSource?.titleElement.textContent?.trim() || translate("ui.logViewerTitle");
+  logViewerCopyButton.textContent = translate("ui.orchestratorDetailCopy");
+  logViewerCloseButton.textContent = translate("ui.close");
+  workspaceEmptyTitleEl.textContent = translate("ui.noOpenTabsTitle");
+  workspaceEmptyCopyEl.textContent = translate("ui.noOpenTabsCopy");
+  const crossReviewOption = orchestratorModeSelect.querySelector('option[value="cross_review"]');
+  const geminiOnlyOption = orchestratorModeSelect.querySelector('option[value="gemini_only"]');
+  const codexOnlyOption = orchestratorModeSelect.querySelector('option[value="codex_only"]');
+  if (crossReviewOption) crossReviewOption.textContent = translate("ui.orchestratorModeCrossReview");
+  if (geminiOnlyOption) geminiOnlyOption.textContent = translate("ui.orchestratorModeGeminiOnly");
+  if (codexOnlyOption) codexOnlyOption.textContent = translate("ui.orchestratorModeCodexOnly");
+  orchestratorModeSelect.value = orchestratorMode;
   terminalRoot.dataset.emptyMessage = translate("ui.emptyState");
   themeSwitcher.setAttribute("aria-label", translate("ui.themeGroupLabel"));
   languageSwitcher.setAttribute("aria-label", translate("ui.languageGroupLabel"));
@@ -446,7 +2310,102 @@ function refreshLocalizedContent() {
   refreshTerminalPaneCopy();
   refreshLogbar();
   updateSessionCreationState();
+  updateOrchestratorControls();
   updateTerminalRootState();
+  renderOrchestratorRunList();
+  renderOrchestratorDetail();
+  renderOrchestratorTree();
+  renderWorkspaceTabs();
+  renderWorkspacePanels();
+}
+
+async function copyTextToClipboard(value: string) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  const copied = document.execCommand("copy");
+  textarea.remove();
+
+  if (!copied) {
+    throw new Error("clipboard unavailable");
+  }
+}
+
+async function copyOrchestratorSection(
+  titleElement: HTMLElement,
+  contentElement: HTMLElement,
+  emptyMessage: string
+) {
+  const title = titleElement.textContent?.trim() || "Clipboard";
+  const content = contentElement.textContent?.trim() ?? "";
+  const textToCopy = content.length > 0 ? content : emptyMessage;
+
+  try {
+    await copyTextToClipboard(textToCopy);
+    logLocalized("logs.clipboardCopied", { title });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logLocalized("errors.failedCopyClipboard", { title, message });
+  }
+}
+
+function openLogViewer(
+  titleElement: HTMLElement,
+  contentElement: HTMLElement,
+  emptyMessage: string
+) {
+  activeLogViewerSource = {
+    titleElement,
+    contentElement,
+    emptyMessage
+  };
+  logViewerTitleEl.textContent = titleElement.textContent?.trim() || translate("ui.logViewerTitle");
+  logViewerContentEl.textContent = contentElement.textContent?.trim() || emptyMessage;
+  logViewerDialogEl.hidden = false;
+  document.body.classList.add("dialog-open");
+}
+
+function syncLogViewerContent() {
+  if (!activeLogViewerSource || logViewerDialogEl.hidden) {
+    return;
+  }
+
+  logViewerTitleEl.textContent = activeLogViewerSource.titleElement.textContent?.trim() || translate("ui.logViewerTitle");
+  logViewerContentEl.textContent = activeLogViewerSource.contentElement.textContent?.trim() || activeLogViewerSource.emptyMessage;
+}
+
+function closeLogViewer() {
+  activeLogViewerSource = null;
+  logViewerDialogEl.hidden = true;
+  document.body.classList.remove("dialog-open");
+}
+
+async function copyLogViewerContent() {
+  await copyOrchestratorSection(
+    logViewerTitleEl,
+    logViewerContentEl,
+    ""
+  );
+}
+
+function setOrchestratorTransientDetail(message: string) {
+  orchestratorNodeLiveStatusEl.textContent = translate("ui.orchestratorCommandStatusIdle");
+  orchestratorNodeLiveMetaEl.textContent = message;
+  orchestratorNodeCommandEl.textContent = translate("ui.orchestratorNodeCommandEmpty");
+  orchestratorNodeLogEl.textContent = message;
+  orchestratorLogEl.textContent = message;
+  syncLogViewerContent();
 }
 
 function applyThemePreference(preference: ThemePreference, persist = true) {
@@ -476,6 +2435,7 @@ function setCurrentWorkspacePath(workspacePath: string | null, persist = true) {
 
   updateWorkspaceSummary();
   updateSessionCreationState();
+  updateOrchestratorControls();
 }
 
 function getSuggestedWorkspacePath(): string | undefined {
@@ -520,37 +2480,397 @@ async function createWorkspaceDirectory() {
   }
 }
 
+async function selectOrchestratorRun(runId: string) {
+  selectedOrchestratorRunId = runId;
+  selectedOrchestratorRun = null;
+  selectedOrchestratorNodeId = null;
+  updateOrchestratorControls();
+  renderOrchestratorRunList();
+  lastOrchestratorDetailSignature = `__loading__:${runId}:${languagePreference}`;
+  lastOrchestratorTreeSignature = `__loading__:${runId}:${languagePreference}`;
+  setOrchestratorTransientDetail("Loading…");
+  renderOrchestratorTree();
+
+  try {
+    selectedOrchestratorRun = await appWindow.tasksaw.getOrchestratorRun(runId);
+    renderOrchestratorDetail();
+    renderOrchestratorTree();
+    logLocalized("logs.orchestratorLoaded", { runId });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logLocalized("errors.failedLoadOrchestratorRuns", { message });
+  }
+}
+
+async function loadOrchestratorRuns(preserveSelection = true) {
+  const runs = await appWindow.tasksaw.listOrchestratorRuns();
+  orchestratorRuns.splice(0, orchestratorRuns.length, ...runs);
+  renderOrchestratorRunList();
+
+  const nextSelection = preserveSelection
+    ? orchestratorRuns.find((run) => run.id === selectedOrchestratorRunId)?.id ?? orchestratorRuns[0]?.id ?? null
+    : selectedOrchestratorRunId;
+
+  if (!nextSelection) {
+    selectedOrchestratorRunId = null;
+    selectedOrchestratorRun = null;
+    selectedOrchestratorNodeId = null;
+    updateOrchestratorControls();
+    renderOrchestratorDetail();
+    renderOrchestratorTree();
+    return;
+  }
+
+  await selectOrchestratorRun(nextSelection);
+}
+
+function isOrchestratorMode(value: string): value is OrchestratorMode {
+  return value === "gemini_only" || value === "codex_only" || value === "cross_review";
+}
+
+async function stopOrchestratorRun() {
+  if (!isOrchestratorRunning || !liveOrchestratorRunId) {
+    logLocalized("errors.orchestratorStopUnavailable");
+    return;
+  }
+
+  isOrchestratorStopRequested = true;
+  updateOrchestratorControls();
+  logLocalized("logs.orchestratorStopping", { runId: liveOrchestratorRunId });
+
+  try {
+    const cancelled = await appWindow.tasksaw.cancelOrchestratorRun(liveOrchestratorRunId);
+    if (!cancelled) {
+      isOrchestratorStopRequested = false;
+      updateOrchestratorControls();
+      logLocalized("errors.orchestratorStopUnavailable");
+    }
+  } catch (error: unknown) {
+    isOrchestratorStopRequested = false;
+    updateOrchestratorControls();
+    const message = error instanceof Error ? error.message : String(error);
+    logLocalized("errors.failedOrchestratorStop", { message });
+  }
+}
+
+async function runOrchestrator(continueFromRunId: string | null = null) {
+  if (continueFromRunId && !selectedOrchestratorRunId) {
+    logLocalized("errors.orchestratorContinueMissing");
+    return;
+  }
+
+  const goal = orchestratorGoalInput.value.trim() || (
+    continueFromRunId
+      ? (selectedOrchestratorRun?.run.goal ?? orchestratorRuns.find((run) => run.id === continueFromRunId)?.goal ?? "")
+      : ""
+  );
+  if (goal.length === 0) {
+    logLocalized("errors.orchestratorGoalMissing");
+    return;
+  }
+
+  if (!currentWorkspacePath) {
+    logLocalized("errors.orchestratorWorkspaceMissing");
+    return;
+  }
+
+  isOrchestratorRunning = true;
+  isOrchestratorStopRequested = false;
+  liveOrchestratorRunId = null;
+  if (liveOrchestratorRefreshHandle !== null) {
+    window.clearTimeout(liveOrchestratorRefreshHandle);
+    liveOrchestratorRefreshHandle = null;
+  }
+  updateOrchestratorControls();
+  logLocalized("logs.orchestratorRunning", { mode: translateOrchestratorMode(orchestratorMode) });
+  selectedOrchestratorRun = null;
+  selectedOrchestratorNodeId = null;
+  lastOrchestratorDetailSignature = `__running__:${orchestratorMode}:${goal}:${languagePreference}`;
+  lastOrchestratorTreeSignature = `__running__:${orchestratorMode}:${goal}:${languagePreference}`;
+  setOrchestratorTransientDetail(translate("logs.orchestratorRunning", { mode: translateOrchestratorMode(orchestratorMode) }));
+  renderOrchestratorTree();
+
+  try {
+    const response = await appWindow.tasksaw.runOrchestrator({
+      goal,
+      mode: orchestratorMode,
+      workspacePath: currentWorkspacePath,
+      continueFromRunId,
+      workspaceAccessDialog: {
+        defaultPath: currentWorkspacePath ?? undefined,
+        title: translate("ui.permissionDialogTitle"),
+        buttonLabel: translate("ui.permissionDialogButton"),
+        message: translate("ui.permissionDialogMessage")
+      }
+    });
+
+    if (!response) return;
+    if (response.status === "login_required") {
+      for (const [index, session] of response.loginSessions.entries()) {
+        attachSessionToUi(session, {
+          activate: index === response.loginSessions.length - 1,
+          logCreated: false
+        });
+      }
+      logLocalized("errors.orchestratorLoginRequired", {
+        tools: response.missingToolIds.map((toolId) => translateKind(toolId)).join(", ")
+      });
+      return;
+    }
+
+    const detail = response.detail;
+    if (response.status === "cancelled") {
+      selectedOrchestratorRun = detail;
+      selectedOrchestratorRunId = detail.run.id;
+      renderOrchestratorDetail();
+      renderOrchestratorTree();
+      await loadOrchestratorRuns();
+      logLocalized("logs.orchestratorCancelled", { runId: detail.run.id });
+      return;
+    }
+
+    selectedOrchestratorRun = detail;
+    selectedOrchestratorRunId = detail.run.id;
+    renderOrchestratorDetail();
+    renderOrchestratorTree();
+    await loadOrchestratorRuns();
+    logLocalized("logs.orchestratorCompleted", { runId: detail.run.id });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logLocalized("errors.failedOrchestratorRun", { message });
+    try {
+      await loadOrchestratorRuns();
+    } catch (loadError: unknown) {
+      const loadMessage = loadError instanceof Error ? loadError.message : String(loadError);
+      logLocalized("errors.failedLoadOrchestratorRuns", { message: loadMessage });
+    }
+  } finally {
+    isOrchestratorRunning = false;
+    isOrchestratorStopRequested = false;
+    liveOrchestratorRunId = null;
+    updateOrchestratorControls();
+  }
+}
+
+function hasSession(sessionId: string | null): sessionId is string {
+  return sessionId !== null && sessions.some((session) => session.id === sessionId);
+}
+
+function resolveActiveWorkspaceTab(preferredTabId: string | null = activeWorkspaceTabId): string | null {
+  if (preferredTabId === "orchestrator" && isOrchestratorTabOpen) {
+    return "orchestrator";
+  }
+
+  if (hasSession(preferredTabId)) {
+    return preferredTabId;
+  }
+
+  if (isOrchestratorTabOpen) {
+    return "orchestrator";
+  }
+
+  if (hasSession(activeSessionId)) {
+    return activeSessionId;
+  }
+
+  return sessions[sessions.length - 1]?.id ?? null;
+}
+
+function renderWorkspaceTabs() {
+  workspaceTabsEl.innerHTML = "";
+  workspaceTabsEl.setAttribute("aria-label", translate("ui.workspaceTabsLabel"));
+
+  const appendTab = (
+    id: string,
+    title: string,
+    onSelect: () => void,
+    options: { kind?: string; closable?: boolean; onClose?: () => void } = {}
+  ) => {
+    const active = activeWorkspaceTabId === id;
+
+    const tab = document.createElement("div");
+    tab.className = "workspace-tab";
+    if (active) tab.classList.add("active");
+
+    const selectButton = document.createElement("button");
+    selectButton.type = "button";
+    selectButton.className = "workspace-tab-select";
+    selectButton.setAttribute("role", "tab");
+    selectButton.setAttribute("aria-selected", String(active));
+
+    const label = document.createElement("span");
+    label.className = "workspace-tab-label";
+
+    const titleEl = document.createElement("span");
+    titleEl.className = "workspace-tab-title";
+    titleEl.textContent = title;
+    label.appendChild(titleEl);
+
+    if (options.kind) {
+      const kindBadge = document.createElement("span");
+      kindBadge.className = "workspace-tab-kind";
+      kindBadge.textContent = options.kind;
+      label.appendChild(kindBadge);
+    }
+
+    selectButton.appendChild(label);
+    selectButton.addEventListener("click", onSelect);
+    tab.appendChild(selectButton);
+
+    if (options.closable && options.onClose) {
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "workspace-tab-close";
+      closeButton.textContent = "×";
+      closeButton.title = translate("ui.close");
+      closeButton.setAttribute("aria-label", translate("ui.close"));
+      closeButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        options.onClose?.();
+      });
+      tab.appendChild(closeButton);
+    }
+
+    workspaceTabsEl.appendChild(tab);
+  };
+
+  if (isOrchestratorTabOpen) {
+    appendTab("orchestrator", translate("ui.orchestratorTitle"), () => {
+      activateWorkspaceTab("orchestrator");
+    }, {
+      closable: true,
+      onClose: () => closeOrchestratorTab()
+    });
+  }
+
+  for (const session of sessions) {
+    appendTab(session.id, session.title, () => {
+      activateWorkspaceTab(session.id, true);
+    }, {
+      kind: translateKind(session.kind),
+      closable: true,
+      onClose: () => closeSession(session.id)
+    });
+  }
+
+  const hasTabs = isOrchestratorTabOpen || sessions.length > 0;
+  workspaceTabsEl.hidden = !hasTabs;
+  const orchestratorButtonLabel = isOrchestratorTabOpen
+    ? translate("ui.focusOrchestratorTab")
+    : translate("ui.openOrchestratorTab");
+  workspaceOpenOrchestratorButton.textContent = orchestratorButtonLabel;
+  workspaceOpenOrchestratorButton.disabled = isOrchestratorTabOpen && activeWorkspaceTabId === "orchestrator";
+  workspaceEmptyOpenOrchestratorButton.textContent = translate("ui.openOrchestratorTab");
+}
+
+function renderWorkspacePanels(focusTerminal = false) {
+  activeWorkspaceTabId = resolveActiveWorkspaceTab(activeWorkspaceTabId);
+
+  const activeTerminalTabId = activeWorkspaceTabId !== null && activeWorkspaceTabId !== "orchestrator"
+    ? activeWorkspaceTabId
+    : null;
+  const showOrchestrator = activeWorkspaceTabId === "orchestrator" && isOrchestratorTabOpen;
+  const showTerminal = activeTerminalTabId !== null && terminalPanes.has(activeTerminalTabId);
+  const showEmpty = !showOrchestrator && !showTerminal && !isOrchestratorTabOpen && sessions.length === 0;
+
+  const orchestratorPanelEl = document.getElementById("orchestrator-panel") as HTMLElement;
+  orchestratorPanelEl.hidden = !showOrchestrator;
+  orchestratorPanelEl.setAttribute("aria-hidden", String(!showOrchestrator));
+
+  terminalRoot.hidden = !showTerminal;
+  terminalRoot.setAttribute("aria-hidden", String(!showTerminal));
+
+  workspaceEmptyEl.hidden = !showEmpty;
+  workspaceEmptyEl.setAttribute("aria-hidden", String(!showEmpty));
+
+  for (const [sessionId, pane] of terminalPanes.entries()) {
+    const isActive = sessionId === activeTerminalTabId;
+    pane.hidden = !isActive;
+    pane.classList.toggle("active", isActive);
+  }
+
+  if (showTerminal && activeTerminalTabId) {
+    const terminal = terminals.get(activeTerminalTabId);
+    if (terminal) {
+      fitSession(activeTerminalTabId, terminal);
+      if (focusTerminal) {
+        terminal.focus();
+      }
+    }
+  }
+}
+
+function activateWorkspaceTab(tabId: string | null, focusTerminal = false) {
+  if (tabId !== null && tabId !== "orchestrator") {
+    activeSessionId = tabId;
+  }
+
+  activeWorkspaceTabId = resolveActiveWorkspaceTab(tabId);
+  renderSessionList();
+  renderWorkspaceTabs();
+  renderWorkspacePanels(focusTerminal);
+}
+
+function openOrchestratorTab() {
+  isOrchestratorTabOpen = true;
+  activateWorkspaceTab("orchestrator");
+}
+
+function closeOrchestratorTab() {
+  isOrchestratorTabOpen = false;
+  if (activeWorkspaceTabId === "orchestrator") {
+    activeWorkspaceTabId = null;
+  }
+
+  activateWorkspaceTab(activeSessionId);
+}
+
+function closeSession(sessionId: string) {
+  appWindow.tasksaw.killSession(sessionId);
+  removeSession(sessionId);
+}
+
 function updateTerminalRootState() {
+  const hasSessions = sessions.length > 0;
   terminalRoot.dataset.count = String(sessions.length);
-  terminalRoot.classList.toggle("empty", sessions.length === 0);
+  terminalRoot.classList.toggle("empty", !hasSessions);
+  document.body.dataset.hasSessions = String(hasSessions);
+  layoutEl.dataset.hasSessions = String(hasSessions);
+  sidebarEl.setAttribute("aria-hidden", String(!hasSessions));
+  sessionSectionTitle.hidden = !hasSessions;
+  sessionListEl.hidden = !hasSessions;
+  mainSplitterEl.setAttribute("aria-hidden", String(!hasSessions));
+  syncMainSplitterLayout();
+  updateMainSplitterAria();
 }
 
 function fitAllSessions() {
-  for (const [sessionId, terminal] of terminals.entries()) {
-    fitSession(sessionId, terminal);
+  const activeTerminalTabId = activeWorkspaceTabId !== null && activeWorkspaceTabId !== "orchestrator"
+    ? activeWorkspaceTabId
+    : null;
+
+  if (activeTerminalTabId) {
+    const terminal = terminals.get(activeTerminalTabId);
+    if (terminal) {
+      fitSession(activeTerminalTabId, terminal);
+    }
   }
 }
 
 function scheduleFitAllSessions() {
-  appWindow.requestAnimationFrame(() => fitAllSessions());
+  if (fitAllSessionsHandle !== null) {
+    return;
+  }
+
+  fitAllSessionsHandle = appWindow.requestAnimationFrame(() => {
+    fitAllSessionsHandle = null;
+    fitAllSessions();
+  });
 }
 
 function setActiveSession(sessionId: string) {
   activeSessionId = sessionId;
-
-  for (const [id, pane] of terminalPanes.entries()) {
-    pane.classList.toggle("active", id === sessionId);
-  }
-
-  for (const li of sessionListEl.querySelectorAll("li")) {
-    li.classList.toggle("active", li.getAttribute("data-id") === sessionId);
-  }
-
-  const terminal = terminals.get(sessionId);
-  if (terminal) {
-    fitSession(sessionId, terminal);
-    terminal.focus();
-  }
+  activateWorkspaceTab(sessionId, true);
 }
 
 function fitSession(sessionId: string, terminal: XtermTerminal) {
@@ -567,6 +2887,13 @@ function fitSession(sessionId: string, terminal: XtermTerminal) {
   );
   const cols = Math.max(40, Math.floor(availableWidth / 9));
   const rows = Math.max(10, Math.floor(availableHeight / 18));
+
+  const previousDimensions = terminalDimensions.get(sessionId);
+  if (previousDimensions?.cols === cols && previousDimensions.rows === rows) {
+    return;
+  }
+
+  terminalDimensions.set(sessionId, { cols, rows });
   terminal.resize(cols, rows);
   appWindow.tasksaw.resizeTerminal(sessionId, cols, rows);
 }
@@ -597,7 +2924,7 @@ function renderSessionList() {
     meta.append(title, cwd);
     li.append(meta, kind);
 
-    if (session.id === activeSessionId) li.classList.add("active");
+    if (session.id === activeWorkspaceTabId) li.classList.add("active");
     li.onclick = () => setActiveSession(session.id);
     sessionListEl.appendChild(li);
   }
@@ -607,7 +2934,8 @@ function mountTerminal(session: SessionInfo) {
   const pane = document.createElement("section");
   pane.className = "terminal-pane";
   pane.setAttribute("data-id", session.id);
-  pane.addEventListener("mousedown", () => setActiveSession(session.id));
+  pane.hidden = true;
+  pane.addEventListener("mousedown", () => activateWorkspaceTab(session.id));
 
   const header = document.createElement("header");
   header.className = "terminal-pane-header";
@@ -643,8 +2971,7 @@ function mountTerminal(session: SessionInfo) {
   closeButton.textContent = translate("ui.close");
   closeButton.addEventListener("click", (event) => {
     event.stopPropagation();
-    appWindow.tasksaw.killSession(session.id);
-    removeSession(session.id);
+    closeSession(session.id);
   });
 
   actions.appendChild(closeButton);
@@ -681,6 +3008,8 @@ function mountTerminal(session: SessionInfo) {
 
   fitSession(session.id, terminal);
   updateTerminalRootState();
+  renderWorkspaceTabs();
+  renderWorkspacePanels();
 }
 
 function removeSession(sessionId: string) {
@@ -688,24 +3017,15 @@ function removeSession(sessionId: string) {
   if (sessionIndex === -1) return;
 
   const [removedSession] = sessions.splice(sessionIndex, 1);
-  terminals.get(sessionId)?.dispose();
-  terminals.delete(sessionId);
-  terminalContainers.delete(sessionId);
-  sessionStatusBadges.delete(sessionId);
-  sessionKindBadges.delete(sessionId);
-  sessionCloseButtons.delete(sessionId);
-  terminalPanes.get(sessionId)?.remove();
-  terminalPanes.delete(sessionId);
+  teardownSessionUi(sessionId);
 
   if (activeSessionId === sessionId) {
     const nextActiveSession = sessions[sessionIndex] ?? sessions[sessionIndex - 1] ?? null;
     activeSessionId = nextActiveSession?.id ?? null;
   }
 
-  renderSessionList();
   updateTerminalRootState();
-
-  if (activeSessionId) setActiveSession(activeSessionId);
+  activateWorkspaceTab(activeWorkspaceTabId === sessionId ? activeSessionId : activeWorkspaceTabId);
 
   scheduleFitAllSessions();
   logLocalized("logs.closed", {
@@ -714,11 +3034,69 @@ function removeSession(sessionId: string) {
   });
 }
 
+function teardownSessionUi(sessionId: string) {
+  terminals.get(sessionId)?.dispose();
+  terminals.delete(sessionId);
+  terminalContainers.delete(sessionId);
+  terminalDimensions.delete(sessionId);
+  sessionStatusBadges.delete(sessionId);
+  sessionKindBadges.delete(sessionId);
+  sessionCloseButtons.delete(sessionId);
+  terminalPanes.get(sessionId)?.remove();
+  terminalPanes.delete(sessionId);
+}
+
+function clearAllLocalSessions() {
+  for (const session of sessions) {
+    teardownSessionUi(session.id);
+  }
+
+  sessions.splice(0, sessions.length);
+  activeSessionId = null;
+}
+
 function markSessionExited(sessionId: string) {
   terminalPanes.get(sessionId)?.classList.add("exited");
   const statusBadge = sessionStatusBadges.get(sessionId);
   if (statusBadge) {
     statusBadge.textContent = translate("ui.statusExited");
+  }
+}
+
+function attachSessionToUi(
+  session: SessionInfo,
+  options: {
+    activate?: boolean;
+    logCreated?: boolean;
+  } = {}
+) {
+  const existingIndex = sessions.findIndex((entry) => entry.id === session.id);
+  const isNewSession = existingIndex === -1;
+
+  if (isNewSession) {
+    sessions.push(session);
+  } else {
+    sessions[existingIndex] = session;
+  }
+
+  if (!terminalPanes.has(session.id)) {
+    mountTerminal(session);
+  }
+
+  setCurrentWorkspacePath(session.cwd);
+  persistWorkspacePath(session.cwd);
+
+  if (options.activate !== false) {
+    setActiveSession(session.id);
+  }
+
+  scheduleFitAllSessions();
+
+  if (isNewSession && options.logCreated !== false) {
+    logLocalized("logs.created", {
+      title: session.title,
+      cwd: session.cwd
+    });
   }
 }
 
@@ -744,22 +3122,13 @@ async function createSession(kind: SessionKind) {
   });
   if (!session) return;
 
-  setCurrentWorkspacePath(session.cwd);
-  sessions.push(session);
-  renderSessionList();
-  mountTerminal(session);
-  setActiveSession(session.id);
-  scheduleFitAllSessions();
-  persistWorkspacePath(session.cwd);
-  logLocalized("logs.created", {
-    title: session.title,
-    cwd: session.cwd
-  });
+  attachSessionToUi(session);
 }
 
 async function updateManagedTools() {
   isToolUpdateRunning = true;
   updateSessionCreationState();
+  updateOrchestratorControls();
   logRaw("Updating managed Codex/Gemini...");
 
   try {
@@ -771,6 +3140,59 @@ async function updateManagedTools() {
   } finally {
     isToolUpdateRunning = false;
     updateSessionCreationState();
+    updateOrchestratorControls();
+  }
+}
+
+function resetLocalAppState() {
+  clearAllLocalSessions();
+  orchestratorRuns.splice(0, orchestratorRuns.length);
+  selectedOrchestratorRunId = null;
+  selectedOrchestratorRun = null;
+  selectedOrchestratorNodeId = null;
+  liveOrchestratorRunId = null;
+  orchestratorGoalInput.value = "";
+  lastOrchestratorRunListSignature = "";
+  lastOrchestratorDetailSignature = "";
+  lastOrchestratorTreeSignature = "";
+  setCurrentWorkspacePath(null);
+  activeWorkspaceTabId = "orchestrator";
+  isOrchestratorTabOpen = true;
+  renderSessionList();
+  renderOrchestratorRunList();
+  renderOrchestratorDetail();
+  renderOrchestratorTree();
+  updateTerminalRootState();
+  renderWorkspaceTabs();
+  renderWorkspacePanels();
+}
+
+async function resetAppState() {
+  if (!window.confirm(translate("ui.resetAppConfirm"))) {
+    return;
+  }
+
+  isResetting = true;
+  if (liveOrchestratorRefreshHandle !== null) {
+    window.clearTimeout(liveOrchestratorRefreshHandle);
+    liveOrchestratorRefreshHandle = null;
+  }
+
+  updateSessionCreationState();
+  updateOrchestratorControls();
+  logLocalized("logs.resetStarted");
+
+  try {
+    await appWindow.tasksaw.resetAppState();
+    resetLocalAppState();
+    logLocalized("logs.resetCompleted");
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logLocalized("errors.failedReset", { message });
+  } finally {
+    isResetting = false;
+    updateSessionCreationState();
+    updateOrchestratorControls();
   }
 }
 
@@ -790,11 +3212,12 @@ async function restoreSessions() {
   const existingSessions = await appWindow.tasksaw.listSessions();
   if (existingSessions.length === 0) {
     updateTerminalRootState();
+    renderWorkspaceTabs();
+    renderWorkspacePanels();
     return;
   }
 
   sessions.splice(0, sessions.length, ...existingSessions);
-  renderSessionList();
 
   for (const session of existingSessions) {
     mountTerminal(session);
@@ -804,13 +3227,37 @@ async function restoreSessions() {
     setCurrentWorkspacePath(existingSessions[existingSessions.length - 1]!.cwd, false);
   }
 
-  setActiveSession(existingSessions[existingSessions.length - 1]!.id);
+  activeSessionId = existingSessions[existingSessions.length - 1]!.id;
+  activateWorkspaceTab(isOrchestratorTabOpen ? "orchestrator" : activeSessionId);
   scheduleFitAllSessions();
 }
 
 appWindow.tasksaw.onTerminalData(({ sessionId, data }: TerminalDataPayload) => {
   const terminal = terminals.get(sessionId);
   if (terminal) terminal.write(data);
+});
+
+appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
+  if (!liveOrchestratorRunId && isOrchestratorRunning) {
+    liveOrchestratorRunId = event.runId;
+  }
+
+  const baseDetail = selectedOrchestratorRun?.run.id === event.runId
+    ? selectedOrchestratorRun
+    : createLiveOrchestratorRunDetail(event);
+  const liveDetail = mergeLiveOrchestratorEvent(baseDetail, event);
+
+  upsertOrchestratorRunSummary(toOrchestratorRunSummary(liveDetail));
+  logRaw(formatLiveOrchestratorEvent(event));
+
+  if (liveOrchestratorRunId === event.runId || selectedOrchestratorRunId === event.runId) {
+    selectedOrchestratorRunId = event.runId;
+    selectedOrchestratorRun = liveDetail;
+    updateOrchestratorControls();
+    scheduleOrchestratorRender();
+  }
+
+  scheduleLiveOrchestratorRunRefresh(event.runId);
 });
 
 appWindow.tasksaw.onTerminalExit(({ sessionId, exitCode, signal }: TerminalExitPayload) => {
@@ -829,6 +3276,84 @@ newShellButton.addEventListener("click", () => void handleCreateSession("shell")
 newCodexButton.addEventListener("click", () => void handleCreateSession("codex"));
 newGeminiButton.addEventListener("click", () => void handleCreateSession("gemini"));
 toolsUpdateButton.addEventListener("click", () => void updateManagedTools());
+resetAppButton.addEventListener("click", () => void resetAppState());
+workspaceOpenOrchestratorButton.addEventListener("click", () => {
+  openOrchestratorTab();
+});
+workspaceEmptyOpenOrchestratorButton.addEventListener("click", () => {
+  openOrchestratorTab();
+});
+orchestratorNodeCommandCopyButton.addEventListener("click", () => {
+  void copyOrchestratorSection(
+    orchestratorNodeCommandTitleEl,
+    orchestratorNodeCommandEl,
+    translate("ui.orchestratorNodeCommandEmpty")
+  );
+});
+orchestratorNodeCommandOpenButton.addEventListener("click", () => {
+  openLogViewer(
+    orchestratorNodeCommandTitleEl,
+    orchestratorNodeCommandEl,
+    translate("ui.orchestratorNodeCommandEmpty")
+  );
+});
+orchestratorNodeLogCopyButton.addEventListener("click", () => {
+  void copyOrchestratorSection(
+    orchestratorNodeLogTitleEl,
+    orchestratorNodeLogEl,
+    translate("ui.orchestratorNodeLogEmpty")
+  );
+});
+orchestratorNodeLogOpenButton.addEventListener("click", () => {
+  openLogViewer(
+    orchestratorNodeLogTitleEl,
+    orchestratorNodeLogEl,
+    translate("ui.orchestratorNodeLogEmpty")
+  );
+});
+orchestratorLogCopyButton.addEventListener("click", () => {
+  void copyOrchestratorSection(
+    orchestratorLogTitleEl,
+    orchestratorLogEl,
+    translate("ui.orchestratorLogEmpty")
+  );
+});
+orchestratorLogOpenButton.addEventListener("click", () => {
+  openLogViewer(
+    orchestratorLogTitleEl,
+    orchestratorLogEl,
+    translate("ui.orchestratorLogEmpty")
+  );
+});
+logViewerCopyButton.addEventListener("click", () => {
+  void copyLogViewerContent();
+});
+logViewerCloseButton.addEventListener("click", () => {
+  closeLogViewer();
+});
+logViewerDialogEl.addEventListener("click", (event) => {
+  if (event.target === logViewerDialogEl) {
+    closeLogViewer();
+  }
+});
+orchestratorRefreshButton.addEventListener("click", () => {
+  void loadOrchestratorRuns();
+});
+orchestratorStopButton.addEventListener("click", () => {
+  void stopOrchestratorRun();
+});
+orchestratorContinueButton.addEventListener("click", () => {
+  void runOrchestrator(selectedOrchestratorRunId);
+});
+orchestratorRunButton.addEventListener("click", () => {
+  void runOrchestrator();
+});
+orchestratorModeSelect.addEventListener("change", () => {
+  const nextMode = orchestratorModeSelect.value;
+  if (!isOrchestratorMode(nextMode)) return;
+  orchestratorMode = nextMode;
+  updateOrchestratorControls();
+});
 
 for (const button of themeButtons) {
   const themeOption = button.dataset.themeOption;
@@ -842,20 +3367,29 @@ for (const button of languageButtons) {
   button.addEventListener("click", () => applyLanguagePreference(languageOption));
 }
 
-darkThemeMedia.addEventListener("change", () => {
-  if (themePreference === "system") {
-    applyThemePreference("system", false);
-  }
-});
-
 applyThemePreference(themePreference, false);
 applyLanguagePreference(languagePreference, false);
+initializeMainSplitter();
 
 appWindow.addEventListener("resize", () => {
-  fitAllSessions();
+  syncMainSplitterLayout();
+  updateMainSplitterAria();
+  scheduleFitAllSessions();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !logViewerDialogEl.hidden) {
+    event.preventDefault();
+    closeLogViewer();
+  }
 });
 
 restoreSessions().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   logLocalized("errors.failedRestore", { message });
+});
+
+loadOrchestratorRuns().catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  logLocalized("errors.failedLoadOrchestratorRuns", { message });
 });

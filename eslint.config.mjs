@@ -22,7 +22,7 @@ export default [
     ignores: ["dist/**", "node_modules/**"]
   },
   {
-    files: ["src/main/**/*.ts", "src/preload/**/*.ts"],
+    files: ["src/main/**/*.ts", "src/preload/**/*.ts", "src/orchestrator/**/*.ts"],
     languageOptions: {
       parser: tsParser,
       parserOptions: {

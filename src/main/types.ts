@@ -1,5 +1,8 @@
+import type { RunSnapshot, RunStatus } from "../orchestrator";
+
 export type SessionKind = "shell" | "codex" | "gemini";
 export type ManagedToolId = Extract<SessionKind, "codex" | "gemini">;
+export type OrchestratorMode = "gemini_only" | "codex_only" | "cross_review";
 
 export type DirectoryDialogOptions = {
   defaultPath?: string;
@@ -15,6 +18,25 @@ export type ManagedToolStatus = {
   version: string | null;
 };
 
+export type ManagedToolModel = {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string | null;
+  hidden: boolean;
+  isDefault: boolean;
+  defaultReasoningEffort: string | null;
+  supportedReasoningEfforts: string[];
+};
+
+export type ManagedToolModelCatalog = {
+  toolId: ManagedToolId;
+  provider: string;
+  currentModelId: string | null;
+  discoveredAt: string;
+  models: ManagedToolModel[];
+};
+
 export type SessionInfo = {
   id: string;
   kind: SessionKind;
@@ -27,3 +49,38 @@ export type CreateSessionInput = {
   cwd: string;
   workspaceAccessDialog?: DirectoryDialogOptions;
 };
+
+export type RunOrchestratorInput = {
+  goal: string;
+  mode: OrchestratorMode;
+  workspacePath?: string | null;
+  continueFromRunId?: string | null;
+  workspaceAccessDialog?: DirectoryDialogOptions;
+};
+
+export type OrchestratorRunSummary = {
+  id: string;
+  goal: string;
+  status: RunStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  finalSummary: string | null;
+};
+
+export type OrchestratorRunDetail = RunSnapshot;
+
+export type OrchestratorRunResponse =
+  | {
+    status: "completed";
+    detail: OrchestratorRunDetail;
+  }
+  | {
+    status: "cancelled";
+    detail: OrchestratorRunDetail;
+  }
+  | {
+    status: "login_required";
+    missingToolIds: ManagedToolId[];
+    loginSessions: SessionInfo[];
+  };

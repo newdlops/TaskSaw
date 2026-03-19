@@ -1,8 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { OrchestratorEvent } from "../orchestrator";
 import type {
   CreateSessionInput,
   DirectoryDialogOptions,
+  OrchestratorRunResponse,
   ManagedToolStatus,
+  OrchestratorRunDetail,
+  OrchestratorRunSummary,
+  RunOrchestratorInput,
   SessionInfo
 } from "../main/types";
 
@@ -15,6 +20,21 @@ contextBridge.exposeInMainWorld("tasksaw", {
 
   updateManagedTools: (): Promise<ManagedToolStatus[]> =>
       ipcRenderer.invoke("tools:update"),
+
+  resetAppState: (): Promise<void> =>
+      ipcRenderer.invoke("app:reset"),
+
+  runOrchestrator: (input: RunOrchestratorInput): Promise<OrchestratorRunResponse | null> =>
+      ipcRenderer.invoke("orchestrator:run", input),
+
+  cancelOrchestratorRun: (runId: string): Promise<boolean> =>
+      ipcRenderer.invoke("orchestrator:cancel", runId),
+
+  listOrchestratorRuns: (): Promise<OrchestratorRunSummary[]> =>
+      ipcRenderer.invoke("orchestrator:list"),
+
+  getOrchestratorRun: (runId: string): Promise<OrchestratorRunDetail> =>
+      ipcRenderer.invoke("orchestrator:get-run", runId),
 
   selectDirectory: (options?: DirectoryDialogOptions): Promise<string | null> =>
       ipcRenderer.invoke("dialog:select-directory", options),
@@ -39,5 +59,9 @@ contextBridge.exposeInMainWorld("tasksaw", {
       handler: (payload: { sessionId: string; exitCode: number; signal: number }) => void
   ) => {
     ipcRenderer.on("terminal:exit", (_event, payload) => handler(payload));
+  },
+
+  onOrchestratorEvent: (handler: (payload: OrchestratorEvent) => void) => {
+    ipcRenderer.on("orchestrator:event", (_event, payload) => handler(payload));
   }
 });

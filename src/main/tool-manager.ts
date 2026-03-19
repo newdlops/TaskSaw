@@ -1,7 +1,11 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { ManagedToolId, ManagedToolStatus } from "./types";
+import { createHash } from "node:crypto";
+import { Readable, Writable } from "node:stream";
+import { pathToFileURL } from "node:url";
+import { ManagedToolId, ManagedToolModelCatalog, ManagedToolStatus } from "./types";
 
 type ToolDefinition = {
   id: ManagedToolId;
@@ -9,6 +13,38 @@ type ToolDefinition = {
   packageName: string;
   executableName: string;
 };
+
+type ResolvedCommand = {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+};
+
+type NodeRuntime = {
+  command: string;
+  env: Record<string, string>;
+};
+
+type ManagedToolAuthState = {
+  toolId: ManagedToolId;
+  authenticated: boolean;
+  message: string | null;
+};
+
+type ManagedGeminiAuthPreflight = {
+  authenticated: boolean;
+  message: string | null;
+};
+
+type InstructionSource = {
+  path: string;
+  content: string;
+};
+
+const dynamicImport = new Function("specifier", "return import(specifier);") as (specifier: string) => Promise<unknown>;
+
+const CODEX_INSTRUCTION_CANDIDATES = ["AGENTS.MD", "AGENTS.md", "agents.md", "agents.MD"];
+const GEMINI_CONTEXT_FILE_CANDIDATES = ["GEMINI.MD", "GEMINI.md", "gemini.md", "gemini.MD", "Gemini.md"];
 
 const TOOL_DEFINITIONS: Record<ManagedToolId, ToolDefinition> = {
   codex: {
@@ -32,6 +68,7 @@ export class ToolManager {
   private readonly homeDirectory: string;
   private readonly runtimeDirectory: string;
   private readonly installPromises = new Map<ManagedToolId, Promise<ManagedToolStatus>>();
+  private readonly modelCatalogPromises = new Map<string, Promise<ManagedToolModelCatalog>>();
 
   constructor(private userDataDirectory: string) {
     this.toolingRoot = path.join(userDataDirectory, "managed-tools");
@@ -73,6 +110,100 @@ export class ToolManager {
     return (Object.keys(TOOL_DEFINITIONS) as ManagedToolId[]).map((toolId) => this.getStatus(toolId));
   }
 
+  buildManagedExecutionEnvironment(toolId: ManagedToolId): Record<string, string> {
+    const runtimeDirectory = this.getRuntimeDirectory();
+    const tempDirectory = path.join(runtimeDirectory, "tmp");
+    const xdgCacheDirectory = path.join(runtimeDirectory, "xdg-cache");
+    const xdgConfigDirectory = path.join(runtimeDirectory, "xdg-config");
+    const xdgStateDirectory = path.join(runtimeDirectory, "xdg-state");
+    fs.mkdirSync(tempDirectory, { recursive: true });
+    fs.mkdirSync(xdgCacheDirectory, { recursive: true });
+    fs.mkdirSync(xdgConfigDirectory, { recursive: true });
+    fs.mkdirSync(xdgStateDirectory, { recursive: true });
+
+    const baseEnv: Record<string, string> = {
+      HOME: this.getHomeDirectory(),
+      PATH: [this.getBinDirectory(), process.env.PATH ?? ""]
+        .filter(Boolean)
+        .join(path.delimiter),
+      TMPDIR: tempDirectory,
+      XDG_CACHE_HOME: xdgCacheDirectory,
+      XDG_CONFIG_HOME: xdgConfigDirectory,
+      XDG_STATE_HOME: xdgStateDirectory,
+      OTEL_SDK_DISABLED: "true"
+    };
+
+    if (toolId === "codex") {
+      return {
+        ...baseEnv,
+        ALL_PROXY: "",
+        HTTP_PROXY: "",
+        HTTPS_PROXY: "",
+        NO_PROXY: "*"
+      };
+    }
+
+    return {
+      ...baseEnv,
+      SANDBOX: "tasksaw-managed",
+      GEMINI_SANDBOX: "false",
+      GEMINI_TELEMETRY_ENABLED: "0",
+      NODE_NO_WARNINGS: "1"
+    };
+  }
+
+  async prepareWorkspaceContext(toolId: ManagedToolId, workspacePath?: string | null): Promise<void> {
+    this.ensureBaseDirectories();
+    this.syncManagedGlobalCodexInstructions();
+    this.syncManagedGlobalGeminiInstructions();
+    this.syncManagedGeminiSettings();
+
+    if (toolId === "codex") {
+      this.writeCodexWorkspaceInstructionsFile(workspacePath);
+    }
+  }
+
+  getCodexWorkspaceConfigArgs(workspacePath?: string | null): string[] {
+    const instructionFilePath = this.getCodexWorkspaceInstructionFilePath(workspacePath);
+    if (!instructionFilePath || !fs.existsSync(instructionFilePath)) {
+      return [];
+    }
+
+    return ["-c", `model_instructions_file=${JSON.stringify(instructionFilePath)}`];
+  }
+
+  async getAuthenticationStatus(
+    toolId: ManagedToolId,
+    workspacePath?: string | null
+  ): Promise<ManagedToolAuthState> {
+    await this.ensureInstalled(toolId);
+    await this.prepareWorkspaceContext(toolId, workspacePath);
+
+    if (toolId === "codex") {
+      return this.getCodexAuthenticationStatus(workspacePath);
+    }
+
+    return this.getGeminiAuthenticationStatus(workspacePath);
+  }
+
+  async discoverModelCatalog(toolId: ManagedToolId, workspacePath?: string | null): Promise<ManagedToolModelCatalog> {
+    const cacheKey = this.createModelCatalogCacheKey(toolId, workspacePath);
+    const inFlight = this.modelCatalogPromises.get(cacheKey);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const discoveryPromise = this.prepareWorkspaceContext(toolId, workspacePath)
+      .then(() => this.discoverModelCatalogInternal(toolId, workspacePath));
+    this.modelCatalogPromises.set(cacheKey, discoveryPromise);
+
+    try {
+      return await discoveryPromise;
+    } finally {
+      this.modelCatalogPromises.delete(cacheKey);
+    }
+  }
+
   async ensureInstalled(toolId: ManagedToolId): Promise<ManagedToolStatus> {
     const currentStatus = this.getStatus(toolId);
     if (currentStatus.installed) {
@@ -84,6 +215,7 @@ export class ToolManager {
   }
 
   async updateAll(): Promise<ManagedToolStatus[]> {
+    this.modelCatalogPromises.clear();
     const statuses: ManagedToolStatus[] = [];
 
     for (const toolId of Object.keys(TOOL_DEFINITIONS) as ManagedToolId[]) {
@@ -93,9 +225,18 @@ export class ToolManager {
     return statuses;
   }
 
+  resetPersistentState() {
+    this.installPromises.clear();
+    this.modelCatalogPromises.clear();
+    fs.rmSync(this.homeDirectory, { recursive: true, force: true });
+    fs.rmSync(this.runtimeDirectory, { recursive: true, force: true });
+    fs.rmSync(path.join(this.userDataDirectory, "sandbox-runtime"), { recursive: true, force: true });
+    this.ensureBaseDirectories();
+  }
+
   async resolveLaunchCommand(
     toolId: ManagedToolId
-  ): Promise<{ command: string; args: string[]; env: Record<string, string> }> {
+  ): Promise<ResolvedCommand> {
     await this.ensureInstalled(toolId);
 
     const entryPath = this.resolveInstalledEntryPoint(toolId);
@@ -103,11 +244,900 @@ export class ToolManager {
       throw new Error(`Managed ${TOOL_DEFINITIONS[toolId].displayName} entry point was not found after install`);
     }
 
+    const nodeRuntime = this.resolveNodeRuntime();
     return {
-      command: process.execPath,
+      command: nodeRuntime.command,
       args: [entryPath],
-      env: { ELECTRON_RUN_AS_NODE: "1" }
+      env: nodeRuntime.env
     };
+  }
+
+  getGeminiAcpModulePath(): string {
+    return path.join(
+      this.getInstallDirectory("gemini"),
+      "node_modules",
+      "@agentclientprotocol",
+      "sdk",
+      "dist",
+      "acp.js"
+    );
+  }
+
+  private syncManagedGlobalCodexInstructions() {
+    const source = this.readInstructionSource(os.homedir(), CODEX_INSTRUCTION_CANDIDATES);
+    this.syncManagedInstructionFile(path.join(this.homeDirectory, "AGENTS.md"), source);
+  }
+
+  private syncManagedGlobalGeminiInstructions() {
+    const source = this.readInstructionSource(path.join(os.homedir(), ".gemini"), GEMINI_CONTEXT_FILE_CANDIDATES);
+    this.syncManagedInstructionFile(path.join(this.homeDirectory, ".gemini", "GEMINI.md"), source);
+  }
+
+  private syncManagedGeminiSettings() {
+    const settingsPath = path.join(this.homeDirectory, ".gemini", "settings.json");
+    const nextSettings = this.withPatchedJsonFile(settingsPath, (current) => {
+      const contextValue = current.context;
+      const currentContext = this.isPlainObject(contextValue) ? { ...contextValue } : {};
+      const currentFileNameValue = currentContext.fileName;
+      const currentFileNames = Array.isArray(currentFileNameValue)
+        ? currentFileNameValue.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+        : typeof currentFileNameValue === "string" && currentFileNameValue.trim().length > 0
+          ? [currentFileNameValue]
+          : [];
+
+      return {
+        ...current,
+        context: {
+          ...currentContext,
+          fileName: this.mergeStringLists(GEMINI_CONTEXT_FILE_CANDIDATES, currentFileNames)
+        }
+      };
+    });
+
+    this.writeJsonIfChanged(settingsPath, nextSettings);
+  }
+
+  private writeCodexWorkspaceInstructionsFile(workspacePath?: string | null) {
+    const instructionFilePath = this.getCodexWorkspaceInstructionFilePath(workspacePath);
+    if (!instructionFilePath) {
+      return;
+    }
+
+    const normalizedWorkspacePath = workspacePath?.trim();
+    if (!normalizedWorkspacePath) {
+      return;
+    }
+
+    const workspaceSource = this.readInstructionSource(normalizedWorkspacePath, CODEX_INSTRUCTION_CANDIDATES);
+    const globalSource = this.readInstructionSource(os.homedir(), CODEX_INSTRUCTION_CANDIDATES);
+    if (!workspaceSource && !globalSource) {
+      fs.rmSync(instructionFilePath, { force: true });
+      return;
+    }
+
+    const sections = [
+      "# TaskSaw Codex Instructions",
+      "",
+      "Apply these instructions with the following precedence:",
+      "1. Workspace instructions",
+      "2. Global instructions",
+      "",
+      "If the workspace and global instructions conflict, the workspace instructions win.",
+      ""
+    ];
+
+    if (workspaceSource) {
+      sections.push(
+        `## Workspace Instructions (${workspaceSource.path})`,
+        workspaceSource.content.trim(),
+        ""
+      );
+    }
+
+    if (globalSource) {
+      sections.push(
+        `## Global Instructions (${globalSource.path})`,
+        globalSource.content.trim(),
+        ""
+      );
+    }
+
+    const nextContent = `${sections.join("\n").trimEnd()}\n`;
+    fs.mkdirSync(path.dirname(instructionFilePath), { recursive: true });
+
+    const currentContent = fs.existsSync(instructionFilePath)
+      ? fs.readFileSync(instructionFilePath, "utf8")
+      : null;
+    if (currentContent === nextContent) {
+      return;
+    }
+
+    fs.writeFileSync(instructionFilePath, nextContent);
+  }
+
+  private getCodexWorkspaceInstructionFilePath(workspacePath?: string | null): string | null {
+    const normalizedWorkspacePath = workspacePath?.trim();
+    if (!normalizedWorkspacePath) {
+      return null;
+    }
+
+    const workspaceHash = createHash("sha256").update(normalizedWorkspacePath).digest("hex").slice(0, 16);
+    return path.join(this.runtimeDirectory, "codex-instructions", `${workspaceHash}.md`);
+  }
+
+  private readInstructionSource(baseDirectory: string, candidates: string[]): InstructionSource | null {
+    for (const candidateName of candidates) {
+      const candidatePath = path.join(baseDirectory, candidateName);
+      if (!fs.existsSync(candidatePath)) {
+        continue;
+      }
+
+      try {
+        if (!fs.statSync(candidatePath).isFile()) {
+          continue;
+        }
+
+        const content = fs.readFileSync(candidatePath, "utf8").trim();
+        if (content.length === 0) {
+          continue;
+        }
+
+        return {
+          path: candidatePath,
+          content
+        };
+      } catch {
+        // Ignore unreadable instruction files and keep searching fallbacks.
+      }
+    }
+
+    return null;
+  }
+
+  private syncManagedInstructionFile(destinationPath: string, source: InstructionSource | null) {
+    if (!source) {
+      fs.rmSync(destinationPath, { force: true });
+      return;
+    }
+
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    const nextContent = `${source.content.trim()}\n`;
+    const currentContent = fs.existsSync(destinationPath)
+      ? fs.readFileSync(destinationPath, "utf8")
+      : null;
+    if (currentContent === nextContent) {
+      return;
+    }
+
+    fs.writeFileSync(destinationPath, nextContent);
+  }
+
+  private withPatchedJsonFile(
+    filePath: string,
+    patch: (current: Record<string, unknown>) => Record<string, unknown>
+  ): Record<string, unknown> {
+    const current = this.readJsonObject(filePath);
+    return patch(current);
+  }
+
+  private readJsonObject(filePath: string): Record<string, unknown> {
+    if (!fs.existsSync(filePath)) {
+      return {};
+    }
+
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+      return this.isPlainObject(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private writeJsonIfChanged(filePath: string, value: Record<string, unknown>) {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const nextContent = `${JSON.stringify(value, null, 2)}\n`;
+    const currentContent = fs.existsSync(filePath)
+      ? fs.readFileSync(filePath, "utf8")
+      : null;
+    if (currentContent === nextContent) {
+      return;
+    }
+
+    fs.writeFileSync(filePath, nextContent);
+  }
+
+  private mergeStringLists(primary: string[], secondary: string[]): string[] {
+    const values = new Set<string>();
+    for (const value of [...primary, ...secondary]) {
+      const trimmedValue = value.trim();
+      if (trimmedValue.length === 0) {
+        continue;
+      }
+
+      values.add(trimmedValue);
+    }
+
+    return [...values];
+  }
+
+  private isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  private readNestedString(current: Record<string, unknown>, pathSegments: string[]): string | null {
+    let value: unknown = current;
+
+    for (const segment of pathSegments) {
+      if (!this.isPlainObject(value)) {
+        return null;
+      }
+
+      value = value[segment];
+    }
+
+    return typeof value === "string" && value.trim().length > 0
+      ? value
+      : null;
+  }
+
+  private createModelCatalogCacheKey(toolId: ManagedToolId, workspacePath?: string | null): string {
+    const normalizedWorkspace = workspacePath?.trim() || "";
+    return `${toolId}:${normalizedWorkspace}`;
+  }
+
+  private async discoverModelCatalogInternal(
+    toolId: ManagedToolId,
+    workspacePath?: string | null
+  ): Promise<ManagedToolModelCatalog> {
+    if (toolId === "codex") {
+      return this.discoverCodexModelCatalog(workspacePath);
+    }
+
+    return this.discoverGeminiModelCatalog(workspacePath);
+  }
+
+  private async getCodexAuthenticationStatus(workspacePath?: string | null): Promise<ManagedToolAuthState> {
+    const launchCommand = await this.resolveLaunchCommand("codex");
+    const cwd = workspacePath?.trim() || process.cwd();
+    const env = this.buildManagedCommandEnv("codex", launchCommand.env);
+
+    return new Promise<ManagedToolAuthState>((resolve, reject) => {
+      const child = spawn(launchCommand.command, [...launchCommand.args, "login", "status"], {
+        cwd,
+        env,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+
+      let settled = false;
+      let stdoutBuffer = "";
+      let stderrBuffer = "";
+      const timeout = setTimeout(() => {
+        finish(new Error("Timed out while checking Codex login status"));
+      }, 10_000);
+
+      const finish = (error?: Error, result?: ManagedToolAuthState) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+
+        if (!child.killed && child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGTERM");
+        }
+
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve(result ?? {
+          toolId: "codex",
+          authenticated: false,
+          message: "Codex login is required."
+        });
+      };
+
+      child.stdout?.on("data", (chunk) => {
+        stdoutBuffer += chunk.toString("utf8");
+      });
+
+      child.stderr?.on("data", (chunk) => {
+        stderrBuffer += chunk.toString("utf8");
+      });
+
+      child.on("error", (error) => finish(error instanceof Error ? error : new Error(String(error))));
+      child.on("close", (code, signal) => {
+        if (settled) return;
+
+        const combinedOutput = `${stdoutBuffer}\n${stderrBuffer}`.toLowerCase();
+        if (code === 0) {
+          finish(undefined, {
+            toolId: "codex",
+            authenticated: true,
+            message: null
+          });
+          return;
+        }
+
+        if (this.looksLikeCodexLoginRequired(combinedOutput)) {
+          finish(undefined, {
+            toolId: "codex",
+            authenticated: false,
+            message: "Codex login is required."
+          });
+          return;
+        }
+
+        finish(new Error(`Failed to check Codex login status (code=${code ?? "null"}, signal=${signal ?? "null"}): ${combinedOutput.trim()}`));
+      });
+    });
+  }
+
+  private async getGeminiAuthenticationStatus(workspacePath?: string | null): Promise<ManagedToolAuthState> {
+    const preflight = this.getManagedGeminiAuthenticationPreflight();
+    if (!preflight.authenticated) {
+      return {
+        toolId: "gemini",
+        authenticated: false,
+        message: preflight.message
+      };
+    }
+
+    return this.probeGeminiAuthenticationStatus(workspacePath);
+  }
+
+  private async probeGeminiAuthenticationStatus(workspacePath?: string | null): Promise<ManagedToolAuthState> {
+    const launchCommand = await this.resolveLaunchCommand("gemini");
+    const cwd = workspacePath?.trim() || process.cwd();
+    const env = this.buildManagedCommandEnv("gemini", launchCommand.env);
+    const acpModule = await this.importManagedGeminiAcpModule();
+
+    class GeminiAuthClient {
+      async requestPermission() {
+        return {
+          outcome: {
+            outcome: "cancelled"
+          }
+        };
+      }
+
+      async sessionUpdate() {
+        return undefined;
+      }
+
+      async writeTextFile() {
+        return {};
+      }
+
+      async readTextFile() {
+        return { content: "" };
+      }
+    }
+
+    const child = spawn(launchCommand.command, [...launchCommand.args, "--acp"], {
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    let stderrBuffer = "";
+    child.stderr.on("data", (chunk) => {
+      stderrBuffer += chunk.toString("utf8");
+      if (stderrBuffer.length > 8_000) {
+        stderrBuffer = stderrBuffer.slice(-8_000);
+      }
+    });
+
+    try {
+      const stdin = child.stdin;
+      const stdout = child.stdout;
+      if (!stdin || !stdout) {
+        throw new Error("gemini --acp did not expose stdio handles");
+      }
+
+      const stream = acpModule.ndJsonStream(
+        Writable.toWeb(stdin) as unknown as WritableStream<Uint8Array>,
+        Readable.toWeb(stdout) as unknown as ReadableStream<Uint8Array>
+      );
+      const connection = new acpModule.ClientSideConnection(
+        () => new GeminiAuthClient(),
+        stream
+      );
+
+      await this.withTimeout(
+        connection.initialize({
+          protocolVersion: acpModule.PROTOCOL_VERSION,
+          clientCapabilities: {}
+        }),
+        10_000,
+        "Timed out while initializing Gemini ACP"
+      );
+
+      await this.withTimeout(
+        connection.newSession({
+          cwd,
+          mcpServers: []
+        }) as Promise<unknown>,
+        15_000,
+        "Timed out while checking Gemini login status"
+      );
+
+      return {
+        toolId: "gemini",
+        authenticated: true,
+        message: null
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (this.looksLikeGeminiLoginRequired(`${message}\n${stderrBuffer}`)) {
+        return {
+          toolId: "gemini",
+          authenticated: false,
+          message: "Gemini login is required."
+        };
+      }
+
+      throw this.decorateDiscoveryError(
+        "Gemini login status",
+        error instanceof Error ? error : new Error(String(error)),
+        stderrBuffer
+      );
+    } finally {
+      await this.stopChildProcess(child);
+    }
+  }
+
+  private getManagedGeminiAuthenticationPreflight(): ManagedGeminiAuthPreflight {
+    const geminiDirectory = path.join(this.homeDirectory, ".gemini");
+    const settings = this.readJsonObject(path.join(geminiDirectory, "settings.json"));
+    const selectedType = this.readNestedString(settings, ["security", "auth", "selectedType"]);
+
+    if (!selectedType) {
+      if (this.hasConfiguredGeminiApiKey()) {
+        return {
+          authenticated: true,
+          message: null
+        };
+      }
+
+      return {
+        authenticated: false,
+        message: "Gemini login is required."
+      };
+    }
+
+    if (selectedType === "oauth-personal" && !this.hasManagedGeminiOauthSession(geminiDirectory)) {
+      return {
+        authenticated: false,
+        message: "Gemini login is required."
+      };
+    }
+
+    return {
+      authenticated: true,
+      message: null
+    };
+  }
+
+  private looksLikeCodexLoginRequired(output: string): boolean {
+    return /(not logged in|login required|run codex login|re-run [`'"]?codex login|chatgpt account id not available|auth required)/i
+      .test(output);
+  }
+
+  private looksLikeGeminiLoginRequired(output: string): boolean {
+    return /(authentication required|auth required|authentication failed|gemini api key is missing|login required|credential)/i
+      .test(output);
+  }
+
+  private hasConfiguredGeminiApiKey(): boolean {
+    return [process.env.GEMINI_API_KEY, process.env.GOOGLE_API_KEY]
+      .some((value) => typeof value === "string" && value.trim().length > 0);
+  }
+
+  private hasManagedGeminiOauthSession(geminiDirectory: string): boolean {
+    if (fs.existsSync(path.join(geminiDirectory, "oauth_creds.json"))) {
+      return true;
+    }
+
+    const googleAccounts = this.readJsonObject(path.join(geminiDirectory, "google_accounts.json"));
+    const activeAccount = googleAccounts.active;
+    return typeof activeAccount === "string" && activeAccount.trim().length > 0;
+  }
+
+  private async discoverCodexModelCatalog(workspacePath?: string | null): Promise<ManagedToolModelCatalog> {
+    const launchCommand = await this.resolveLaunchCommand("codex");
+    const cwd = workspacePath?.trim() || process.cwd();
+    const env = this.buildManagedCommandEnv("codex", launchCommand.env);
+
+    type CodexModelResponse = {
+      id: string;
+      model: string;
+      displayName: string;
+      description: string;
+      hidden: boolean;
+      isDefault: boolean;
+      defaultReasoningEffort: string;
+      supportedReasoningEfforts: Array<{ reasoningEffort: string }>;
+    };
+
+    type CodexModelListResult = {
+      data?: CodexModelResponse[];
+      nextCursor?: string | null;
+    };
+
+    const models = await new Promise<CodexModelResponse[]>((resolve, reject) => {
+      const child = spawn(launchCommand.command, [...launchCommand.args, "app-server"], {
+        cwd,
+        env,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+      const stdin = child.stdin;
+      const stdout = child.stdout;
+      const stderr = child.stderr;
+      if (!stdin || !stdout || !stderr) {
+        reject(new Error("codex app-server did not expose stdio handles"));
+        return;
+      }
+
+      let settled = false;
+      let stdoutBuffer = "";
+      let stderrBuffer = "";
+      let nextRequestId = 1;
+      let collectedModels: CodexModelResponse[] = [];
+
+      const timeout = setTimeout(() => {
+        finish(new Error("Timed out while discovering Codex models via codex app-server"));
+      }, 15_000);
+
+      const finish = (error?: Error, result?: CodexModelResponse[]) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+
+        if (!child.killed) {
+          child.kill("SIGTERM");
+        }
+
+        if (error) {
+          reject(this.decorateDiscoveryError("Codex", error, stderrBuffer));
+          return;
+        }
+
+        resolve(result ?? []);
+      };
+
+      const sendRequest = (method: string, params: Record<string, unknown> | null) => {
+        const payload = JSON.stringify({
+          method,
+          id: nextRequestId++,
+          params
+        });
+
+        stdin.write(`${payload}\n`);
+      };
+
+      const requestNextPage = (cursor?: string | null) => {
+        sendRequest("model/list", {
+          includeHidden: true,
+          limit: 100,
+          cursor: cursor ?? null
+        });
+      };
+
+      stdout.on("data", (chunk) => {
+        stdoutBuffer += chunk.toString("utf8");
+
+        let newlineIndex = stdoutBuffer.indexOf("\n");
+        while (newlineIndex !== -1) {
+          const rawLine = stdoutBuffer.slice(0, newlineIndex).trim();
+          stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+
+          if (rawLine.length > 0) {
+            try {
+              const message = JSON.parse(rawLine) as {
+                id?: number;
+                result?: CodexModelListResult;
+                error?: { code?: number; message?: string };
+              };
+
+              if (message.error) {
+                finish(new Error(message.error.message ?? "codex app-server returned an error"));
+                return;
+              }
+
+              if (message.id === 1) {
+                requestNextPage();
+              } else if (typeof message.result === "object" && message.result !== null && Array.isArray(message.result.data)) {
+                collectedModels = collectedModels.concat(message.result.data);
+                if (message.result.nextCursor) {
+                  requestNextPage(message.result.nextCursor);
+                } else {
+                  finish(undefined, collectedModels);
+                  return;
+                }
+              }
+            } catch (error) {
+              finish(error instanceof Error ? error : new Error(String(error)));
+              return;
+            }
+          }
+
+          newlineIndex = stdoutBuffer.indexOf("\n");
+        }
+      });
+
+      stderr.on("data", (chunk) => {
+        stderrBuffer += chunk.toString("utf8");
+        if (stderrBuffer.length > 8_000) {
+          stderrBuffer = stderrBuffer.slice(-8_000);
+        }
+      });
+
+      child.on("error", (error) => finish(error));
+      child.on("close", (code, signal) => {
+        if (settled) return;
+        finish(new Error(`codex app-server exited before model discovery completed (code=${code ?? "null"}, signal=${signal ?? "null"})`));
+      });
+
+      sendRequest("initialize", {
+        clientInfo: {
+          name: "tasksaw-model-discovery",
+          version: "0.1.0"
+        },
+        capabilities: null
+      });
+    });
+
+    return {
+      toolId: "codex",
+      provider: "OpenAI",
+      currentModelId: models.find((model) => model.isDefault)?.id ?? null,
+      discoveredAt: new Date().toISOString(),
+      models: models.map((model) => ({
+        id: model.id,
+        model: model.model,
+        displayName: model.displayName,
+        description: model.description ?? null,
+        hidden: model.hidden,
+        isDefault: model.isDefault,
+        defaultReasoningEffort: model.defaultReasoningEffort ?? null,
+        supportedReasoningEfforts: model.supportedReasoningEfforts.map((entry) => entry.reasoningEffort)
+      }))
+    };
+  }
+
+  private async discoverGeminiModelCatalog(workspacePath?: string | null): Promise<ManagedToolModelCatalog> {
+    const launchCommand = await this.resolveLaunchCommand("gemini");
+    const cwd = workspacePath?.trim() || process.cwd();
+    const env = this.buildManagedCommandEnv("gemini", launchCommand.env);
+    const acpModule = await this.importManagedGeminiAcpModule();
+
+    type GeminiModelInfo = {
+      modelId: string;
+      name: string;
+      description?: string | null;
+    };
+
+    type GeminiNewSessionResult = {
+      models?: {
+        availableModels?: GeminiModelInfo[];
+        currentModelId?: string;
+      };
+    };
+
+    class GeminiDiscoveryClient {
+      async requestPermission() {
+        return {
+          outcome: {
+            outcome: "cancelled"
+          }
+        };
+      }
+
+      async sessionUpdate() {
+        return undefined;
+      }
+
+      async writeTextFile() {
+        return {};
+      }
+
+      async readTextFile() {
+        return { content: "" };
+      }
+    }
+
+    const child = spawn(launchCommand.command, [...launchCommand.args, "--acp"], {
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    let stderrBuffer = "";
+    child.stderr.on("data", (chunk) => {
+      stderrBuffer += chunk.toString("utf8");
+      if (stderrBuffer.length > 8_000) {
+        stderrBuffer = stderrBuffer.slice(-8_000);
+      }
+    });
+
+    try {
+      const stdin = child.stdin;
+      const stdout = child.stdout;
+      if (!stdin || !stdout) {
+        throw new Error("gemini --acp did not expose stdio handles");
+      }
+
+      const stream = acpModule.ndJsonStream(
+        Writable.toWeb(stdin) as unknown as WritableStream<Uint8Array>,
+        Readable.toWeb(stdout) as unknown as ReadableStream<Uint8Array>
+      );
+
+      const connection = new acpModule.ClientSideConnection(
+        () => new GeminiDiscoveryClient(),
+        stream
+      );
+
+      await this.withTimeout(
+        connection.initialize({
+          protocolVersion: acpModule.PROTOCOL_VERSION,
+          clientCapabilities: {}
+        }),
+        10_000,
+        "Timed out while initializing Gemini ACP"
+      );
+
+      const session = await this.withTimeout<GeminiNewSessionResult>(
+        connection.newSession({
+          cwd,
+          mcpServers: []
+        }) as Promise<GeminiNewSessionResult>,
+        15_000,
+        "Timed out while discovering Gemini models via gemini --acp"
+      );
+
+      const availableModels = session.models?.availableModels ?? [];
+      return {
+        toolId: "gemini",
+        provider: "Google",
+        currentModelId: session.models?.currentModelId ?? null,
+        discoveredAt: new Date().toISOString(),
+        models: availableModels.map((model) => ({
+          id: model.modelId,
+          model: model.modelId,
+          displayName: model.name,
+          description: model.description ?? null,
+          hidden: false,
+          isDefault: model.modelId === session.models?.currentModelId,
+          defaultReasoningEffort: null,
+          supportedReasoningEfforts: []
+        }))
+      };
+    } catch (error) {
+      throw this.decorateDiscoveryError(
+        "Gemini",
+        error instanceof Error ? error : new Error(String(error)),
+        stderrBuffer
+      );
+    } finally {
+      await this.stopChildProcess(child);
+    }
+  }
+
+  private async importManagedGeminiAcpModule(): Promise<{
+    PROTOCOL_VERSION: number;
+    ndJsonStream: (output: WritableStream<Uint8Array>, input: ReadableStream<Uint8Array>) => unknown;
+    ClientSideConnection: new (toClient: () => object, stream: unknown) => {
+      initialize(params: Record<string, unknown>): Promise<unknown>;
+      newSession(params: Record<string, unknown>): Promise<unknown>;
+    };
+  }> {
+    const modulePath = path.join(
+      this.getInstallDirectory("gemini"),
+      "node_modules",
+      "@agentclientprotocol",
+      "sdk",
+      "dist",
+      "acp.js"
+    );
+
+    const imported = await dynamicImport(pathToFileURL(modulePath).href) as {
+      PROTOCOL_VERSION: number;
+      ndJsonStream: (output: WritableStream<Uint8Array>, input: ReadableStream<Uint8Array>) => unknown;
+      ClientSideConnection: new (toClient: () => object, stream: unknown) => {
+        initialize(params: Record<string, unknown>): Promise<unknown>;
+        newSession(params: Record<string, unknown>): Promise<unknown>;
+      };
+    };
+
+    return imported;
+  }
+
+  private buildManagedCommandEnv(toolId: ManagedToolId, commandEnv: Record<string, string>): Record<string, string> {
+    const inheritedEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined) {
+        inheritedEnv[key] = value;
+      }
+    }
+
+    return {
+      ...inheritedEnv,
+      ...this.buildManagedExecutionEnvironment(toolId),
+      ...commandEnv
+    };
+  }
+
+  private decorateDiscoveryError(toolName: string, error: Error, stderrBuffer: string): Error {
+    const stderrPreview = stderrBuffer.trim();
+    const suffix = stderrPreview.length > 0
+      ? `\n${stderrPreview.slice(-4_000)}`
+      : "";
+    return new Error(`Failed to discover ${toolName} models from the live CLI: ${error.message}${suffix}`);
+  }
+
+  private async stopChildProcess(child: ReturnType<typeof spawn>): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return;
+    }
+
+    child.kill("SIGTERM");
+    try {
+      await this.waitForExit(child, 1_000);
+    } catch {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await this.waitForExit(child, 1_000).catch(() => undefined);
+      }
+    }
+  }
+
+  private waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        resolve();
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("Timed out while waiting for a child process to exit"));
+      }, timeoutMs);
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        child.off("error", onError);
+        child.off("exit", onExit);
+      };
+
+      const onError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+
+      const onExit = () => {
+        cleanup();
+        resolve();
+      };
+
+      child.once("error", onError);
+      child.once("exit", onExit);
+    });
+  }
+
+  private withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      promise.then(
+        (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      );
+    });
   }
 
   private async installLatest(toolId: ManagedToolId): Promise<ManagedToolStatus> {
@@ -125,6 +1155,7 @@ export class ToolManager {
   }
 
   private async installLatestInternal(toolId: ManagedToolId): Promise<ManagedToolStatus> {
+    this.modelCatalogPromises.clear();
     const definition = TOOL_DEFINITIONS[toolId];
     const installDirectory = this.getInstallDirectory(toolId);
     fs.mkdirSync(installDirectory, { recursive: true });
@@ -142,7 +1173,7 @@ export class ToolManager {
       `${definition.packageName}@latest`
     ];
 
-    await this.runCommand(npmCommand.command, npmArgs, npmCommand.command === process.execPath);
+    await this.runCommand(npmCommand.command, npmArgs, npmCommand.env);
 
     const status = this.getStatus(toolId);
     if (!status.installed) {
@@ -273,18 +1304,22 @@ export class ToolManager {
 
   private writeBrowserWrapper(wrapperName: string, helperPath: string, fallbackCommand?: string) {
     const wrapperPath = path.join(this.binDirectory, wrapperName);
+    const nodeRuntime = this.resolveNodeRuntime();
     const wrapperLines = [
       "#!/bin/sh",
-      "set -eu",
-      "export ELECTRON_RUN_AS_NODE=1"
+      "set -eu"
     ];
 
     if (fallbackCommand) {
       wrapperLines.push(`export TASKSAW_BROWSER_FALLBACK=${this.shQuote(fallbackCommand)}`);
     }
 
+    for (const [key, value] of Object.entries(nodeRuntime.env)) {
+      wrapperLines.push(`export ${key}=${this.shQuote(value)}`);
+    }
+
     wrapperLines.push(
-      `exec ${this.shQuote(process.execPath)} ${this.shQuote(helperPath)} ${this.shQuote(wrapperName)} "$@"`,
+      `exec ${this.shQuote(nodeRuntime.command)} ${this.shQuote(helperPath)} ${this.shQuote(wrapperName)} "$@"`,
       ""
     );
 
@@ -348,11 +1383,12 @@ export class ToolManager {
 
     const definition = TOOL_DEFINITIONS[toolId];
     const shimPath = path.join(this.binDirectory, definition.executableName);
+    const nodeRuntime = this.resolveNodeRuntime();
     const shimScript = [
       "#!/bin/sh",
       "set -eu",
-      "export ELECTRON_RUN_AS_NODE=1",
-      `exec ${this.shQuote(process.execPath)} ${this.shQuote(entryPoint)} "$@"`,
+      ...Object.entries(nodeRuntime.env).map(([key, value]) => `export ${key}=${this.shQuote(value)}`),
+      `exec ${this.shQuote(nodeRuntime.command)} ${this.shQuote(entryPoint)} "$@"`,
       ""
     ].join("\n");
 
@@ -364,11 +1400,13 @@ export class ToolManager {
     return `'${value.replaceAll("'", `'"'"'`)}'`;
   }
 
-  private resolveNpmCommand(): { command: string; args: string[] } {
+  private resolveNpmCommand(): ResolvedCommand {
     if (process.env.npm_execpath && fs.existsSync(process.env.npm_execpath)) {
+      const nodeRuntime = this.resolveNodeRuntime();
       return {
-        command: process.execPath,
-        args: [process.env.npm_execpath]
+        command: nodeRuntime.command,
+        args: [process.env.npm_execpath],
+        env: nodeRuntime.env
       };
     }
 
@@ -380,7 +1418,7 @@ export class ToolManager {
     ]) {
       const executablePath = this.resolveExecutable(candidate);
       if (!executablePath) continue;
-      return { command: executablePath, args: [] };
+      return { command: executablePath, args: [], env: {} };
     }
 
     throw new Error("npm was not found. TaskSaw currently needs npm once to install its managed Codex/Gemini CLIs.");
@@ -401,7 +1439,53 @@ export class ToolManager {
     return null;
   }
 
-  private async runCommand(command: string, args: string[], runAsNode: boolean): Promise<void> {
+  private resolveNodeRuntime(): NodeRuntime {
+    const resolvedNodePath = this.resolvePreferredNodeExecutable();
+    if (resolvedNodePath) {
+      return {
+        command: resolvedNodePath,
+        env: {}
+      };
+    }
+
+    return {
+      command: process.execPath,
+      env: {
+        ELECTRON_RUN_AS_NODE: "1"
+      }
+    };
+  }
+
+  private resolvePreferredNodeExecutable(): string | null {
+    for (const candidate of [process.env.npm_node_execpath, process.env.NODE]) {
+      if (candidate && fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+
+    if (this.isNodeExecutable(process.execPath)) {
+      return process.execPath;
+    }
+
+    for (const candidate of [
+      "node",
+      "/opt/homebrew/bin/node",
+      "/usr/local/bin/node",
+      "/usr/bin/node"
+    ]) {
+      const executablePath = this.resolveExecutable(candidate);
+      if (executablePath) return executablePath;
+    }
+
+    return null;
+  }
+
+  private isNodeExecutable(executablePath: string): boolean {
+    const executableName = path.basename(executablePath).toLowerCase();
+    return executableName === "node" || executableName === "node.exe";
+  }
+
+  private async runCommand(command: string, args: string[], commandEnv: Record<string, string>): Promise<void> {
     const env: Record<string, string> = {
       ...process.env,
       HOME: this.homeDirectory,
@@ -409,12 +1493,9 @@ export class ToolManager {
       npm_config_audit: "false",
       npm_config_cache: path.join(this.runtimeDirectory, "npm-cache"),
       npm_config_fund: "false",
-      npm_config_update_notifier: "false"
+      npm_config_update_notifier: "false",
+      ...commandEnv
     };
-
-    if (runAsNode) {
-      env.ELECTRON_RUN_AS_NODE = "1";
-    }
 
     await new Promise<void>((resolve, reject) => {
       const child = spawn(command, args, {

@@ -83,6 +83,17 @@ export class WorkspaceAccessManager {
     this.activeScopes.delete(normalizedPath);
   }
 
+  resetAllAccess() {
+    for (const activeScope of this.activeScopes.values()) {
+      activeScope.stopAccessing?.();
+    }
+
+    this.activeScopes.clear();
+    this.authorizedPaths.clear();
+    this.bookmarks.clear();
+    fs.rmSync(this.bookmarkStorePath, { force: true });
+  }
+
   private tryAcquireStoredBookmark(requestedPath: string): string | null {
     const bookmarkEntry = this.lookupBookmark(requestedPath);
     if (!bookmarkEntry) return null;

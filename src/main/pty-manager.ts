@@ -146,6 +146,25 @@ export class PtyManager {
     session.ptyProcess.kill();
   }
 
+  resetAllSessions() {
+    const sessionIds = [...this.sessions.keys()];
+
+    for (const sessionId of sessionIds) {
+      const session = this.sessions.get(sessionId);
+      if (!session) continue;
+
+      try {
+        session.ptyProcess.kill();
+      } catch {
+        // Ignore already-exited PTY processes during reset.
+      }
+
+      this.releaseSession(sessionId);
+    }
+
+    this.cleanupStaleSessionDirectories();
+  }
+
   private releaseSession(sessionId: string) {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -341,7 +360,11 @@ export class PtyManager {
     env: Record<string, string>,
     sessionPaths: SessionPaths
   ): Promise<{ command: string; args: string[]; env: Record<string, string> }> {
+    await this.toolManager.prepareWorkspaceContext(kind, sessionPaths.workspaceDirectory);
     const toolCommand = await this.toolManager.resolveLaunchCommand(kind);
+    const toolArgs = kind === "codex"
+      ? [...toolCommand.args, ...this.toolManager.getCodexWorkspaceConfigArgs(sessionPaths.workspaceDirectory)]
+      : toolCommand.args;
     const launchEnv = {
       ...env,
       ...this.buildManagedToolEnv(kind),
@@ -351,7 +374,7 @@ export class PtyManager {
     if (os.platform() !== "darwin") {
       return {
         command: toolCommand.command,
-        args: toolCommand.args,
+        args: toolArgs,
         env: launchEnv
       };
     }
@@ -365,7 +388,7 @@ export class PtyManager {
 
     return {
       command: sandboxCommand,
-      args: ["-f", sessionPaths.sandboxProfilePath, toolCommand.command, ...toolCommand.args],
+      args: ["-f", sessionPaths.sandboxProfilePath, toolCommand.command, ...toolArgs],
       env: launchEnv
     };
   }

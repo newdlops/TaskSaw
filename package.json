@@ -5,10 +5,11 @@
   "private": true,
   "main": "dist/main/main.js",
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "start": "npm run build && electron .",
     "dev": "npm run start",
-    "lint": "eslint \"src/**/*.ts\""
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "npm run build && node --test dist/orchestrator/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

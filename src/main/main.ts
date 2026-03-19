@@ -1,7 +1,8 @@
 import path from "node:path";
 import { app, BrowserWindow, nativeImage } from "electron";
-import { PtyManager } from "./pty-manager";
 import { registerIpc } from "./ipc";
+import { OrchestratorService } from "./orchestrator-service";
+import { PtyManager } from "./pty-manager";
 import { ToolManager } from "./tool-manager";
 import { WorkspaceAccessManager } from "./workspace-access";
 import { BrowserBridge } from "./browser-bridge";
@@ -49,6 +50,7 @@ async function createWindow() {
 
   const toolManager = new ToolManager(app.getPath("userData"));
   const workspaceAccessManager = new WorkspaceAccessManager(app.getPath("userData"));
+  const orchestratorService = new OrchestratorService(app.getAppPath(), app.getPath("userData"), toolManager);
   browserBridge = new BrowserBridge();
   await browserBridge.start().catch((error) => {
     console.error("Failed to start TaskSaw browser bridge:", error);
@@ -60,7 +62,7 @@ async function createWindow() {
     workspaceAccessManager,
     browserBridge
   );
-  registerIpc(mainWindow, ptyManager, workspaceAccessManager, toolManager);
+  registerIpc(mainWindow, ptyManager, workspaceAccessManager, toolManager, orchestratorService);
 }
 
 app.whenReady().then(createWindow);

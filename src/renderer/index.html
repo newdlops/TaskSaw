@@ -9,31 +9,29 @@
     (() => {
       const storageKey = "tasksaw-theme";
       const root = document.documentElement;
+      const resolvedSystemTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 
       const readThemePreference = () => {
         try {
           const storedPreference = window.localStorage.getItem(storageKey);
-          if (storedPreference === "light" || storedPreference === "dark" || storedPreference === "system") {
+          if (storedPreference === "light" || storedPreference === "dark") {
             return storedPreference;
           }
+
+          if (storedPreference === "system") {
+            window.localStorage.setItem(storageKey, resolvedSystemTheme);
+            return resolvedSystemTheme;
+          }
         } catch {
-          // Ignore storage access failures and fall back to the system theme.
+          // Ignore storage access failures and fall back to the default theme.
         }
 
-        return "system";
-      };
-
-      const resolveTheme = (preference) => {
-        if (preference === "light" || preference === "dark") {
-          return preference;
-        }
-
-        return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        return "light";
       };
 
       const themePreference = readThemePreference();
       root.dataset.themePreference = themePreference;
-      root.dataset.theme = resolveTheme(themePreference);
+      root.dataset.theme = themePreference;
     })();
   </script>
   <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
@@ -55,6 +53,7 @@
     <button id="new-codex" type="button" disabled>+Codex</button>
     <button id="new-gemini" type="button" disabled>+Gemini</button>
     <button id="tools-update" type="button">Update AI Tools</button>
+    <button id="app-reset" type="button">Reset All Data</button>
   </div>
 
   <div class="topbar-group">
@@ -64,7 +63,6 @@
     </div>
 
     <div id="theme-switcher" class="topbar-group" role="group" aria-label="Theme">
-      <button type="button" data-theme-option="system">Auto</button>
       <button type="button" data-theme-option="light">Light</button>
       <button type="button" data-theme-option="dark">Dark</button>
     </div>
@@ -78,8 +76,145 @@
   </aside>
 
   <main id="main">
-    <div id="terminal-root"></div>
+    <div id="workspace-tabs-bar">
+      <div id="workspace-tabs" role="tablist" aria-label="Workspace Tabs"></div>
+      <div class="workspace-tabs-actions">
+        <button id="workspace-open-orchestrator" type="button">Open Orchestrator</button>
+      </div>
+    </div>
+
+    <div id="workspace-panels">
+      <section id="orchestrator-panel">
+        <div class="orchestrator-toolbar">
+          <div class="orchestrator-heading">
+            <div id="orchestrator-title" class="section-title">Orchestrator</div>
+            <div id="orchestrator-subtitle" class="orchestrator-subtitle">
+              Run the ordered DFS orchestrator with the live Gemini and Codex CLI model catalogs and inspect node prompts.
+            </div>
+          </div>
+          <div class="topbar-group">
+            <button id="orchestrator-refresh" type="button">Refresh Runs</button>
+            <button id="orchestrator-stop" type="button">Stop Run</button>
+            <button id="orchestrator-continue" type="button">Continue Selected</button>
+            <button id="orchestrator-run" type="button">Run Orchestrator</button>
+          </div>
+        </div>
+
+        <div class="orchestrator-grid">
+          <div class="orchestrator-inputs">
+            <label class="orchestrator-form-field">
+              <span id="orchestrator-goal-label">Goal</span>
+              <textarea id="orchestrator-goal" rows="4" placeholder="Describe the task you want the orchestrator to run"></textarea>
+            </label>
+
+            <label class="orchestrator-form-field orchestrator-mode-field">
+              <span id="orchestrator-mode-label">Mode</span>
+              <select id="orchestrator-mode">
+                <option value="cross_review">Cross Review</option>
+                <option value="gemini_only">Gemini Only</option>
+                <option value="codex_only">Codex Only</option>
+              </select>
+            </label>
+        </div>
+
+          <div class="orchestrator-columns">
+            <section class="orchestrator-card orchestrator-tree-card">
+              <div class="orchestrator-tree-header">
+                <div id="orchestrator-tree-title" class="section-title">Node Graph</div>
+                <span id="orchestrator-tree-meta" class="orchestrator-tree-meta">0 nodes</span>
+              </div>
+              <div id="orchestrator-tree" class="orchestrator-tree"></div>
+            </section>
+
+            <section class="orchestrator-card orchestrator-runs-card">
+              <div id="orchestrator-runs-title" class="section-title">Recent Runs</div>
+              <ul id="orchestrator-run-list"></ul>
+            </section>
+
+            <div class="orchestrator-detail-stack">
+              <section class="orchestrator-card orchestrator-detail-card">
+                <div class="orchestrator-detail-header">
+                  <div id="orchestrator-detail-title" class="section-title">Run Detail</div>
+                </div>
+
+                <section class="orchestrator-node-live-card">
+                  <div class="orchestrator-node-live-header">
+                    <div id="orchestrator-node-live-title" class="section-title section-title-small">Selected Node Live</div>
+                    <span id="orchestrator-node-live-status" class="orchestrator-node-live-status">Queued</span>
+                  </div>
+                  <div id="orchestrator-node-live-meta" class="orchestrator-node-live-meta"></div>
+
+                  <div class="orchestrator-node-live-grid">
+                    <section class="orchestrator-node-live-section">
+                      <div class="orchestrator-section-header">
+                        <div id="orchestrator-node-command-title" class="section-title section-title-small">Command</div>
+                        <div class="orchestrator-card-actions">
+                          <button id="orchestrator-node-command-open" class="orchestrator-copy-button" type="button">Large View</button>
+                          <button id="orchestrator-node-command-copy" class="orchestrator-copy-button" type="button">Copy</button>
+                        </div>
+                      </div>
+                      <pre id="orchestrator-node-command"></pre>
+                    </section>
+
+                    <section class="orchestrator-node-live-section">
+                      <div class="orchestrator-section-header">
+                        <div id="orchestrator-node-log-title" class="section-title section-title-small">Node Log</div>
+                        <div class="orchestrator-card-actions">
+                          <button id="orchestrator-node-log-open" class="orchestrator-copy-button" type="button">Large View</button>
+                          <button id="orchestrator-node-log-copy" class="orchestrator-copy-button" type="button">Copy</button>
+                        </div>
+                      </div>
+                      <pre id="orchestrator-node-log"></pre>
+                    </section>
+                  </div>
+                </section>
+              </section>
+
+              <section class="orchestrator-card orchestrator-log-card">
+                <div class="orchestrator-detail-header">
+                  <div id="orchestrator-log-title" class="section-title">Orchestrator Log</div>
+                  <div class="orchestrator-card-actions">
+                    <button id="orchestrator-log-open" class="orchestrator-copy-button" type="button">Large View</button>
+                    <button id="orchestrator-log-copy" class="orchestrator-copy-button" type="button">Copy</button>
+                  </div>
+                </div>
+                <pre id="orchestrator-log"></pre>
+              </section>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div
+        id="main-splitter"
+        role="separator"
+        aria-label="Resize orchestrator and terminal panels"
+        aria-orientation="horizontal"
+        tabindex="0"
+      ></div>
+
+      <div id="terminal-root"></div>
+
+      <section id="workspace-empty" hidden>
+        <div id="workspace-empty-title" class="section-title">No Open Tabs</div>
+        <p id="workspace-empty-copy">Open the orchestrator tab or start a terminal session.</p>
+        <button id="workspace-empty-open-orchestrator" type="button">Open Orchestrator</button>
+      </section>
+    </div>
   </main>
+</div>
+
+<div id="log-viewer-dialog" class="session-dialog" hidden>
+  <div class="log-viewer-dialog-card">
+    <div class="orchestrator-detail-header">
+      <div id="log-viewer-title" class="section-title">Log Viewer</div>
+      <div class="orchestrator-card-actions">
+        <button id="log-viewer-copy" class="orchestrator-copy-button" type="button">Copy</button>
+        <button id="log-viewer-close" class="orchestrator-copy-button" type="button">Close</button>
+      </div>
+    </div>
+    <pre id="log-viewer-content" class="log-viewer-content"></pre>
+  </div>
 </div>
 
 <div id="logbar"></div>
