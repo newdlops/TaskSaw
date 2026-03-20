@@ -96,6 +96,16 @@ type OrchestratorPendingApproval = {
   details: string;
   options: OrchestratorApprovalOption[];
 };
+type ApprovalToast = {
+  requestId: string;
+  title: string;
+  message: string;
+};
+type QueuedPendingApproval = OrchestratorPendingApproval & {
+  nodeId: string;
+  nodeTitle: string;
+  createdAt: string;
+};
 type OrchestratorUserInputOption = {
   label: string;
   description?: string | null;
@@ -191,6 +201,10 @@ type SelectedNodeLiveView = {
   pendingUserInput: OrchestratorPendingUserInput | null;
 };
 
+const DEFAULT_ORCHESTRATOR_MAX_DEPTH = 2;
+const MIN_ORCHESTRATOR_MAX_DEPTH = 1;
+const MAX_ORCHESTRATOR_MAX_DEPTH = 6;
+
 type TasksawApi = {
   createSession(input: {
     kind: SessionKind;
@@ -203,6 +217,7 @@ type TasksawApi = {
   runOrchestrator(input: {
     goal: string;
     mode: OrchestratorMode;
+    maxDepth?: number | null;
     workspacePath?: string | null;
     continueFromRunId?: string | null;
     workspaceAccessDialog?: DirectoryDialogOptions;
@@ -266,6 +281,7 @@ const TEXT = {
       orchestratorSubtitle: "Run the ordered DFS orchestrator with the live Gemini and Codex CLI model catalogs and inspect node prompts.",
       orchestratorGoalLabel: "Goal",
       orchestratorModeLabel: "Mode",
+      orchestratorDepthLabel: "Max Depth",
       orchestratorModeCrossReview: "Cross Review: live Codex + live Gemini",
       orchestratorModeGeminiOnly: "Gemini Only: live Gemini model",
       orchestratorModeCodexOnly: "Codex Only: live Codex model",
@@ -298,6 +314,11 @@ const TEXT = {
       orchestratorApprovalWaiting: "Waiting for input",
       orchestratorApprovalApprove: "Approve",
       orchestratorApprovalDeny: "Deny",
+      orchestratorApprovalReview: "Review",
+      orchestratorApprovalAlert: "Approval request received",
+      orchestratorApprovalQueueButton: "Input Waiting ({count})",
+      orchestratorPendingApprovalsTitle: "Input Waiting",
+      orchestratorPendingApprovalsEmpty: "No pending approval requests.",
       orchestratorApprovalEmpty: "No pending approval request.",
       orchestratorUserInputTitle: "Input Required",
       orchestratorUserInputWaiting: "Waiting for response",
@@ -411,6 +432,7 @@ const TEXT = {
       orchestratorSubtitle: "실시간 Gemini/Codex CLI 모델 카탈로그를 사용해 ordered DFS orchestrator를 실행하고 노드 프롬프트를 확인합니다.",
       orchestratorGoalLabel: "목표",
       orchestratorModeLabel: "모드",
+      orchestratorDepthLabel: "최대 깊이",
       orchestratorModeCrossReview: "상호 리뷰: 실시간 Codex + 실시간 Gemini",
       orchestratorModeGeminiOnly: "Gemini 단독: 실시간 Gemini 모델",
       orchestratorModeCodexOnly: "Codex 단독: 실시간 Codex 모델",
@@ -443,6 +465,11 @@ const TEXT = {
       orchestratorApprovalWaiting: "입력 대기 중",
       orchestratorApprovalApprove: "승인",
       orchestratorApprovalDeny: "거절",
+      orchestratorApprovalReview: "열기",
+      orchestratorApprovalAlert: "승인 요청이 도착했습니다",
+      orchestratorApprovalQueueButton: "입력 대기중 ({count})",
+      orchestratorPendingApprovalsTitle: "입력 대기중",
+      orchestratorPendingApprovalsEmpty: "대기 중인 승인 요청이 없습니다.",
       orchestratorApprovalEmpty: "대기 중인 승인 요청이 없습니다.",
       orchestratorUserInputTitle: "입력 요청",
       orchestratorUserInputWaiting: "응답 대기 중",
@@ -541,6 +568,7 @@ const workspaceCreateButton = document.getElementById("workspace-create") as HTM
 const newShellButton = document.getElementById("new-shell") as HTMLButtonElement;
 const newCodexButton = document.getElementById("new-codex") as HTMLButtonElement;
 const newGeminiButton = document.getElementById("new-gemini") as HTMLButtonElement;
+const approvalQueueButton = document.getElementById("approval-queue-button") as HTMLButtonElement;
 const toolsUpdateButton = document.getElementById("tools-update") as HTMLButtonElement;
 const resetAppButton = document.getElementById("app-reset") as HTMLButtonElement;
 const sessionSectionTitle = document.getElementById("session-section-title") as HTMLDivElement;
@@ -549,8 +577,10 @@ const orchestratorTitleEl = document.getElementById("orchestrator-title") as HTM
 const orchestratorSubtitleEl = document.getElementById("orchestrator-subtitle") as HTMLDivElement;
 const orchestratorGoalLabelEl = document.getElementById("orchestrator-goal-label") as HTMLSpanElement;
 const orchestratorModeLabelEl = document.getElementById("orchestrator-mode-label") as HTMLSpanElement;
+const orchestratorDepthLabelEl = document.getElementById("orchestrator-depth-label") as HTMLSpanElement;
 const orchestratorGoalInput = document.getElementById("orchestrator-goal") as HTMLTextAreaElement;
 const orchestratorModeSelect = document.getElementById("orchestrator-mode") as HTMLSelectElement;
+const orchestratorDepthInput = document.getElementById("orchestrator-depth") as HTMLInputElement;
 const orchestratorRefreshButton = document.getElementById("orchestrator-refresh") as HTMLButtonElement;
 const orchestratorStopButton = document.getElementById("orchestrator-stop") as HTMLButtonElement;
 const orchestratorContinueButton = document.getElementById("orchestrator-continue") as HTMLButtonElement;
@@ -565,6 +595,10 @@ const orchestratorDetailPanelMemoryEl = document.getElementById("orchestrator-de
 const orchestratorNodeLiveTitleEl = document.getElementById("orchestrator-node-live-title") as HTMLDivElement;
 const orchestratorNodeLiveStatusEl = document.getElementById("orchestrator-node-live-status") as HTMLSpanElement;
 const orchestratorNodeLiveMetaEl = document.getElementById("orchestrator-node-live-meta") as HTMLDivElement;
+const orchestratorPendingApprovalsEl = document.getElementById("orchestrator-pending-approvals") as HTMLElement;
+const orchestratorPendingApprovalsTitleEl = document.getElementById("orchestrator-pending-approvals-title") as HTMLDivElement;
+const orchestratorPendingApprovalsStatusEl = document.getElementById("orchestrator-pending-approvals-status") as HTMLSpanElement;
+const orchestratorPendingApprovalsListEl = document.getElementById("orchestrator-pending-approvals-list") as HTMLDivElement;
 const orchestratorNodeApprovalEl = document.getElementById("orchestrator-node-approval") as HTMLElement;
 const orchestratorNodeApprovalTitleEl = document.getElementById("orchestrator-node-approval-title") as HTMLDivElement;
 const orchestratorNodeApprovalStatusEl = document.getElementById("orchestrator-node-approval-status") as HTMLSpanElement;
@@ -612,6 +646,15 @@ const logViewerTitleEl = document.getElementById("log-viewer-title") as HTMLDivE
 const logViewerCopyButton = document.getElementById("log-viewer-copy") as HTMLButtonElement;
 const logViewerCloseButton = document.getElementById("log-viewer-close") as HTMLButtonElement;
 const logViewerContentEl = document.getElementById("log-viewer-content") as HTMLPreElement;
+const approvalDialogEl = document.getElementById("approval-dialog") as HTMLDivElement;
+const approvalDialogTitleEl = document.getElementById("approval-dialog-title") as HTMLDivElement;
+const approvalDialogStatusEl = document.getElementById("approval-dialog-status") as HTMLSpanElement;
+const approvalDialogCloseButton = document.getElementById("approval-dialog-close") as HTMLButtonElement;
+const approvalDialogListEl = document.getElementById("approval-dialog-list") as HTMLDivElement;
+const approvalDialogMessageEl = document.getElementById("approval-dialog-message") as HTMLDivElement;
+const approvalDialogDetailsEl = document.getElementById("approval-dialog-details") as HTMLPreElement;
+const approvalDialogActionsEl = document.getElementById("approval-dialog-actions") as HTMLDivElement;
+const approvalToastContainerEl = document.getElementById("approval-toast-container") as HTMLDivElement;
 const mainSplitterEl = document.getElementById("main-splitter") as HTMLDivElement;
 const terminalRoot = document.getElementById("terminal-root") as HTMLDivElement;
 const logbar = document.getElementById("logbar") as HTMLDivElement;
@@ -732,6 +775,8 @@ let activeLogViewerSource: {
   contentElement: HTMLElement;
   emptyMessage: string;
 } | null = null;
+let activeApprovalDialogRequestId: string | null = null;
+const approvalToasts = new Map<string, ApprovalToast>();
 const pendingUserInputDrafts = new Map<string, Record<string, string>>();
 
 function translate(key: string, params: Record<string, string> = {}): string {
@@ -787,6 +832,55 @@ function refreshLogbar() {
   renderMessage(logbar, lastLogMessage);
 }
 
+function syncDialogBodyState() {
+  document.body.classList.toggle(
+    "dialog-open",
+    !logViewerDialogEl.hidden || !approvalDialogEl.hidden
+  );
+}
+
+function renderApprovalToastList() {
+  approvalToastContainerEl.replaceChildren();
+
+  for (const toast of approvalToasts.values()) {
+    const card = document.createElement("div");
+    card.className = "toast-card";
+
+    const header = document.createElement("div");
+    header.className = "toast-card-header";
+
+    const title = document.createElement("div");
+    title.className = "toast-card-title";
+    title.textContent = toast.title;
+
+    const status = document.createElement("span");
+    status.className = "orchestrator-node-approval-status";
+    status.textContent = translate("ui.orchestratorApprovalAlert");
+
+    header.append(title, status);
+
+    const message = document.createElement("div");
+    message.className = "toast-card-message";
+    message.textContent = toast.message;
+
+    const actions = document.createElement("div");
+    actions.className = "toast-card-actions";
+
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "orchestrator-copy-button";
+    openButton.textContent = translate("ui.orchestratorApprovalReview");
+    openButton.addEventListener("click", () => {
+      activeApprovalDialogRequestId = toast.requestId;
+      renderApprovalDialog();
+    });
+
+    actions.appendChild(openButton);
+    card.append(header, message, actions);
+    approvalToastContainerEl.appendChild(card);
+  }
+}
+
 function formatTimestamp(timestamp: string | null): string {
   if (!timestamp) return "n/a";
 
@@ -840,6 +934,15 @@ function formatElapsedDuration(startAt: string | null | undefined, endAt?: strin
 function truncateText(value: string, maxLength = 320): string {
   if (value.length <= maxLength) return value;
   return `${value.slice(0, maxLength)}…`;
+}
+
+function getRequestedOrchestratorMaxDepth(): number {
+  const parsed = Number.parseInt(orchestratorDepthInput.value, 10);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_ORCHESTRATOR_MAX_DEPTH;
+  }
+
+  return Math.min(MAX_ORCHESTRATOR_MAX_DEPTH, Math.max(MIN_ORCHESTRATOR_MAX_DEPTH, parsed));
 }
 
 function tryBeautifyJsonString(value: string): string | null {
@@ -1928,6 +2031,9 @@ function getPendingApproval(nodeEvents: OrchestratorEvent[]): OrchestratorPendin
       .map((event) => String(event.payload.requestId ?? "").trim())
       .filter((requestId) => requestId.length > 0)
   );
+  if (pendingApprovalActionRequestId) {
+    resolvedRequestIds.add(pendingApprovalActionRequestId);
+  }
   const pendingRequest = [...nodeEvents]
     .reverse()
     .find((event) => event.type === "approval_requested" && !resolvedRequestIds.has(String(event.payload.requestId ?? "").trim()));
@@ -1963,6 +2069,177 @@ function getPendingApproval(nodeEvents: OrchestratorEvent[]): OrchestratorPendin
     details: typeof pendingRequest.payload.details === "string" ? pendingRequest.payload.details.trim() : "",
     options
   };
+}
+
+function listPendingApprovals(detail: OrchestratorRunDetail | null): QueuedPendingApproval[] {
+  if (!detail) {
+    return [];
+  }
+
+  const resolvedRequestIds = new Set(
+    detail.events
+      .filter((event) => event.type === "approval_resolved")
+      .map((event) => String(event.payload.requestId ?? "").trim())
+      .filter((requestId) => requestId.length > 0)
+  );
+  const nodeById = new Map(detail.nodes.map((node) => [node.id, node]));
+  const approvals: QueuedPendingApproval[] = [];
+
+  for (const event of detail.events) {
+    if (event.type !== "approval_requested" || !event.nodeId) {
+      continue;
+    }
+
+    const requestId = String(event.payload.requestId ?? "").trim();
+    if (!requestId || resolvedRequestIds.has(requestId) || approvals.some((entry) => entry.requestId === requestId)) {
+      continue;
+    }
+
+    const nodeEvents = detail.events.filter((entry) => entry.nodeId === event.nodeId);
+    const pendingApproval = getPendingApproval(nodeEvents);
+    if (!pendingApproval) {
+      continue;
+    }
+
+    approvals.push({
+      ...pendingApproval,
+      nodeId: event.nodeId,
+      nodeTitle: nodeById.get(event.nodeId)?.title ?? event.nodeId,
+      createdAt: event.createdAt
+    });
+  }
+
+  return approvals.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function getActivePendingApproval(): QueuedPendingApproval | null {
+  const pendingApprovals = listPendingApprovals(selectedOrchestratorRun);
+  if (pendingApprovals.length === 0) {
+    return null;
+  }
+
+  return pendingApprovals.find((approval) => approval.requestId === activeApprovalDialogRequestId)
+    ?? pendingApprovals[0]
+    ?? null;
+}
+
+function renderApprovalQueueButton() {
+  const pendingCount = listPendingApprovals(selectedOrchestratorRun).length;
+  approvalQueueButton.textContent = translate("ui.orchestratorApprovalQueueButton", {
+    count: String(pendingCount)
+  });
+  approvalQueueButton.disabled = pendingCount === 0;
+}
+
+function createApprovalActionButtons(
+  container: HTMLElement,
+  pendingApproval: OrchestratorPendingApproval,
+  options: { closeDialogOnAction?: boolean } = {}
+) {
+  const { closeDialogOnAction = false } = options;
+  const hasAllowOptions = pendingApproval.options.some((option) => option.kind?.startsWith("allow"));
+  const actions = hasAllowOptions
+    ? pendingApproval.options.filter((option) => option.kind?.startsWith("allow"))
+    : pendingApproval.options;
+
+  for (const option of actions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "orchestrator-copy-button";
+    button.textContent = describeApprovalOptionLabel(option);
+    button.disabled = pendingApprovalActionRequestId === pendingApproval.requestId;
+    button.addEventListener("click", () => {
+      if (closeDialogOnAction) {
+        closeApprovalDialog();
+      }
+      void respondToPendingApproval(pendingApproval.requestId, true, option.optionId);
+    });
+    container.appendChild(button);
+  }
+
+  const denyButton = document.createElement("button");
+  denyButton.type = "button";
+  denyButton.className = "orchestrator-copy-button";
+  denyButton.textContent = translate("ui.orchestratorApprovalDeny");
+  denyButton.disabled = pendingApprovalActionRequestId === pendingApproval.requestId;
+  denyButton.addEventListener("click", () => {
+    if (closeDialogOnAction) {
+      closeApprovalDialog();
+    }
+    void respondToPendingApproval(pendingApproval.requestId, false);
+  });
+  container.appendChild(denyButton);
+}
+
+function renderApprovalDialog() {
+  const pendingApprovals = listPendingApprovals(selectedOrchestratorRun);
+  const pendingApproval = getActivePendingApproval();
+  approvalDialogListEl.replaceChildren();
+  approvalDialogActionsEl.replaceChildren();
+
+  if (!pendingApproval) {
+    approvalDialogEl.hidden = true;
+    syncDialogBodyState();
+    return;
+  }
+
+  approvalDialogTitleEl.textContent = pendingApproval.title;
+  approvalDialogStatusEl.textContent = translate("ui.orchestratorApprovalWaiting");
+  approvalDialogMessageEl.textContent = pendingApproval.message;
+  approvalDialogDetailsEl.textContent = pendingApproval.details;
+
+  for (const approval of pendingApprovals) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "approval-dialog-item";
+    if (approval.requestId === pendingApproval.requestId) {
+      item.classList.add("active");
+    }
+
+    const itemTitle = document.createElement("div");
+    itemTitle.className = "approval-dialog-item-title";
+    itemTitle.textContent = approval.nodeTitle;
+
+    const itemCopy = document.createElement("div");
+    itemCopy.className = "approval-dialog-item-copy";
+    itemCopy.textContent = approval.message;
+
+    item.append(itemTitle, itemCopy);
+    item.addEventListener("click", () => {
+      activeApprovalDialogRequestId = approval.requestId;
+      renderApprovalDialog();
+    });
+    approvalDialogListEl.appendChild(item);
+  }
+
+  createApprovalActionButtons(approvalDialogActionsEl, pendingApproval, { closeDialogOnAction: true });
+  approvalDialogEl.hidden = false;
+  syncDialogBodyState();
+}
+
+function openApprovalDialog(requestId?: string) {
+  activeApprovalDialogRequestId = requestId ?? getActivePendingApproval()?.requestId ?? null;
+  renderApprovalDialog();
+}
+
+function closeApprovalDialog() {
+  activeApprovalDialogRequestId = null;
+  approvalDialogEl.hidden = true;
+  syncDialogBodyState();
+}
+
+function showApprovalToast(pendingApproval: OrchestratorPendingApproval) {
+  approvalToasts.set(pendingApproval.requestId, {
+    requestId: pendingApproval.requestId,
+    title: pendingApproval.title,
+    message: pendingApproval.message
+  });
+  renderApprovalToastList();
+}
+
+function resolveApprovalToast(requestId: string) {
+  approvalToasts.delete(requestId);
+  renderApprovalToastList();
 }
 
 function getPendingUserInput(nodeEvents: OrchestratorEvent[]): OrchestratorPendingUserInput | null {
@@ -2610,33 +2887,53 @@ function renderNodeApprovalCard(pendingApproval: OrchestratorPendingApproval | n
   orchestratorNodeApprovalStatusEl.textContent = translate("ui.orchestratorApprovalWaiting");
   orchestratorNodeApprovalMessageEl.textContent = pendingApproval.message;
   orchestratorNodeApprovalDetailsEl.textContent = pendingApproval.details;
+  createApprovalActionButtons(orchestratorNodeApprovalActionsEl, pendingApproval);
+}
 
-  const hasAllowOptions = pendingApproval.options.some((option) => option.kind?.startsWith("allow"));
-  const actions = hasAllowOptions
-    ? pendingApproval.options.filter((option) => option.kind?.startsWith("allow"))
-    : pendingApproval.options;
+function renderPendingApprovalsCard(pendingApprovals: QueuedPendingApproval[]) {
+  orchestratorPendingApprovalsEl.hidden = false;
+  orchestratorPendingApprovalsTitleEl.textContent = translate("ui.orchestratorPendingApprovalsTitle");
+  orchestratorPendingApprovalsStatusEl.textContent = String(pendingApprovals.length);
+  orchestratorPendingApprovalsListEl.replaceChildren();
 
-  for (const option of actions) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "orchestrator-copy-button";
-    button.textContent = describeApprovalOptionLabel(option);
-    button.disabled = pendingApprovalActionRequestId === pendingApproval.requestId;
-    button.addEventListener("click", () => {
-      void respondToPendingApproval(pendingApproval.requestId, true, option.optionId);
-    });
-    orchestratorNodeApprovalActionsEl.appendChild(button);
+  if (pendingApprovals.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "orchestrator-pending-approval-copy";
+    empty.textContent = translate("ui.orchestratorPendingApprovalsEmpty");
+    orchestratorPendingApprovalsListEl.appendChild(empty);
+    return;
   }
 
-  const denyButton = document.createElement("button");
-  denyButton.type = "button";
-  denyButton.className = "orchestrator-copy-button";
-  denyButton.textContent = translate("ui.orchestratorApprovalDeny");
-  denyButton.disabled = pendingApprovalActionRequestId === pendingApproval.requestId;
-  denyButton.addEventListener("click", () => {
-    void respondToPendingApproval(pendingApproval.requestId, false);
-  });
-  orchestratorNodeApprovalActionsEl.appendChild(denyButton);
+  for (const approval of pendingApprovals) {
+    const item = document.createElement("div");
+    item.className = "orchestrator-pending-approval-item";
+
+    const head = document.createElement("div");
+    head.className = "orchestrator-pending-approval-head";
+
+    const title = document.createElement("div");
+    title.className = "orchestrator-pending-approval-title";
+    title.textContent = approval.nodeTitle;
+    title.title = approval.nodeTitle;
+
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "orchestrator-copy-button";
+    openButton.textContent = translate("ui.orchestratorApprovalReview");
+    openButton.disabled = pendingApprovalActionRequestId === approval.requestId;
+    openButton.addEventListener("click", () => {
+      openApprovalDialog(approval.requestId);
+    });
+
+    head.append(title, openButton);
+
+    const copy = document.createElement("div");
+    copy.className = "orchestrator-pending-approval-copy";
+    copy.textContent = approval.message || translate("ui.orchestratorApprovalEmpty");
+
+    item.append(head, copy);
+    orchestratorPendingApprovalsListEl.appendChild(item);
+  }
 }
 
 function renderNodeUserInputCard(pendingUserInput: OrchestratorPendingUserInput | null) {
@@ -2900,8 +3197,10 @@ function renderOrchestratorDetail() {
 
   lastOrchestratorDetailSignature = signature;
   const liveView = buildSelectedNodeLiveView(selectedOrchestratorRun);
+  const pendingApprovals = listPendingApprovals(selectedOrchestratorRun);
   orchestratorNodeLiveStatusEl.textContent = liveView.status;
   renderNodeProgressPanel(orchestratorNodeLiveMetaEl, liveView.progress);
+  renderPendingApprovalsCard(pendingApprovals);
   renderNodeApprovalCard(liveView.pendingApproval);
   renderNodeUserInputCard(liveView.pendingUserInput);
   orchestratorNodeRequestDataEl.textContent = liveView.requestJson;
@@ -2917,8 +3216,10 @@ function renderOrchestratorDetail() {
   orchestratorWorkingMemoryOpenButton.disabled = selectedOrchestratorRun === null;
   orchestratorWorkingMemoryCopyButton.disabled = selectedOrchestratorRun === null;
   orchestratorLogEl.textContent = buildOrchestratorLog(selectedOrchestratorRun);
+  renderApprovalQueueButton();
   renderOrchestratorDetailTabs();
   syncLogViewerContent();
+  renderApprovalDialog();
 }
 
 function renderOrchestratorTree() {
@@ -3398,6 +3699,7 @@ function refreshLocalizedContent() {
   orchestratorSubtitleEl.textContent = translate("ui.orchestratorSubtitle");
   orchestratorGoalLabelEl.textContent = translate("ui.orchestratorGoalLabel");
   orchestratorModeLabelEl.textContent = translate("ui.orchestratorModeLabel");
+  orchestratorDepthLabelEl.textContent = translate("ui.orchestratorDepthLabel");
   orchestratorGoalInput.placeholder = translate("ui.orchestratorGoalPlaceholder");
   orchestratorContinueButton.textContent = translate("ui.orchestratorContinue");
   orchestratorStopButton.textContent = translate("ui.orchestratorStop");
@@ -3428,6 +3730,7 @@ function refreshLocalizedContent() {
   logViewerTitleEl.textContent = activeLogViewerSource?.titleElement.textContent?.trim() || translate("ui.logViewerTitle");
   logViewerCopyButton.textContent = translate("ui.orchestratorDetailCopy");
   logViewerCloseButton.textContent = translate("ui.close");
+  approvalDialogCloseButton.textContent = translate("ui.close");
   workspaceEmptyTitleEl.textContent = translate("ui.noOpenTabsTitle");
   workspaceEmptyCopyEl.textContent = translate("ui.noOpenTabsCopy");
   const crossReviewOption = orchestratorModeSelect.querySelector('option[value="cross_review"]');
@@ -3447,6 +3750,7 @@ function refreshLocalizedContent() {
   renderSessionList();
   refreshTerminalPaneCopy();
   refreshLogbar();
+  renderApprovalQueueButton();
   updateSessionCreationState();
   updateOrchestratorControls();
   updateTerminalRootState();
@@ -3456,6 +3760,8 @@ function refreshLocalizedContent() {
   renderOrchestratorTree();
   renderWorkspaceTabs();
   renderWorkspacePanels();
+  renderApprovalDialog();
+  renderApprovalToastList();
 }
 
 async function copyTextToClipboard(value: string) {
@@ -3488,6 +3794,7 @@ async function respondToPendingApproval(
 ) {
   pendingApprovalActionRequestId = requestId;
   renderOrchestratorDetail();
+  renderApprovalDialog();
 
   try {
     const acknowledged = await appWindow.tasksaw.respondOrchestratorApproval({
@@ -3505,6 +3812,7 @@ async function respondToPendingApproval(
   } finally {
     pendingApprovalActionRequestId = null;
     renderOrchestratorDetail();
+    renderApprovalDialog();
   }
 }
 
@@ -3590,7 +3898,7 @@ function openLogViewer(
   logViewerTitleEl.textContent = titleElement.textContent?.trim() || translate("ui.logViewerTitle");
   logViewerContentEl.textContent = contentElement.textContent?.trim() || emptyMessage;
   logViewerDialogEl.hidden = false;
-  document.body.classList.add("dialog-open");
+  syncDialogBodyState();
 }
 
 function syncLogViewerContent() {
@@ -3605,7 +3913,7 @@ function syncLogViewerContent() {
 function closeLogViewer() {
   activeLogViewerSource = null;
   logViewerDialogEl.hidden = true;
-  document.body.classList.remove("dialog-open");
+  syncDialogBodyState();
 }
 
 async function copyLogViewerContent() {
@@ -3821,9 +4129,12 @@ async function runOrchestrator(continueFromRunId: string | null = null) {
   renderOrchestratorTree();
 
   try {
+    const maxDepth = getRequestedOrchestratorMaxDepth();
+    orchestratorDepthInput.value = String(maxDepth);
     const response = await appWindow.tasksaw.runOrchestrator({
       goal,
       mode: orchestratorMode,
+      maxDepth,
       workspacePath: currentWorkspacePath,
       continueFromRunId,
       workspaceAccessDialog: {
@@ -4380,11 +4691,14 @@ function resetLocalAppState() {
   pendingUserInputDrafts.clear();
   pendingApprovalActionRequestId = null;
   pendingUserInputActionRequestId = null;
+  activeApprovalDialogRequestId = null;
+  approvalToasts.clear();
   selectedOrchestratorRunId = null;
   selectedOrchestratorRun = null;
   selectedOrchestratorNodeId = null;
   liveOrchestratorRunId = null;
   orchestratorGoalInput.value = "";
+  orchestratorDepthInput.value = String(DEFAULT_ORCHESTRATOR_MAX_DEPTH);
   lastOrchestratorRunListSignature = "";
   lastOrchestratorDetailSignature = "";
   lastOrchestratorTreeSignature = "";
@@ -4398,6 +4712,9 @@ function resetLocalAppState() {
   updateTerminalRootState();
   renderWorkspaceTabs();
   renderWorkspacePanels();
+  renderApprovalQueueButton();
+  renderApprovalDialog();
+  renderApprovalToastList();
 }
 
 async function resetAppState() {
@@ -4472,6 +4789,11 @@ appWindow.tasksaw.onTerminalData(({ sessionId, data }: TerminalDataPayload) => {
 
 appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
   if (event.type === "approval_resolved" && typeof event.payload.requestId === "string") {
+    resolveApprovalToast(event.payload.requestId);
+    if (activeApprovalDialogRequestId === event.payload.requestId) {
+      activeApprovalDialogRequestId = null;
+      renderApprovalDialog();
+    }
     if (pendingApprovalActionRequestId === event.payload.requestId) {
       pendingApprovalActionRequestId = null;
     }
@@ -4502,6 +4824,15 @@ appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
     scheduleOrchestratorRender();
   }
 
+  if (event.type === "approval_requested" && event.nodeId) {
+    const nodeEvents = liveDetail.events.filter((entry) => entry.nodeId === event.nodeId);
+    const pendingApproval = getPendingApproval(nodeEvents);
+    if (pendingApproval) {
+      showApprovalToast(pendingApproval);
+      openApprovalDialog(pendingApproval.requestId);
+    }
+  }
+
   scheduleLiveOrchestratorRunRefresh(event.runId);
 });
 
@@ -4520,6 +4851,9 @@ workspaceCreateButton.addEventListener("click", () => void createWorkspaceDirect
 newShellButton.addEventListener("click", () => void handleCreateSession("shell"));
 newCodexButton.addEventListener("click", () => void handleCreateSession("codex"));
 newGeminiButton.addEventListener("click", () => void handleCreateSession("gemini"));
+approvalQueueButton.addEventListener("click", () => {
+  openApprovalDialog();
+});
 toolsUpdateButton.addEventListener("click", () => void updateManagedTools());
 resetAppButton.addEventListener("click", () => void resetAppState());
 workspaceOpenOrchestratorButton.addEventListener("click", () => {
@@ -4615,6 +4949,14 @@ logViewerDialogEl.addEventListener("click", (event) => {
     closeLogViewer();
   }
 });
+approvalDialogCloseButton.addEventListener("click", () => {
+  closeApprovalDialog();
+});
+approvalDialogEl.addEventListener("click", (event) => {
+  if (event.target === approvalDialogEl) {
+    closeApprovalDialog();
+  }
+});
 orchestratorRefreshButton.addEventListener("click", () => {
   void loadOrchestratorRuns();
 });
@@ -4632,6 +4974,9 @@ orchestratorModeSelect.addEventListener("change", () => {
   if (!isOrchestratorMode(nextMode)) return;
   orchestratorMode = nextMode;
   updateOrchestratorControls();
+});
+orchestratorDepthInput.addEventListener("change", () => {
+  orchestratorDepthInput.value = String(getRequestedOrchestratorMaxDepth());
 });
 
 for (const button of themeButtons) {
@@ -4663,6 +5008,12 @@ appWindow.addEventListener("resize", () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !approvalDialogEl.hidden) {
+    event.preventDefault();
+    closeApprovalDialog();
+    return;
+  }
+
   if (event.key === "Escape" && !logViewerDialogEl.hidden) {
     event.preventDefault();
     closeLogViewer();

@@ -98,6 +98,7 @@ export class OrchestratorService {
       throw new Error("A workspace path is required to run the orchestrator");
     }
 
+    const requestedMaxDepth = this.normalizeRequestedMaxDepth(input.maxDepth);
     const modeConfig = await this.resolveModeConfig(input.mode, workspacePath);
     const continuation = this.loadContinuationSeed(input.continueFromRunId);
     let activeRunId: string | null = null;
@@ -120,7 +121,17 @@ export class OrchestratorService {
         goal: input.goal,
         title: modeConfig.title,
         objective: input.goal,
+        config: requestedMaxDepth === undefined
+          ? undefined
+          : {
+              maxDepth: requestedMaxDepth
+            },
         reviewPolicy: "light",
+        executionBudget: requestedMaxDepth === undefined
+          ? undefined
+          : {
+              maxDepth: requestedMaxDepth
+            },
         continuation,
         assignedModels: modeConfig.assignedModels,
         acceptanceCriteria: {
@@ -189,6 +200,15 @@ export class OrchestratorService {
 
   getRequiredTools(mode: OrchestratorMode): ManagedToolId[] {
     return [...ORCHESTRATOR_MODE_CONFIG[mode].requiredTools];
+  }
+
+  private normalizeRequestedMaxDepth(value: number | null | undefined): number | undefined {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return undefined;
+    }
+
+    const normalized = Math.trunc(value);
+    return Math.min(6, Math.max(1, normalized));
   }
 
   private loadContinuationSeed(runId: string | null | undefined): ContinuationSeed | undefined {
@@ -410,6 +430,7 @@ export class OrchestratorService {
         executableArgs: [cliRunnerPath, ...geminiCommand.args],
         acpModulePath: geminiAcpModulePath,
         cwd: workspacePath,
+        timeoutMs: 30_000,
         env: {
           ...geminiEnv,
           ...geminiCommand.env
@@ -495,6 +516,7 @@ export class OrchestratorService {
     return (model.hidden ? -1_000_000 : 0)
       + (this.isConcreteGeminiModel(model.model) ? 1_000_000 : -1_000_000)
       + (this.isLightweightGeminiModel(model.model) ? 1_000_000 : -1_000_000)
+      + (this.scoreGeminiWorkerSeries(normalizedModelName) * 100_000)
       + (this.scoreVersion(model.model, "gemini-") * 10_000)
       + (this.scoreGeminiWorkerFamily(normalizedModelName) * 1_000)
       + (model.isDefault ? 1 : 0)
@@ -544,6 +566,14 @@ export class OrchestratorService {
     if (model.includes("lite")) return 425;
     if (model.includes("pro")) return 250;
     if (model.includes("ultra")) return 150;
+    return 0;
+  }
+
+  private scoreGeminiWorkerSeries(model: string): number {
+    if (model.startsWith("gemini-3.")) return 500;
+    if (model.startsWith("gemini-2.5-")) return 400;
+    if (model.startsWith("gemini-2.")) return 300;
+    if (model.startsWith("gemini-1.5-")) return 300;
     return 0;
   }
 

@@ -415,6 +415,7 @@ export class PtyManager {
 
     return {
       ...sharedEnv,
+      GEMINI_FORCE_FILE_STORAGE: "true",
       GEMINI_TELEMETRY_ENABLED: "0",
       OTEL_SDK_DISABLED: "true"
     };

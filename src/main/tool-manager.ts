@@ -148,6 +148,7 @@ export class ToolManager {
       ...baseEnv,
       SANDBOX: "tasksaw-managed",
       GEMINI_SANDBOX: "false",
+      GEMINI_FORCE_FILE_STORAGE: "true",
       GEMINI_TELEMETRY_ENABLED: "0",
       NODE_NO_WARNINGS: "1"
     };

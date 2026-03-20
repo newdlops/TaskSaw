@@ -48,6 +48,14 @@ const ALL_ASSIGNED_MODEL_ROLES: AssignedModelRole[] = [
   "executor",
   "verifier"
 ];
+const ASSIGNED_ROLE_CAPABILITY: Record<AssignedModelRole, OrchestratorCapability> = {
+  abstractPlanner: "abstractPlan",
+  gatherer: "gather",
+  concretePlanner: "concretePlan",
+  reviewer: "review",
+  executor: "execute",
+  verifier: "verify"
+};
 
 type RootPhaseResults = {
   abstractPlan: AbstractPlanResult;
@@ -66,6 +74,7 @@ type NodeExecutionOutcome = {
   phaseResults: NodePhaseResults;
   outputs: string[];
   verifySummaries: string[];
+  verificationPassed: boolean;
 };
 
 type ProjectStructureInspectionRequest = {
@@ -133,6 +142,13 @@ export class VerificationFailedError extends Error {
   constructor(nodeId: string, summary: string) {
     super(`Verification failed for node ${nodeId}: ${summary}`);
     this.name = "VerificationFailedError";
+  }
+}
+
+export class ExecutionNotCompletedError extends Error {
+  constructor(nodeId: string, summary: string) {
+    super(`Execution did not complete for node ${nodeId}: ${summary}`);
+    this.name = "ExecutionNotCompletedError";
   }
 }
 
@@ -492,13 +508,15 @@ export class OrchestratorRuntime {
         node: currentNode,
         phaseResults,
         outputs: [],
-        verifySummaries: [concretePlan.summary]
+        verifySummaries: [concretePlan.summary],
+        verificationPassed: true
       };
     }
 
     const canDecomposeFurther = this.canDecomposeFurther(currentNode);
     const shouldSkipTrivialDecomposition = allowDecomposition && this.shouldSkipDecompositionForShortTestGoal(currentNode);
-    if (allowDecomposition && concretePlan.childTasks.length > 0 && canDecomposeFurther && !shouldSkipTrivialDecomposition) {
+    const needsMorePlanning = concretePlan.needsMorePlanning ?? concretePlan.childTasks.length > 0;
+    if (allowDecomposition && concretePlan.childTasks.length > 0 && canDecomposeFurther && !shouldSkipTrivialDecomposition && needsMorePlanning) {
       const childTitles = concretePlan.childTasks.map((task) => task.title);
       this.engine.appendEvent(currentNode.runId, currentNode.id, "node_decomposed", {
         childCount: concretePlan.childTasks.length,
@@ -559,8 +577,17 @@ export class OrchestratorRuntime {
         node: currentNode,
         phaseResults,
         outputs,
-        verifySummaries
+        verifySummaries,
+        verificationPassed: childOutcomes.every((childOutcome) => childOutcome.verificationPassed)
       };
+    }
+
+    if (allowDecomposition && concretePlan.childTasks.length > 0 && !needsMorePlanning) {
+      this.engine.appendEvent(currentNode.runId, currentNode.id, "scheduler_progress", {
+        message: "Skipping decomposition because the current node already has enough execution detail",
+        nodeDepth: currentNode.depth,
+        proposedChildCount: concretePlan.childTasks.length
+      });
     }
 
     if (allowDecomposition && concretePlan.childTasks.length > 0 && shouldSkipTrivialDecomposition) {
@@ -596,7 +623,9 @@ export class OrchestratorRuntime {
       verifySummaries: executionOutcome.verifySummaries,
       evidenceBundles: [consolidatedEvidence]
     });
-    this.markPendingAcceptanceCriteriaMet(currentNode.id);
+    if (executionOutcome.verificationPassed) {
+      this.markPendingAcceptanceCriteriaMet(currentNode.id);
+    }
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "done");
 
@@ -604,7 +633,8 @@ export class OrchestratorRuntime {
       node: currentNode,
       phaseResults,
       outputs: executionOutcome.outputs,
-      verifySummaries: executionOutcome.verifySummaries
+      verifySummaries: executionOutcome.verifySummaries,
+      verificationPassed: executionOutcome.verificationPassed
     };
   }
 
@@ -656,6 +686,14 @@ export class OrchestratorRuntime {
     });
     const execute = executeStage.result;
     phaseResults.execute = execute;
+    if (execute.completed === false) {
+      const failureSummary = execute.blockedReason
+        ? `${execute.summary} (${execute.blockedReason})`
+        : execute.summary;
+      this.recordDecision(currentNode.runId, executeStage.stageNode.id, "Execution blocked", failureSummary);
+      this.recordExecutionStatus(currentNode, "failed", failureSummary);
+      throw new ExecutionNotCompletedError(currentNode.id, failureSummary);
+    }
     this.recordDecision(currentNode.runId, executeStage.stageNode.id, "Execution completed", execute.summary);
     this.recordExecutionStatus(currentNode, "executed", execute.summary);
 
@@ -695,7 +733,8 @@ export class OrchestratorRuntime {
       node: currentNode,
       phaseResults,
       outputs: execute.outputs.length > 0 ? execute.outputs : [execute.summary],
-      verifySummaries: [verify.summary]
+      verifySummaries: [verify.summary],
+      verificationPassed: verify.passed
     };
   }
 
@@ -727,6 +766,12 @@ export class OrchestratorRuntime {
 
     if (concretePlan.summary.trim().length > 0) {
       sections.push(`Execution plan summary: ${concretePlan.summary.trim()}`);
+    }
+
+    if (concretePlan.childTasks.length > 0) {
+      sections.push(
+        `Planned execution steps:\n${concretePlan.childTasks.map((task) => `- ${task.title}: ${task.objective}`).join("\n")}`
+      );
     }
 
     if (concretePlan.executionNotes.length > 0) {
@@ -786,13 +831,13 @@ export class OrchestratorRuntime {
 
     for (const role of ALL_ASSIGNED_MODEL_ROLES) {
       const explicitModel = assignedModels?.[role];
-      if (this.isValidModelRef(explicitModel)) {
+      if (this.isUsableModelForRole(explicitModel, role)) {
         resolvedModels[role] = explicitModel;
         continue;
       }
 
       const routedParentModel = parentNode.assignedModels[role];
-      if (this.isValidModelRef(routedParentModel)) {
+      if (this.isUsableModelForRole(routedParentModel, role)) {
         resolvedModels[role] = routedParentModel;
         repairedRoles.push(role);
       }
@@ -826,6 +871,15 @@ export class OrchestratorRuntime {
       && typeof value.model === "string"
       && value.model.trim().length > 0
     );
+  }
+
+  private isUsableModelForRole(value: ModelRef | undefined, role: AssignedModelRole): value is ModelRef {
+    if (!this.isValidModelRef(value)) {
+      return false;
+    }
+
+    const adapter = this.adapterRegistry.get(value.id);
+    return Boolean(adapter?.supports(ASSIGNED_ROLE_CAPABILITY[role]));
   }
 
   private requireRootPhaseResults(phaseResults: NodePhaseResults, nodeId: string): RootPhaseResults {

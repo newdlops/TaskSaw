@@ -114,11 +114,11 @@ const PHASE_RESPONSE_SCHEMAS: Record<OrchestratorCapability, string> = {
   gather:
     '{"summary": string, "evidenceBundles": EvidenceBundleDraft[], "projectStructure"?: ProjectStructureReport}',
   concretePlan:
-    '{"summary": string, "childTasks": Array<{"title": string, "objective": string, "importance": "critical" | "high" | "medium" | "low", "assignedModels": ModelAssignment, "reviewPolicy"?: ReviewPolicy, "acceptanceCriteria"?: AcceptanceCriteria, "executionBudget"?: Partial<ExecutionBudget>}>, "executionNotes": string[], "needsProjectStructureInspection"?: boolean, "inspectionObjectives"?: string[], "projectStructureContradictions"?: string[]}',
+    '{"summary": string, "childTasks": Array<{"title": string, "objective": string, "importance": "critical" | "high" | "medium" | "low", "assignedModels": ModelAssignment, "reviewPolicy"?: ReviewPolicy, "acceptanceCriteria"?: AcceptanceCriteria, "executionBudget"?: Partial<ExecutionBudget>}>, "executionNotes": string[], "needsMorePlanning"?: boolean, "needsProjectStructureInspection"?: boolean, "inspectionObjectives"?: string[], "projectStructureContradictions"?: string[]}',
   review:
     '{"summary": string, "approved": boolean, "followUpQuestions": string[]}',
   execute:
-    '{"summary": string, "outputs": string[]}',
+    '{"summary": string, "outputs": string[], "completed"?: boolean, "blockedReason"?: string}',
   verify:
     '{"summary": string, "passed": boolean, "findings": string[]}',
   rehydrate:
@@ -279,11 +279,22 @@ function buildStageInstructions(
     return [
       "Plan execution using the current projectStructure memory.",
       "If projectStructure is contradictory or missing critical facts, set needsProjectStructureInspection=true, provide inspectionObjectives, and explain the contradiction in projectStructureContradictions.",
+      "Decide only at the current node level whether more planning is needed.",
+      "Set needsMorePlanning=true only if this node must split into separately planned subproblems.",
+      "If the current node is already execution-ready, set needsMorePlanning=false, keep childTasks empty when possible, and put the actionable execution detail into executionNotes.",
       "Child tasks created here are planning nodes only. Do not merge execution into the planning node.",
       "Each child task must include an importance field and explicit assignedModels chosen from nodeModelRouting.",
       "There is no model inheritance. The orchestrator will execute child nodes only with the exact assignedModels you return.",
       "If a different model should handle a different part of the work, split that work into a separate child task node with its own assignedModels.",
       "Do not switch model responsibility inside a single child task."
+    ].join(" ");
+  }
+
+  if (workflowStage === "task_orchestration" && capability === "execute") {
+    return [
+      "Carry out the requested implementation work instead of restating the plan.",
+      "Set completed=true only if the execution actually changed or completed the intended work.",
+      "If execution was blocked, denied, or intentionally not performed, set completed=false and explain the concrete reason in blockedReason."
     ].join(" ");
   }
 

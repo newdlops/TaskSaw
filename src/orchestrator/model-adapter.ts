@@ -130,6 +130,7 @@ export type ConcretePlanResult = {
   summary: string;
   childTasks: OrchestratorChildTask[];
   executionNotes: string[];
+  needsMorePlanning?: boolean;
   needsProjectStructureInspection?: boolean;
   inspectionObjectives?: string[];
   projectStructureContradictions?: string[];
@@ -146,6 +147,8 @@ export type ReviewResult = {
 export type ExecuteResult = {
   summary: string;
   outputs: string[];
+  completed?: boolean;
+  blockedReason?: string;
   debug?: ModelExecutionDebugInfo;
 };
 

@@ -257,7 +257,8 @@ class TasksawGeminiAcpClient {
 export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const loadAcpModule = options.dependencies?.loadAcpModule ?? defaultLoadAcpModule;
   const spawnProcess = options.dependencies?.spawnProcess ?? defaultSpawnProcess;
-  const desiredModeId = options.modeId ?? "plan";
+  const desiredModeId = options.modeId?.trim();
+  const startupTimeoutMs = Math.max(5_000, options.timeoutMs ?? 30_000);
   const command = [options.executablePath, ...options.executableArgs, "--acp"];
   const fallbackModelIds = options.fallbackModelIds ?? [];
   const invalidStreamRetryCount = Math.max(0, options.invalidStreamRetryCount ?? 1);
@@ -474,7 +475,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               }
             }
           }),
-          10_000,
+          startupTimeoutMs,
           "Timed out while initializing Gemini ACP"
         ),
         abortSignal,
@@ -488,7 +489,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
             cwd: workspaceRoot,
             mcpServers: []
           }) as Promise<GeminiNewSessionResponse>,
-          15_000,
+          startupTimeoutMs,
           "Timed out while creating a Gemini ACP session"
         ),
         abortSignal,
@@ -505,14 +506,14 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
         ?.map((mode) => mode.id?.trim())
         .filter((modeId): modeId is string => Boolean(modeId))
         ?? [];
-      if (availableModeIds.includes(desiredModeId) && connection.setSessionMode) {
+      if (desiredModeId && availableModeIds.includes(desiredModeId) && connection.setSessionMode) {
         await withAbort(
           withTimeout(
             connection.setSessionMode({
               sessionId,
               modeId: desiredModeId
             }),
-            5_000,
+            Math.min(startupTimeoutMs, 10_000),
             `Timed out while switching the Gemini ACP session to ${desiredModeId} mode`
           ),
           abortSignal,

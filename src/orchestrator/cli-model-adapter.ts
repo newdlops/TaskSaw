@@ -416,6 +416,10 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
           summary: this.readString(record.summary, "No concrete plan summary returned"),
           childTasks: this.normalizeChildTasks(record.childTasks ?? record.steps),
           executionNotes: this.normalizeStringArray(record.executionNotes ?? record.notes),
+          needsMorePlanning: this.readBoolean(
+            record.needsMorePlanning ?? record.requiresMorePlanning ?? record.shouldDecompose ?? record.needsDecomposition,
+            false
+          ),
           needsProjectStructureInspection: this.readBoolean(
             record.needsProjectStructureInspection ?? record.needsInspection,
             false
@@ -440,9 +444,13 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
       case "execute": {
         const summary = this.readString(record.summary, "No execution summary returned");
         const outputs = this.normalizeStringArray(record.outputs ?? record.results);
+        const completed = this.inferExecuteCompleted(record, summary, outputs);
+        const blockedReason = this.readOptionalString(record.blockedReason ?? record.failureReason ?? record.reason);
         return {
           summary,
-          outputs: outputs.length > 0 ? outputs : [summary]
+          outputs: outputs.length > 0 ? outputs : (completed ? [summary] : []),
+          completed,
+          blockedReason
         } satisfies ExecuteResult;
       }
 
@@ -482,6 +490,15 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
 
   private readBoolean(value: unknown, fallback: boolean): boolean {
     return typeof value === "boolean" ? value : fallback;
+  }
+
+  private readOptionalString(value: unknown): string | undefined {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
   }
 
   private normalizeStringArray(value: unknown): string[] {
@@ -532,6 +549,24 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
     }
 
     return childTasks;
+  }
+
+  private inferExecuteCompleted(record: Record<string, unknown>, summary: string, outputs: string[]): boolean {
+    if (typeof record.completed === "boolean") {
+      return record.completed;
+    }
+
+    if (typeof record.executed === "boolean") {
+      return record.executed;
+    }
+
+    const normalizedSummary = summary.toLowerCase();
+    const looksBlocked = /denied by policy|not been completed|was not completed|did not complete|could not complete|unable to complete|not executed|execution was denied|execution has not been completed/.test(normalizedSummary);
+    if (looksBlocked && outputs.length === 0) {
+      return false;
+    }
+
+    return true;
   }
 
   private normalizeEvidenceBundles(record: Record<string, unknown>): EvidenceBundleDraft[] {

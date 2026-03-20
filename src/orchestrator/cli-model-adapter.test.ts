@@ -157,7 +157,8 @@ test("codex adapter parses fenced JSON inside assistant message output", async (
   const payload = {
     summary: "concrete plan ready",
     childTasks: [],
-    executionNotes: ["stay ordered"]
+    executionNotes: ["stay ordered"],
+    needsMorePlanning: false
   };
   const assistantContent = `\`\`\`json\n${JSON.stringify(payload)}\n\`\`\``;
   const script = [
@@ -181,6 +182,38 @@ test("codex adapter parses fenced JSON inside assistant message output", async (
   assert.equal(result.summary, payload.summary);
   assert.deepEqual(result.childTasks, payload.childTasks);
   assert.deepEqual(result.executionNotes, payload.executionNotes);
+  assert.equal(result.needsMorePlanning, false);
+});
+
+test("execute adapter marks blocked executions as incomplete", async () => {
+  const payload = {
+    summary: "Execution was denied by policy and has not been completed",
+    outputs: [],
+    completed: false,
+    blockedReason: "policy denied file modification"
+  };
+  const assistantContent = `\`\`\`json\n${JSON.stringify(payload)}\n\`\`\``;
+  const script = [
+    "const event = { type: 'assistant.message', content: process.env.TASKSAW_TEST_CONTENT };",
+    "process.stdout.write(JSON.stringify({ type: 'session.started' }) + '\\n');",
+    "process.stdout.write(JSON.stringify(event) + '\\n');"
+  ].join(" ");
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "codex",
+    executablePath: process.execPath,
+    env: {
+      TASKSAW_TEST_CONTENT: assistantContent
+    },
+    buildInvocationArgs: () => ["-e", script],
+    supportedCapabilities: ["execute"]
+  });
+
+  const result = await adapter.execute!(createContext(TEST_MODEL));
+  assert.equal(result.completed, false);
+  assert.equal(result.blockedReason, "policy denied file modification");
+  assert.deepEqual(result.outputs, []);
 });
 
 test("codex adapter parses item.completed agent_message output", async () => {

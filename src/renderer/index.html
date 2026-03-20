@@ -52,6 +52,7 @@
     <button id="new-shell" type="button" disabled>+Shell</button>
     <button id="new-codex" type="button" disabled>+Codex</button>
     <button id="new-gemini" type="button" disabled>+Gemini</button>
+    <button id="approval-queue-button" type="button" disabled>입력 대기중 (0)</button>
     <button id="tools-update" type="button">Update AI Tools</button>
     <button id="app-reset" type="button">Reset All Data</button>
   </div>
@@ -115,6 +116,10 @@
                 <option value="codex_only">Codex Only</option>
               </select>
             </label>
+            <label class="orchestrator-form-field orchestrator-depth-field">
+              <span id="orchestrator-depth-label">Max Depth</span>
+              <input id="orchestrator-depth" type="number" min="1" max="6" step="1" value="2" />
+            </label>
         </div>
 
           <div class="orchestrator-columns">
@@ -154,37 +159,49 @@
                       <span id="orchestrator-node-live-status" class="orchestrator-node-live-status">Queued</span>
                     </div>
                   </div>
-                  <div id="orchestrator-node-live-meta" class="orchestrator-node-live-meta"></div>
-                  <section id="orchestrator-node-approval" class="orchestrator-node-approval-card" hidden>
-                    <div class="orchestrator-section-header">
-                      <div id="orchestrator-node-approval-title" class="section-title section-title-small">Approval Required</div>
-                      <span id="orchestrator-node-approval-status" class="orchestrator-node-approval-status">Waiting</span>
-                    </div>
-                    <div id="orchestrator-node-approval-message" class="orchestrator-node-approval-message"></div>
-                    <pre id="orchestrator-node-approval-details" class="orchestrator-node-approval-details"></pre>
-                    <div id="orchestrator-node-approval-actions" class="orchestrator-card-actions orchestrator-node-approval-actions"></div>
-                  </section>
-                  <section id="orchestrator-node-user-input" class="orchestrator-node-approval-card orchestrator-node-user-input-card" hidden>
-                    <div class="orchestrator-section-header">
-                      <div id="orchestrator-node-user-input-title" class="section-title section-title-small">Input Required</div>
-                      <span id="orchestrator-node-user-input-status" class="orchestrator-node-approval-status">Waiting</span>
-                    </div>
-                    <div id="orchestrator-node-user-input-message" class="orchestrator-node-approval-message"></div>
-                    <form id="orchestrator-node-user-input-form" class="orchestrator-node-user-input-form"></form>
-                    <div id="orchestrator-node-user-input-actions" class="orchestrator-card-actions orchestrator-node-approval-actions"></div>
-                  </section>
+                  <div class="orchestrator-node-live-body">
+                    <div id="orchestrator-node-live-meta" class="orchestrator-node-live-meta"></div>
 
-                  <div class="orchestrator-node-live-grid">
-                    <section class="orchestrator-node-live-section">
-                      <div class="orchestrator-section-header">
-                        <div id="orchestrator-node-terminal-title" class="section-title section-title-small">Interaction Terminal</div>
-                        <div class="orchestrator-card-actions">
-                          <button id="orchestrator-node-terminal-open" class="orchestrator-copy-button" type="button">Large View</button>
-                          <button id="orchestrator-node-terminal-copy" class="orchestrator-copy-button" type="button">Copy</button>
+                    <aside class="orchestrator-node-live-sidebar">
+                      <section id="orchestrator-pending-approvals" class="orchestrator-node-approval-card" hidden>
+                        <div class="orchestrator-section-header">
+                          <div id="orchestrator-pending-approvals-title" class="section-title section-title-small">Input Waiting</div>
+                          <span id="orchestrator-pending-approvals-status" class="orchestrator-node-approval-status">0</span>
                         </div>
-                      </div>
-                      <pre id="orchestrator-node-terminal"></pre>
-                    </section>
+                        <div id="orchestrator-pending-approvals-list" class="orchestrator-pending-approvals-list"></div>
+                      </section>
+                      <section id="orchestrator-node-approval" class="orchestrator-node-approval-card" hidden>
+                        <div class="orchestrator-section-header">
+                          <div id="orchestrator-node-approval-title" class="section-title section-title-small">Approval Required</div>
+                          <span id="orchestrator-node-approval-status" class="orchestrator-node-approval-status">Waiting</span>
+                        </div>
+                        <div id="orchestrator-node-approval-message" class="orchestrator-node-approval-message"></div>
+                        <pre id="orchestrator-node-approval-details" class="orchestrator-node-approval-details"></pre>
+                        <div id="orchestrator-node-approval-actions" class="orchestrator-card-actions orchestrator-node-approval-actions"></div>
+                      </section>
+                      <section id="orchestrator-node-user-input" class="orchestrator-node-approval-card orchestrator-node-user-input-card" hidden>
+                        <div class="orchestrator-section-header">
+                          <div id="orchestrator-node-user-input-title" class="section-title section-title-small">Input Required</div>
+                          <span id="orchestrator-node-user-input-status" class="orchestrator-node-approval-status">Waiting</span>
+                        </div>
+                        <div id="orchestrator-node-user-input-message" class="orchestrator-node-approval-message"></div>
+                        <form id="orchestrator-node-user-input-form" class="orchestrator-node-user-input-form"></form>
+                        <div id="orchestrator-node-user-input-actions" class="orchestrator-card-actions orchestrator-node-approval-actions"></div>
+                      </section>
+                    </aside>
+
+                    <div class="orchestrator-node-live-grid">
+                      <section class="orchestrator-node-live-section">
+                        <div class="orchestrator-section-header">
+                          <div id="orchestrator-node-terminal-title" class="section-title section-title-small">Interaction Terminal</div>
+                          <div class="orchestrator-card-actions">
+                            <button id="orchestrator-node-terminal-open" class="orchestrator-copy-button" type="button">Large View</button>
+                            <button id="orchestrator-node-terminal-copy" class="orchestrator-copy-button" type="button">Copy</button>
+                          </div>
+                        </div>
+                        <pre id="orchestrator-node-terminal"></pre>
+                      </section>
+                    </div>
                   </div>
                   <pre id="orchestrator-node-request-data" hidden></pre>
                   <pre id="orchestrator-node-response-data" hidden></pre>
@@ -250,6 +267,24 @@
     <pre id="log-viewer-content" class="log-viewer-content"></pre>
   </div>
 </div>
+
+<div id="approval-dialog" class="session-dialog" hidden>
+  <div class="session-dialog-card approval-dialog-card">
+    <div class="orchestrator-detail-header">
+      <div id="approval-dialog-title" class="section-title">Approval Required</div>
+      <div class="orchestrator-card-actions">
+        <span id="approval-dialog-status" class="orchestrator-node-approval-status">Waiting</span>
+        <button id="approval-dialog-close" class="orchestrator-copy-button" type="button">Close</button>
+      </div>
+    </div>
+    <div id="approval-dialog-list" class="approval-dialog-list"></div>
+    <div id="approval-dialog-message" class="orchestrator-node-approval-message"></div>
+    <pre id="approval-dialog-details" class="orchestrator-node-approval-details"></pre>
+    <div id="approval-dialog-actions" class="orchestrator-card-actions orchestrator-node-approval-actions"></div>
+  </div>
+</div>
+
+<div id="approval-toast-container" class="toast-container" aria-live="assertive" aria-atomic="false"></div>
 
 <div id="logbar"></div>
 

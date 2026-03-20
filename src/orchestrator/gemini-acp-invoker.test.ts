@@ -143,7 +143,7 @@ class FakeChildProcess extends EventEmitter {
   }
 }
 
-test("gemini ACP invoker switches the session model before prompting", async () => {
+test("gemini ACP invoker does not switch the session mode by default", async () => {
   const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   const fakeChild = new FakeChildProcess();
 
@@ -155,6 +155,113 @@ test("gemini ACP invoker switches the session model before prompting", async () 
       executablePath: process.execPath,
       executableArgs: ["fake-gemini-entry.js"],
       acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return {
+                protocolVersion: 1
+              };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode(params: Record<string, unknown>) {
+              calls.push({
+                method: "setSessionMode",
+                params
+              });
+              return {};
+            }
+
+            async unstable_setSessionModel(params: Record<string, unknown>) {
+              calls.push({
+                method: "unstable_setSessionModel",
+                params
+              });
+              return {};
+            }
+
+            async prompt(params: Record<string, unknown>) {
+              calls.push({
+                method: "prompt",
+                params
+              });
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Gathered through ACP",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!(createContext(TEST_MODEL));
+
+  assert.equal(result.summary, "Gathered through ACP");
+  assert.deepEqual(
+    calls.map((entry) => entry.method),
+    ["unstable_setSessionModel", "prompt"]
+  );
+  assert.deepEqual(calls[0]?.params, {
+    sessionId: "session-1",
+    modelId: "gemini-2.5-pro"
+  });
+});
+
+test("gemini ACP invoker switches the session mode only when explicitly requested", async () => {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const fakeChild = new FakeChildProcess();
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      modeId: "plan",
       dependencies: {
         loadAcpModule: async () => ({
           PROTOCOL_VERSION: 1,

@@ -53,6 +53,7 @@ export type CreateSessionInput = {
 export type RunOrchestratorInput = {
   goal: string;
   mode: OrchestratorMode;
+  maxDepth?: number | null;
   workspacePath?: string | null;
   continueFromRunId?: string | null;
   workspaceAccessDialog?: DirectoryDialogOptions;

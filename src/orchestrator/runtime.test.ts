@@ -1155,6 +1155,229 @@ test("runtime stops decomposing at maxDepth and executes the deepest node as a l
   );
 });
 
+test("runtime keeps execution local when the concrete plan says more planning is not needed", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        concretePlan: () => ({
+          summary: "This node is execution-ready and does not need more planning",
+          childTasks: [
+            {
+              title: "Potential split that should stay local",
+              objective: "Keep this as an execution step, not a planning child",
+              importance: "medium",
+              assignedModels: {
+                abstractPlanner: planner,
+                gatherer,
+                concretePlanner: planner,
+                executor,
+                verifier: planner
+              }
+            }
+          ],
+          executionNotes: ["Carry the plan straight into execution"],
+          needsMorePlanning: false
+        }),
+        verify: () => ({
+          summary: "Verification passed",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => ({
+          summary: "Gather complete",
+          evidenceBundles: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Executed without extra planning split",
+          outputs: ["execution-ready-output"]
+        })
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry);
+  const result = await runtime.executeScheduledRun({
+    goal: "Do the work without mechanically decomposing the current node",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    },
+    reviewPolicy: "none"
+  });
+
+  assert.equal(result.snapshot.run.status, "done");
+  assert.equal(result.snapshot.nodes.filter((node) => node.role === "task" && node.kind === "planning").length, 1);
+  assert.equal(result.snapshot.nodes.some((node) => node.title === "Potential split that should stay local"), false);
+  assert.equal(
+    result.snapshot.events.some((event) =>
+      event.type === "scheduler_progress"
+      && event.payload.message === "Skipping decomposition because the current node already has enough execution detail"
+      && event.payload.proposedChildCount === 1
+    ),
+    true
+  );
+});
+
+test("runtime fails fast when execute reports that work was not completed", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        concretePlan: () => ({
+          summary: "Execution should happen directly",
+          childTasks: [],
+          executionNotes: []
+        }),
+        verify: () => ({
+          summary: "Verify should not run",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => ({
+          summary: "Gather complete",
+          evidenceBundles: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execution was denied by policy and has not been completed",
+          outputs: [],
+          completed: false,
+          blockedReason: "policy denied file modification"
+        })
+      },
+      trace
+    )
+  );
+
+  let capturedSnapshot: RunSnapshot | undefined;
+  const runtime = new OrchestratorRuntime(registry, {
+    persistence: {
+      saveSnapshot(snapshot: RunSnapshot) {
+        capturedSnapshot = snapshot;
+      }
+    } as never
+  });
+
+  await assert.rejects(
+    runtime.executeScheduledRun({
+      goal: "Fail if execution was denied",
+      assignedModels: {
+        abstractPlanner: planner,
+        gatherer,
+        concretePlanner: planner,
+        executor,
+        verifier: planner
+      },
+      reviewPolicy: "none"
+    }),
+    /Execution did not complete/
+  );
+
+  assert.ok(capturedSnapshot);
+  const snapshot = capturedSnapshot as RunSnapshot;
+  assert.equal(snapshot.run.status, "escalated");
+  assert.equal(trace.includes(`verify:${planner.id}`), false);
+  assert.equal(
+    snapshot.events.some((event) =>
+      event.type === "run_failed"
+      && String(event.payload.error).includes("Execution did not complete")
+    ),
+    true
+  );
+});
+
 test("runtime records failure events when a node invocation throws", async () => {
   const trace: string[] = [];
   const registry = new ModelAdapterRegistry();
@@ -1356,6 +1579,144 @@ test("runtime materializes missing child task routing from the parent node model
     "verify:planner-upper"
   ]);
   assert.equal(result.run.status, "done");
+  assert.equal(
+    events.includes("Materialized missing child task routing from nodeModelRouting"),
+    true
+  );
+});
+
+test("runtime falls back to the parent role routing when a child task references an unregistered model", async () => {
+  const trace: string[] = [];
+  const events: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "executor-lower",
+    provider: "mock",
+    model: "executor-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        abstractPlan: () => ({
+          summary: "Decompose once",
+          targetsToInspect: [],
+          evidenceRequirements: []
+        }),
+        concretePlan: (_evidenceCount, _factCount, context) => context.node.depth === 0
+          ? {
+              summary: "Child returned an out-of-routing gatherer model",
+              childTasks: [
+                {
+                  title: "Child with invalid gatherer",
+                  objective: "Use parent gatherer instead of an unregistered model",
+                  assignedModels: {
+                    abstractPlanner: planner,
+                    gatherer: {
+                      id: "gemini-2.5-pro",
+                      provider: "Google",
+                      model: "gemini-2.5-pro",
+                      tier: "lower"
+                    },
+                    concretePlanner: planner,
+                    executor,
+                    verifier: planner
+                  }
+                }
+              ],
+              executionNotes: [],
+              needsMorePlanning: true
+            }
+          : {
+              summary: "Leaf planning complete",
+              childTasks: [],
+              executionNotes: []
+            },
+        verify: () => ({
+          summary: "Verification passed",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => ({
+          summary: "Gather complete",
+          evidenceBundles: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execution complete",
+          outputs: ["ok"]
+        })
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry, {
+    onEvent: (event) => {
+      if (event.type === "scheduler_progress") {
+        events.push(String(event.payload.message));
+      }
+    }
+  });
+  const result = await runtime.executeScheduledRun({
+    goal: "Repair child routing when the planner picks an unregistered model",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    }
+  });
+
+  assert.equal(result.run.status, "done");
+  assert.deepEqual(trace, [
+    "abstract:planner-upper",
+    "gather:gather-lower",
+    "concrete:planner-upper",
+    "abstract:planner-upper",
+    "gather:gather-lower",
+    "concrete:planner-upper",
+    "execute:executor-lower",
+    "verify:planner-upper"
+  ]);
   assert.equal(
     events.includes("Materialized missing child task routing from nodeModelRouting"),
     true

@@ -97,7 +97,7 @@ function createGeminiCatalog(overrides: Partial<ManagedToolModelCatalog> = {}): 
   };
 }
 
-test("orchestrator service assigns the latest frontier Gemini model to planning and a lightweight Gemini model to worker roles", async () => {
+test("orchestrator service assigns the latest frontier Gemini model to planning while preferring a lightweight Gemini model for worker roles", async () => {
   const catalog = createGeminiCatalog();
   const toolManager = {
     prepareWorkspaceContext: async () => undefined,
@@ -122,6 +122,71 @@ test("orchestrator service assigns the latest frontier Gemini model to planning 
     "gemini-3.1-pro-preview",
     "gemini-2.5-flash"
   ]);
+});
+
+test("orchestrator service prefers a newer 3.x Gemini flash model for worker roles when available", async () => {
+  const catalog = createGeminiCatalog({
+    models: [
+      {
+        id: "gemini-2.5-flash",
+        model: "gemini-2.5-flash",
+        displayName: "Gemini 2.5 Flash",
+        description: null,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: null,
+        supportedReasoningEfforts: []
+      },
+      {
+        id: "gemini-3.1-flash-preview",
+        model: "gemini-3.1-flash-preview",
+        displayName: "Gemini 3.1 Flash Preview",
+        description: null,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: null,
+        supportedReasoningEfforts: []
+      },
+      {
+        id: "gemini-3.1-pro-preview",
+        model: "gemini-3.1-pro-preview",
+        displayName: "Gemini 3.1 Pro Preview",
+        description: null,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: null,
+        supportedReasoningEfforts: []
+      },
+      {
+        id: "auto-gemini-3",
+        model: "auto-gemini-3",
+        displayName: "Auto Gemini 3",
+        description: null,
+        hidden: false,
+        isDefault: true,
+        defaultReasoningEffort: null,
+        supportedReasoningEfforts: []
+      }
+    ]
+  });
+  const toolManager = {
+    prepareWorkspaceContext: async () => undefined,
+    discoverModelCatalog: async () => catalog
+  };
+  const service = new OrchestratorService("/tmp/tasksaw-app", "/tmp/tasksaw-user-data", toolManager as never);
+
+  const modeConfig = await (service as unknown as { resolveModeConfig(mode: string, workspacePath: string): Promise<unknown> })
+    .resolveModeConfig("gemini_only", "/tmp/tasksaw-workspace") as {
+      assignedModels: {
+        abstractPlanner: { model: string };
+        gatherer: { model: string };
+        executor: { model: string };
+      };
+    };
+
+  assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gemini-3.1-pro-preview");
+  assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-3.1-flash-preview");
+  assert.equal(modeConfig.assignedModels.executor.model, "gemini-3.1-flash-preview");
 });
 
 test("orchestrator service falls back to a concrete Gemini model when currentModelId is unavailable", async () => {
@@ -166,7 +231,7 @@ test("orchestrator service falls back to a concrete Gemini model when currentMod
   assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gemini-2.5-pro");
 });
 
-test("orchestrator service keeps the latest concrete Gemini model for worker roles when no lightweight Gemini model exists", async () => {
+test("orchestrator service falls back to the latest concrete Gemini model for worker roles when no lightweight Gemini model exists", async () => {
   const catalog = createGeminiCatalog({
     models: [
       {
