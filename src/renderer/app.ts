@@ -604,6 +604,7 @@ const workspaceCreateButton = document.getElementById("workspace-create") as HTM
 const newShellButton = document.getElementById("new-shell") as HTMLButtonElement;
 const newCodexButton = document.getElementById("new-codex") as HTMLButtonElement;
 const newGeminiButton = document.getElementById("new-gemini") as HTMLButtonElement;
+const autoApproveCheckbox = document.getElementById("auto-approve-checkbox") as HTMLInputElement;
 const approvalQueueButton = document.getElementById("approval-queue-button") as HTMLButtonElement;
 const toolsUpdateButton = document.getElementById("tools-update") as HTMLButtonElement;
 const resetAppButton = document.getElementById("app-reset") as HTMLButtonElement;
@@ -5147,8 +5148,15 @@ appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
     const nodeEvents = liveDetail.events.filter((entry) => entry.nodeId === event.nodeId);
     const pendingApproval = getPendingApproval(nodeEvents);
     if (pendingApproval) {
-      showApprovalToast(pendingApproval);
-      openApprovalDialog(pendingApproval.requestId);
+      if (autoApproveCheckbox.checked) {
+        const allowOption = pendingApproval.options.find((opt) => opt.kind === "allow_once")
+          ?? pendingApproval.options.find((opt) => typeof opt.kind === "string" && opt.kind.startsWith("allow"))
+          ?? pendingApproval.options[0];
+        void respondToPendingApproval(pendingApproval.requestId, true, allowOption?.optionId);
+      } else {
+        showApprovalToast(pendingApproval);
+        openApprovalDialog(pendingApproval.requestId);
+      }
     }
   }
 
