@@ -12,3 +12,4 @@ export * from "./runtime";
 export * from "./scheduler";
 export * from "./types";
 export * from "./working-memory";
+export * from "./workspace-context-cache";

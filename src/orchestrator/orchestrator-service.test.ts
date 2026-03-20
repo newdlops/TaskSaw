@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { OrchestratorService } from "../main/orchestrator-service";
 import { ManagedToolModelCatalog } from "../main/types";
+import { RunSnapshot } from "./types";
 
 function createCodexCatalog(overrides: Partial<ManagedToolModelCatalog> = {}): ManagedToolModelCatalog {
   return {
@@ -393,4 +397,133 @@ test("orchestrator service keeps higher reasoning for Codex planners and lighter
   assert.equal(modeConfig.assignedModels.gatherer.reasoningEffort, "low");
   assert.equal(modeConfig.assignedModels.executor.model, "gpt-5.4-mini");
   assert.equal(modeConfig.assignedModels.executor.reasoningEffort, "low");
+});
+
+test("orchestrator service reset removes saved workspace .tasksaw caches", () => {
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "tasksaw-reset-workspace-"));
+  const userDataPath = fs.mkdtempSync(path.join(os.tmpdir(), "tasksaw-reset-user-data-"));
+  const service = new OrchestratorService("/tmp/tasksaw-app", userDataPath, {
+    prepareWorkspaceContext: async () => undefined,
+    discoverModelCatalog: async () => createCodexCatalog()
+  } as never);
+
+  const snapshot: RunSnapshot = {
+    run: {
+      id: "run-reset-cache",
+      goal: "Cache workspace clues",
+      workspacePath,
+      language: "ko",
+      status: "done",
+      rootNodeId: "root-node",
+      continuedFromRunId: null,
+      config: {
+        maxDepth: 2,
+        reviewPolicy: "light",
+        plannerBias: "balanced",
+        carefulnessMode: "balanced",
+        defaultBudget: {
+          maxDepth: 2,
+          evidenceBudget: 12,
+          rereadBudget: 4,
+          upperModelCallBudget: 6,
+          reviewBudget: 2
+        }
+      },
+      createdAt: "2026-03-20T00:00:00.000Z",
+      updatedAt: "2026-03-20T00:05:00.000Z",
+      completedAt: "2026-03-20T00:05:00.000Z"
+    },
+    nodes: [],
+    evidenceBundles: [],
+    workingMemory: {
+      runId: "run-reset-cache",
+      facts: [],
+      openQuestions: [],
+      unknowns: [],
+      conflicts: [],
+      decisions: [
+        {
+          id: "decision-1",
+          summary: "Start from src/main",
+          rationale: "Main process owns the integration path",
+          referenceIds: [],
+          relatedNodeIds: ["root-node"],
+          createdAt: "2026-03-20T00:00:00.000Z",
+          updatedAt: "2026-03-20T00:05:00.000Z"
+        }
+      ],
+      updatedAt: "2026-03-20T00:05:00.000Z"
+    },
+    projectStructure: {
+      runId: "run-reset-cache",
+      summary: "Electron app split across main and renderer",
+      directories: [
+        {
+          id: "dir-1",
+          path: "src/main",
+          summary: "Electron main process",
+          confidence: "high",
+          referenceIds: [],
+          relatedNodeIds: ["root-node"],
+          createdAt: "2026-03-20T00:00:00.000Z",
+          updatedAt: "2026-03-20T00:05:00.000Z"
+        }
+      ],
+      keyFiles: [],
+      entryPoints: [],
+      modules: [],
+      openQuestions: [],
+      contradictions: [],
+      updatedAt: "2026-03-20T00:05:00.000Z"
+    },
+    events: [],
+    finalReport: {
+      runId: "run-reset-cache",
+      summary: "Cache workspace clues",
+      outcomes: ["cached"],
+      unresolvedRisks: [],
+      nextActions: [],
+      createdAt: "2026-03-20T00:05:00.000Z"
+    }
+  };
+
+  (
+    service as unknown as {
+      persistence: { saveSnapshot(snapshot: RunSnapshot): void };
+    }
+  ).persistence.saveSnapshot(snapshot);
+
+  assert.equal(fs.existsSync(path.join(workspacePath, ".tasksaw")), true);
+  service.resetAllRuns();
+  assert.equal(fs.existsSync(path.join(workspacePath, ".tasksaw")), false);
+});
+
+test("orchestrator service does not auto-load cached continuation for a fresh explicit goal", () => {
+  const service = new OrchestratorService("/tmp/tasksaw-app", "/tmp/tasksaw-user-data", {
+    prepareWorkspaceContext: async () => undefined,
+    discoverModelCatalog: async () => createCodexCatalog()
+  } as never);
+
+  const shouldUseCachedContinuation = (
+    service as unknown as {
+      shouldUseCachedContinuation(input: { goal: string }, continuationSnapshot?: RunSnapshot): boolean;
+    }
+  ).shouldUseCachedContinuation({ goal: "Add a compact usage indicator" }, undefined);
+
+  assert.equal(shouldUseCachedContinuation, false);
+});
+
+test("orchestrator service allows cached continuation only when there is no explicit goal and no direct continuation snapshot", () => {
+  const service = new OrchestratorService("/tmp/tasksaw-app", "/tmp/tasksaw-user-data", {
+    prepareWorkspaceContext: async () => undefined,
+    discoverModelCatalog: async () => createCodexCatalog()
+  } as never);
+
+  const shouldUseCachedContinuation = (
+    service as unknown as {
+      shouldUseCachedContinuation(input: { goal: string }, continuationSnapshot?: RunSnapshot): boolean;
+    }
+  ).shouldUseCachedContinuation({ goal: "   " }, undefined);
+
+  assert.equal(shouldUseCachedContinuation, true);
 });

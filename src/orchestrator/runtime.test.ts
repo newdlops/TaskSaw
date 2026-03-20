@@ -562,7 +562,9 @@ test("runtime tolerates malformed evidence referenceIds from gather responses", 
     )
   );
 
-  const runtime = new OrchestratorRuntime(registry);
+  const runtime = new OrchestratorRuntime(registry, {
+    enableRootBootstrapSketch: true
+  });
   const result = await runtime.executeScheduledRun({
     goal: "Handle loose gather evidence from Gemini",
     reviewPolicy: "none",
@@ -579,6 +581,154 @@ test("runtime tolerates malformed evidence referenceIds from gather responses", 
   assert.equal(result.snapshot.workingMemory.facts.length, 1);
   assert.equal(result.snapshot.workingMemory.unknowns.length, 0);
   assert.deepEqual(result.snapshot.workingMemory.facts[0]?.referenceIds, ["ref-main-ipc"]);
+});
+
+test("runtime runs a low-cost bootstrap sketch before root planning when no clues are seeded", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        abstractPlan: (context) => {
+          trace.push(`abstract-context:${context.projectStructure.summary}`);
+          return {
+            summary: "Plan with bootstrap clues",
+            targetsToInspect: [],
+            evidenceRequirements: []
+          };
+        },
+        concretePlan: () => ({
+          summary: "Execution-ready after bootstrap",
+          childTasks: [],
+          executionNotes: []
+        }),
+        verify: () => ({
+          summary: "Verification passed",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: (context) => {
+          trace.push(`gather-stage:${context.workflowStage}:${context.node.title}`);
+          if (context.workflowStage === "bootstrap_sketch") {
+            return {
+              summary: "Bootstrap sketch complete",
+              evidenceBundles: [
+                {
+                  id: "bootstrap-bundle",
+                  summary: "Coarse repository clues",
+                  facts: [
+                    {
+                      id: "bootstrap-fact",
+                      statement: "src/main owns Electron and tool orchestration",
+                      confidence: "medium",
+                      referenceIds: []
+                    }
+                  ],
+                  hypotheses: [],
+                  unknowns: [],
+                  relevantTargets: [],
+                  snippets: [],
+                  references: [],
+                  confidence: "mixed"
+                }
+              ],
+              projectStructure: {
+                summary: "Coarse sketch: main, renderer, and orchestrator layers exist",
+                directories: [
+                  {
+                    path: "src/main",
+                    summary: "Electron main process",
+                    confidence: "mixed",
+                    referenceIds: []
+                  }
+                ],
+                keyFiles: [],
+                entryPoints: [],
+                modules: [],
+                openQuestions: [],
+                contradictions: []
+              }
+            };
+          }
+
+          return {
+            summary: "Focused gather complete",
+            evidenceBundles: [],
+            projectStructure: undefined
+          };
+        }
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execution complete",
+          outputs: ["ok"]
+        })
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry, {
+    enableRootBootstrapSketch: true
+  });
+  const result = await runtime.executeScheduledRun({
+    goal: "Bootstrap the repository before planning",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    }
+  });
+
+  assert.equal(result.snapshot.run.status, "done");
+  assert.equal(result.snapshot.nodes.some((node) => node.title === "Bootstrap Sketch"), true);
+  assert.equal(trace.includes("gather-stage:bootstrap_sketch:Bootstrap Sketch"), true);
+  assert.equal(trace.includes("abstract-context:Coarse sketch: main, renderer, and orchestrator layers exist"), true);
+  assert.ok(trace.indexOf("gather-stage:bootstrap_sketch:Bootstrap Sketch") < trace.indexOf("abstract:planner-upper"));
 });
 
 test("runtime seeds continuation snapshots into the next run", async () => {
@@ -2616,4 +2766,588 @@ test("runtime stops repeating project structure inspection when the structure me
     "concrete:project_structure_inspection:1:",
     "concrete:task_orchestration:0:"
   ]);
+});
+
+test("runtime ignores summary-only structure churn after inspection and does not reopen resolved structure issues", async () => {
+  const registry = new ModelAdapterRegistry();
+  let runId: string | null = null;
+  let inspectionGatherCount = 0;
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan"]),
+      {
+        abstractPlan: () => ({
+          summary: "Inspect the actual main-process source entrypoint",
+          targetsToInspect: ["src/main/main.ts"],
+          evidenceRequirements: ["Confirm the source entrypoint and clear stale entrypoint assumptions"]
+        }),
+        concretePlan: (_evidenceCount, _factCount, context) => {
+          if (context.workflowStage === "project_structure_inspection") {
+            return {
+              summary: "Inspection finished",
+              childTasks: [],
+              executionNotes: ["Inspection findings were merged into project structure memory"]
+            };
+          }
+
+          if (context.projectStructure.entryPoints.some((entry) => entry.path === "src/main/main.ts")) {
+            return {
+              summary: "The planner still suspects stale entrypoint memory",
+              childTasks: [],
+              executionNotes: [],
+              needsProjectStructureInspection: true,
+              inspectionObjectives: ["Reconfirm the actual Electron main source entrypoint"],
+              projectStructureContradictions: ["The structure summary may still describe the wrong main source entrypoint"]
+            };
+          }
+
+          return {
+            summary: "The initial entrypoint memory is contradictory",
+            childTasks: [],
+            executionNotes: [],
+            needsProjectStructureInspection: true,
+            inspectionObjectives: ["Confirm the actual Electron main source entrypoint"],
+            projectStructureContradictions: ["The initial structure summary points to the wrong main source entrypoint"]
+          };
+        }
+      },
+      []
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: (context) => {
+          if (context.workflowStage === "project_structure_inspection") {
+            inspectionGatherCount += 1;
+            return {
+              summary: inspectionGatherCount === 1
+                ? "Inspection confirmed src/main/main.ts as the real source entrypoint"
+                : "Inspection rephrased the same src/main/main.ts finding",
+              evidenceBundles: [],
+              projectStructure: {
+                summary: inspectionGatherCount === 1
+                  ? "Inspection confirmed the source entrypoint"
+                  : "Inspection reconfirmed the source entrypoint with different wording",
+                directories: [
+                  {
+                    path: "src/main",
+                    summary: "Electron main-process source files",
+                    confidence: "high"
+                  }
+                ],
+                keyFiles: [
+                  {
+                    path: "src/main/main.ts",
+                    summary: "Main-process source entrypoint",
+                    confidence: "high"
+                  }
+                ],
+                entryPoints: [
+                  {
+                    path: "src/main/main.ts",
+                    role: "main source entrypoint",
+                    summary: "Actual Electron source entrypoint",
+                    confidence: "high"
+                  }
+                ],
+                modules: [],
+                openQuestions: [],
+                contradictions: []
+              }
+            };
+          }
+
+          return {
+            summary: "Initial discovery guessed the wrong source entrypoint",
+            evidenceBundles: [],
+            projectStructure: {
+              summary: "Initial structure summary points to the wrong entrypoint",
+              directories: [
+                {
+                  path: "src/main",
+                  summary: "Electron main-process source files",
+                  confidence: "medium"
+                }
+              ],
+              keyFiles: [
+                {
+                  path: "src/main/main.js",
+                  summary: "Stale source entrypoint guess",
+                  confidence: "low"
+                }
+              ],
+              entryPoints: [
+                {
+                  path: "src/main/main.js",
+                  role: "suspected source entrypoint",
+                  summary: "Initial stale guess",
+                  confidence: "low"
+                }
+              ],
+              modules: [],
+              openQuestions: ["Need to confirm the actual main source entrypoint"],
+              contradictions: ["Initial structure summary points to the wrong entrypoint"]
+            }
+          };
+        }
+      },
+      []
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry, {
+    onEvent: (event) => {
+      runId ??= event.runId;
+    }
+  });
+
+  await assert.rejects(
+    runtime.executeScheduledRun({
+      goal: "Stop repeated inspection after the actual source entrypoint has already been confirmed",
+      reviewPolicy: "none",
+      assignedModels: {
+        abstractPlanner: planner,
+        gatherer,
+        concretePlanner: planner
+      }
+    }),
+    /did not change the structure memory/
+  );
+
+  assert.notEqual(runId, null);
+  const snapshot = runtime.getSnapshot(runId!);
+  assert.equal(snapshot.run.status, "escalated");
+  assert.equal(snapshot.nodes.filter((node) => node.title.includes("/ inspection-1")).length, 1);
+  assert.equal(snapshot.nodes.filter((node) => node.title.includes("/ inspection-2")).length, 1);
+  assert.equal(
+    snapshot.projectStructure.openQuestions.filter((question) => question.status === "open").length,
+    0
+  );
+  assert.equal(
+    snapshot.projectStructure.contradictions.filter((contradiction) => contradiction.status === "open").length,
+    0
+  );
+  assert.equal(
+    snapshot.events.some((event) =>
+      event.type === "scheduler_progress"
+      && event.payload.message === "Stopping repeated project structure inspection because the structure memory did not change"
+      && event.payload.attempt === 2
+    ),
+    true
+  );
+});
+
+test("runtime injects working-memory cues into task-orchestration abstract and gather objectives", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+  let abstractObjective = "";
+  let gatherObjective = "";
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        abstractPlan: (context) => {
+          abstractObjective = context.node.objective;
+          return {
+            summary: "Inspect the main tool status path first",
+            targetsToInspect: ["src/main/tool-manager.ts"],
+            evidenceRequirements: ["Confirm whether ToolManager already exposes quota fields"]
+          };
+        },
+        concretePlan: () => ({
+          summary: "Execution ready",
+          childTasks: [],
+          executionNotes: []
+        }),
+        verify: () => ({
+          summary: "Verification passed",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: (context) => {
+          gatherObjective = context.node.objective;
+          return {
+            summary: "Gather confirmed the next inspection target is already narrow",
+            evidenceBundles: []
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execution complete",
+          outputs: ["noop"]
+        })
+      },
+      trace
+    )
+  );
+
+  const seededWorkingMemory: WorkingMemorySnapshot = {
+    runId: "previous-run",
+    facts: [],
+    openQuestions: [
+      {
+        id: "seed-question",
+        question: "Confirm whether ToolManager already exposes quota fields",
+        status: "open",
+        referenceIds: [],
+        relatedNodeIds: ["old-node"],
+        createdAt: "2026-03-19T09:00:00.000Z",
+        updatedAt: "2026-03-19T09:00:00.000Z"
+      }
+    ],
+    unknowns: [],
+    conflicts: [],
+    decisions: [
+      {
+        id: "seed-decision",
+        summary: "Previous finding",
+        rationale: "The topbar is the likely compact indicator slot.",
+        referenceIds: [],
+        relatedNodeIds: ["old-node"],
+        createdAt: "2026-03-19T09:00:00.000Z",
+        updatedAt: "2026-03-19T09:00:00.000Z"
+      }
+    ],
+    updatedAt: "2026-03-19T09:00:00.000Z"
+  };
+
+  const seededEvidence: EvidenceBundle = {
+    id: "seed-bundle",
+    runId: "previous-run",
+    nodeId: "old-node",
+    summary: "Current tool state has no quota field",
+    facts: [],
+    hypotheses: [],
+    unknowns: [],
+    relevantTargets: [{ filePath: "src/main/tool-manager.ts" }],
+    snippets: [],
+    references: [],
+    confidence: "high",
+    createdAt: "2026-03-19T09:00:00.000Z",
+    updatedAt: "2026-03-19T09:00:00.000Z"
+  };
+
+  const seededProjectStructure: ProjectStructureSnapshot = {
+    runId: "previous-run",
+    summary: "Quota UI likely spans the main and renderer layers",
+    directories: [
+      {
+        id: "seed-directory",
+        path: "src/main",
+        summary: "Electron main-process files",
+        confidence: "high",
+        referenceIds: [],
+        relatedNodeIds: ["old-node"],
+        createdAt: "2026-03-19T09:00:00.000Z",
+        updatedAt: "2026-03-19T09:00:00.000Z"
+      }
+    ],
+    keyFiles: [
+      {
+        id: "seed-key-file",
+        path: "src/main/tool-manager.ts",
+        summary: "Managed tool state source",
+        confidence: "high",
+        referenceIds: [],
+        relatedNodeIds: ["old-node"],
+        createdAt: "2026-03-19T09:00:00.000Z",
+        updatedAt: "2026-03-19T09:00:00.000Z"
+      }
+    ],
+    entryPoints: [
+      {
+        id: "seed-entrypoint",
+        path: "src/renderer/app.ts",
+        role: "renderer entrypoint",
+        summary: "UI entrypoint",
+        confidence: "medium",
+        referenceIds: [],
+        relatedNodeIds: ["old-node"],
+        createdAt: "2026-03-19T09:00:00.000Z",
+        updatedAt: "2026-03-19T09:00:00.000Z"
+      }
+    ],
+    modules: [],
+    openQuestions: [],
+    contradictions: [],
+    updatedAt: "2026-03-19T09:00:00.000Z"
+  };
+
+  const runtime = new OrchestratorRuntime(registry);
+  const result = await runtime.executeHappyPath({
+    goal: "Add a compact quota indicator",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    },
+    continuation: {
+      sourceRunId: "previous-run",
+      evidenceBundles: [seededEvidence],
+      workingMemory: seededWorkingMemory,
+      projectStructure: seededProjectStructure
+    }
+  });
+
+  assert.equal(result.snapshot.run.status, "done");
+  assert.match(abstractObjective, /Priority memory cues:/);
+  assert.match(abstractObjective, /Confirm whether ToolManager already exposes quota fields/);
+  assert.match(abstractObjective, /src\/main\/tool-manager\.ts/);
+  assert.match(gatherObjective, /Priority memory cues:/);
+  assert.match(gatherObjective, /Inspection target identified: src\/main\/tool-manager\.ts/);
+  assert.match(gatherObjective, /Current tool state has no quota field/);
+});
+
+test("runtime resolves project-structure issues recorded inside the inspection subtree", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        abstractPlan: () => ({
+          summary: "Inspect the actual main source entrypoint",
+          targetsToInspect: ["src/main/main.ts"],
+          evidenceRequirements: ["Confirm the actual source entrypoint and close stale entrypoint questions"]
+        }),
+        concretePlan: (_evidenceCount, _factCount, context) => {
+          if (context.workflowStage === "project_structure_inspection") {
+            return {
+              summary: "Inspection finished",
+              childTasks: [],
+              executionNotes: []
+            };
+          }
+
+          if (!context.projectStructure.entryPoints.some((entry) => entry.path === "src/main/main.ts")) {
+            return {
+              summary: "Need a structure re-read",
+              childTasks: [],
+              executionNotes: [],
+              needsProjectStructureInspection: true,
+              inspectionObjectives: ["Confirm the actual Electron main source entrypoint"],
+              projectStructureContradictions: ["The initial source entrypoint guess may be stale"]
+            };
+          }
+
+          return {
+            summary: "Execution ready",
+            childTasks: [],
+            executionNotes: []
+          };
+        },
+        verify: () => ({
+          summary: "Verification passed",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: (context) => {
+          if (context.workflowStage === "project_structure_inspection") {
+            return {
+              summary: "Inspection confirmed the main source entrypoint",
+              evidenceBundles: [],
+              projectStructure: {
+                summary: "Inspection normalized the main source entrypoint",
+                directories: [
+                  {
+                    path: "src/main",
+                    summary: "Electron main-process source files",
+                    confidence: "high"
+                  }
+                ],
+                keyFiles: [
+                  {
+                    path: "src/main/main.ts",
+                    summary: "Actual main source entrypoint",
+                    confidence: "high"
+                  }
+                ],
+                entryPoints: [
+                  {
+                    path: "src/main/main.ts",
+                    role: "main source entrypoint",
+                    summary: "Actual Electron source entrypoint",
+                    confidence: "high"
+                  }
+                ],
+                modules: [],
+                openQuestions: ["Need to clear the stale src/main/main.js source-entrypoint memory"],
+                contradictions: ["The initial source entrypoint guess may be stale"]
+              }
+            };
+          }
+
+          return {
+            summary: "Initial discovery guessed the wrong source entrypoint",
+            evidenceBundles: [],
+            projectStructure: {
+              summary: "Initial structure summary points to the wrong entrypoint",
+              directories: [
+                {
+                  path: "src/main",
+                  summary: "Electron main-process source files",
+                  confidence: "medium"
+                }
+              ],
+              keyFiles: [],
+              entryPoints: [
+                {
+                  path: "src/main/main.js",
+                  role: "suspected source entrypoint",
+                  summary: "Initial stale guess",
+                  confidence: "low"
+                }
+              ],
+              modules: [],
+              openQuestions: ["Need to confirm the actual main source entrypoint"],
+              contradictions: ["The initial source entrypoint guess may be stale"]
+            }
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execution complete",
+          outputs: ["ok"]
+        })
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry);
+  const result = await runtime.executeHappyPath({
+    goal: "Normalize the entrypoint memory before planning quota UI work",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    }
+  });
+
+  assert.equal(result.snapshot.run.status, "done");
+  assert.equal(
+    result.snapshot.projectStructure.openQuestions.filter((entry) => entry.status === "open").length,
+    0
+  );
+  assert.equal(
+    result.snapshot.projectStructure.contradictions.filter((entry) => entry.status === "open").length,
+    0
+  );
+  assert.deepEqual(
+    result.snapshot.projectStructure.entryPoints.map((entry) => entry.path),
+    ["src/main/main.ts"]
+  );
 });

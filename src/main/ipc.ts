@@ -303,7 +303,7 @@ export function registerIpc(
 
   ipcMain.handle("app:reset", async () => {
     ptyManager.resetAllSessions();
-    orchestratorService.resetAllRuns();
+    orchestratorService.resetAllRuns(workspaceAccessManager.listKnownWorkspacePaths());
     toolManager.resetPersistentState();
     workspaceAccessManager.resetAllAccess();
   });

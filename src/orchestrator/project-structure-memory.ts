@@ -200,12 +200,20 @@ export class ProjectStructureMemoryStore {
 
   private recordEntryPoint(input: RecordEntryPointInput): ProjectStructureEntryPoint {
     const timestamp = this.bumpTimestamp();
-    const existing = this.findEntryPoint(input.path, input.role);
+    const existing = this.findEntryPoint(input.path, input.role) ?? this.findSupersededEntryPoint(input);
     if (existing) {
+      const nextConfidence = input.confidence ?? existing.confidence;
       const nextEntry: ProjectStructureEntryPoint = {
         ...existing,
-        summary: this.pickBetterSummary(existing.summary, input.summary),
-        confidence: this.mergeConfidence(existing.confidence, input.confidence ?? existing.confidence),
+        path: input.path,
+        role: input.role,
+        summary: this.pickPreferredSummary(
+          existing.summary,
+          existing.confidence,
+          input.summary,
+          nextConfidence
+        ),
+        confidence: this.mergeConfidence(existing.confidence, nextConfidence),
         referenceIds: this.mergeStringArrays(existing.referenceIds, input.referenceIds),
         relatedNodeIds: this.mergeStringArrays(existing.relatedNodeIds, input.relatedNodeIds),
         updatedAt: timestamp
@@ -235,7 +243,12 @@ export class ProjectStructureMemoryStore {
     if (existing) {
       const nextModule: ProjectStructureModule = {
         ...existing,
-        summary: this.pickBetterSummary(existing.summary, input.summary),
+        summary: this.pickPreferredSummary(
+          existing.summary,
+          existing.confidence,
+          input.summary,
+          input.confidence ?? existing.confidence
+        ),
         relatedPaths: this.mergeStringArrays(existing.relatedPaths, input.relatedPaths),
         confidence: this.mergeConfidence(existing.confidence, input.confidence ?? existing.confidence),
         referenceIds: this.mergeStringArrays(existing.referenceIds, input.referenceIds),
@@ -329,7 +342,12 @@ export class ProjectStructureMemoryStore {
     if (existing) {
       const nextEntry: ProjectStructurePathEntry = {
         ...existing,
-        summary: this.pickBetterSummary(existing.summary, input.summary),
+        summary: this.pickPreferredSummary(
+          existing.summary,
+          existing.confidence,
+          input.summary,
+          input.confidence ?? existing.confidence
+        ),
         confidence: this.mergeConfidence(existing.confidence, input.confidence ?? existing.confidence),
         referenceIds: this.mergeStringArrays(existing.referenceIds, input.referenceIds),
         relatedNodeIds: this.mergeStringArrays(existing.relatedNodeIds, input.relatedNodeIds),
@@ -403,6 +421,33 @@ export class ProjectStructureMemoryStore {
     );
   }
 
+  private findSupersededEntryPoint(input: RecordEntryPointInput): ProjectStructureEntryPoint | undefined {
+    const normalizedPath = this.normalizePath(input.path);
+    const normalizedRole = this.normalizeEntryPointRole(input.role);
+    const nextConfidence = input.confidence ?? "medium";
+    const inputLooksTentative = this.entryPointLooksTentative(input.role, input.summary, nextConfidence);
+
+    if (normalizedRole.length === 0) {
+      return undefined;
+    }
+
+    return [...this.entryPoints.values()].find((entry) => {
+      if (this.normalizePath(entry.path) === normalizedPath) {
+        return false;
+      }
+
+      if (this.normalizeEntryPointRole(entry.role) !== normalizedRole) {
+        return false;
+      }
+
+      const existingLooksTentative = this.entryPointLooksTentative(entry.role, entry.summary, entry.confidence);
+      const nextIsStronger = this.confidenceRank(nextConfidence) > this.confidenceRank(entry.confidence)
+        || (!inputLooksTentative && existingLooksTentative);
+
+      return nextIsStronger;
+    });
+  }
+
   private findModule(name: string): ProjectStructureModule | undefined {
     const normalizedName = this.normalizeText(name);
     return [...this.modules.values()].find((entry) => this.normalizeText(entry.name) === normalizedName);
@@ -423,8 +468,37 @@ export class ProjectStructureMemoryStore {
     return this.updatedAt;
   }
 
-  private pickBetterSummary(currentSummary: string, nextSummary: string): string {
-    return nextSummary.trim().length > currentSummary.trim().length ? nextSummary : currentSummary;
+  private pickPreferredSummary(
+    currentSummary: string,
+    currentConfidence: ConfidenceLevel,
+    nextSummary: string,
+    nextConfidence: ConfidenceLevel
+  ): string {
+    const trimmedCurrent = currentSummary.trim();
+    const trimmedNext = nextSummary.trim();
+    if (trimmedNext.length === 0) {
+      return currentSummary;
+    }
+
+    if (trimmedCurrent.length === 0) {
+      return nextSummary;
+    }
+
+    if (this.normalizeText(trimmedCurrent) === this.normalizeText(trimmedNext)) {
+      return trimmedNext.length >= trimmedCurrent.length ? nextSummary : currentSummary;
+    }
+
+    const currentRank = this.confidenceRank(currentConfidence);
+    const nextRank = this.confidenceRank(nextConfidence);
+    if (nextRank > currentRank) {
+      return nextSummary;
+    }
+
+    if (currentRank > nextRank) {
+      return currentSummary;
+    }
+
+    return nextSummary;
   }
 
   private mergeConfidence(left: ConfidenceLevel, right: ConfidenceLevel): ConfidenceLevel {
@@ -441,6 +515,17 @@ export class ProjectStructureMemoryStore {
     return [...new Set([...(left ?? []), ...(right ?? [])])];
   }
 
+  private confidenceRank(value: ConfidenceLevel): number {
+    const ranking: Record<ConfidenceLevel, number> = {
+      low: 0,
+      medium: 1,
+      mixed: 2,
+      high: 3
+    };
+
+    return ranking[value];
+  }
+
   private normalizePath(path: string): string {
     return path.trim().replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
   }
@@ -451,5 +536,24 @@ export class ProjectStructureMemoryStore {
       .trim()
       .toLowerCase()
       .replace(/\s+/g, " ");
+  }
+
+  private normalizeEntryPointRole(role: string): string {
+    const normalized = this.normalizeText(role)
+      .replace(/\b(actual|real|main|primary|canonical|suspected|likely|possible|probable|guessed|guess|initial|stale|legacy|old|candidate)\b/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    return normalized.length > 0 ? normalized : this.normalizeText(role);
+  }
+
+  private entryPointLooksTentative(role: string, summary: string, confidence: ConfidenceLevel): boolean {
+    if (confidence === "low") {
+      return true;
+    }
+
+    return /\b(suspected|likely|possible|probable|guess|guessed|initial|stale|legacy|old|candidate)\b/.test(
+      this.normalizeText(`${role} ${summary}`)
+    );
   }
 }

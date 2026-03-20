@@ -75,6 +75,7 @@ export class OrchestratorEngine {
     const run: Run = {
       id: runId,
       goal: input.goal,
+      workspacePath: input.workspacePath?.trim() || null,
       language: input.language ?? "ko",
       status: "pending",
       rootNodeId,

@@ -16,7 +16,8 @@ import {
   OrchestratorEvent,
   OrchestratorPersistence,
   OrchestratorRuntime,
-  RunSnapshot
+  RunSnapshot,
+  WorkspaceContextCache
 } from "../orchestrator";
 import { ToolManager } from "./tool-manager";
 import {
@@ -103,11 +104,16 @@ export class OrchestratorService {
     const modeConfig = await this.resolveModeConfig(input.mode, workspacePath);
     const continuationSnapshot = this.loadContinuationSnapshot(input.continueFromRunId);
     const continuationMode = this.normalizeContinuationMode(input.continuationMode);
-    const continuation = this.buildContinuationSeed(continuationSnapshot, continuationMode);
+    const explicitContinuation = this.buildContinuationSeed(continuationSnapshot, continuationMode);
+    const cachedContinuation = this.shouldUseCachedContinuation(input, continuationSnapshot)
+      ? this.persistence.loadWorkspaceSeed(workspacePath)
+      : undefined;
+    const continuation = this.resolveContinuationSeed(explicitContinuation, cachedContinuation);
     const goal = this.resolveRunGoal(input, continuationSnapshot);
     let activeRunId: string | null = null;
     const runtime = new OrchestratorRuntime(await this.createRegistry(workspacePath, modeConfig.toolModels), {
       persistence: this.persistence,
+      enableRootBootstrapSketch: true,
       requestUserApproval,
       requestUserInput,
       onEvent: (event) => {
@@ -123,6 +129,7 @@ export class OrchestratorService {
     try {
       const result = await runtime.executeScheduledRun({
         goal,
+        workspacePath,
         language: input.language,
         title: modeConfig.title,
         objective: goal,
@@ -198,7 +205,9 @@ export class OrchestratorService {
     return this.persistence.loadSnapshot(runId);
   }
 
-  resetAllRuns() {
+  resetAllRuns(workspacePaths: string[] = []) {
+    this.persistence.clearWorkspaceCachesForSavedRuns();
+    this.clearWorkspaceCaches(workspacePaths);
     fs.rmSync(this.runsRootDirectory, { recursive: true, force: true });
     fs.mkdirSync(this.runsRootDirectory, { recursive: true });
   }
@@ -227,6 +236,17 @@ export class OrchestratorService {
 
   private normalizeContinuationMode(value: OrchestratorContinuationMode | null | undefined): OrchestratorContinuationMode {
     return value === "next_action" ? "next_action" : "resume";
+  }
+
+  private shouldUseCachedContinuation(
+    input: RunOrchestratorInput,
+    continuationSnapshot: RunSnapshot | undefined
+  ): boolean {
+    if (continuationSnapshot) {
+      return false;
+    }
+
+    return input.goal.trim().length === 0;
   }
 
   private resolveRunGoal(input: RunOrchestratorInput, continuationSnapshot: RunSnapshot | undefined): string {
@@ -263,6 +283,35 @@ export class OrchestratorService {
       workingMemory: snapshot.workingMemory,
       projectStructure: snapshot.projectStructure
     };
+  }
+
+  private resolveContinuationSeed(
+    explicitContinuation: ContinuationSeed | undefined,
+    cachedContinuation: ContinuationSeed | undefined
+  ): ContinuationSeed | undefined {
+    if (explicitContinuation && this.hasContinuationClues(explicitContinuation)) {
+      return explicitContinuation;
+    }
+
+    if (cachedContinuation && this.hasContinuationClues(cachedContinuation)) {
+      return cachedContinuation;
+    }
+
+    return explicitContinuation ?? cachedContinuation;
+  }
+
+  private hasContinuationClues(continuation: ContinuationSeed): boolean {
+    return continuation.evidenceBundles.length > 0
+      || continuation.workingMemory.facts.length > 0
+      || continuation.workingMemory.openQuestions.length > 0
+      || continuation.workingMemory.unknowns.length > 0
+      || continuation.workingMemory.conflicts.length > 0
+      || continuation.workingMemory.decisions.length > 0
+      || continuation.projectStructure.summary.trim().length > 0
+      || continuation.projectStructure.directories.length > 0
+      || continuation.projectStructure.keyFiles.length > 0
+      || continuation.projectStructure.entryPoints.length > 0
+      || continuation.projectStructure.modules.length > 0;
   }
 
   private buildTrimmedContinuationSeed(snapshot: RunSnapshot): ContinuationSeed {
@@ -384,6 +433,23 @@ export class OrchestratorService {
     }
 
     return false;
+  }
+
+  private clearWorkspaceCaches(workspacePaths: string[]) {
+    const seen = new Set<string>();
+    for (const workspacePath of workspacePaths) {
+      const normalizedPath = workspacePath.trim();
+      if (!normalizedPath || seen.has(normalizedPath)) {
+        continue;
+      }
+
+      seen.add(normalizedPath);
+      try {
+        new WorkspaceContextCache(normalizedPath).clear();
+      } catch {
+        // Ignore cache cleanup failures during reset.
+      }
+    }
   }
 
   private async resolveModeConfig(mode: OrchestratorMode, workspacePath: string): Promise<ResolvedModeConfig> {

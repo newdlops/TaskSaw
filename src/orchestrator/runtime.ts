@@ -113,6 +113,7 @@ export type OrchestratorRuntimeOptions = {
   persistence?: OrchestratorPersistence;
   now?: () => string;
   onEvent?: OrchestratorEventListener;
+  enableRootBootstrapSketch?: boolean;
   requestUserApproval?: (request: OrchestratorApprovalRequest) => Promise<OrchestratorApprovalDecision>;
   requestUserInput?: (request: OrchestratorUserInputRequest) => Promise<OrchestratorUserInputResponse>;
 };
@@ -163,6 +164,7 @@ export class OrchestratorRuntime {
   private readonly persistence: OrchestratorPersistence | undefined;
   private readonly now: () => string;
   private readonly onEvent: OrchestratorEventListener | undefined;
+  private readonly enableRootBootstrapSketch: boolean;
   private readonly requestUserApprovalHandler: ((request: OrchestratorApprovalRequest) => Promise<OrchestratorApprovalDecision>) | undefined;
   private readonly requestUserInputHandler: ((request: OrchestratorUserInputRequest) => Promise<OrchestratorUserInputResponse>) | undefined;
   private readonly scheduler = new OrderedDfsScheduler();
@@ -183,6 +185,7 @@ export class OrchestratorRuntime {
     this.persistence = options.persistence;
     this.now = options.now ?? (() => new Date().toISOString());
     this.onEvent = options.onEvent;
+    this.enableRootBootstrapSketch = options.enableRootBootstrapSketch ?? false;
     this.requestUserApprovalHandler = options.requestUserApproval;
     this.requestUserInputHandler = options.requestUserInput;
     this.engine.subscribe((event) => {
@@ -393,16 +396,51 @@ export class OrchestratorRuntime {
   private async executePlanningNode(startingNode: PlanNode, allowDecomposition: boolean): Promise<NodeExecutionOutcome> {
     const nodeId = startingNode.id;
     const isProjectStructureInspection = this.isProjectStructureInspectionNode(startingNode);
-    const seededEvidence = this.getNodeEvidenceBundles(startingNode);
+    let planningEvidence = this.getNodeEvidenceBundles(startingNode);
+
+    if (!isProjectStructureInspection && this.shouldRunBootstrapSketch(startingNode, planningEvidence)) {
+      this.engine.appendEvent(startingNode.runId, startingNode.id, "scheduler_progress", {
+        message: "No prior clues found. Starting low-cost bootstrap sketch before root planning."
+      });
+      const bootstrapSketchStage = await this.executeStageCapability<GatherResult>(startingNode, {
+        phase: "gather",
+        title: "Bootstrap Sketch",
+        objective: `Produce a rough, low-cost sketch of the repository before deeper planning for:\n${startingNode.objective}`,
+        kind: "planning",
+        role: "gatherer",
+        capability: "gather",
+        evidenceBundles: planningEvidence
+      });
+      const bootstrapSketch = bootstrapSketchStage.result;
+      this.mergeProjectStructureReport(bootstrapSketchStage.stageNode, bootstrapSketch.projectStructure);
+      const bootstrapBundles = bootstrapSketch.evidenceBundles.map((bundleDraft) =>
+        this.materializeEvidenceBundle(bootstrapSketchStage.stageNode, bundleDraft)
+      );
+
+      for (const bundle of bootstrapBundles) {
+        this.evidenceStore.upsertBundle(bundle);
+        const storedBundle = this.evidenceStore.getBundle(bundle.id) ?? bundle;
+        this.engine.attachEvidenceBundle(bootstrapSketchStage.stageNode.id, bundle.id);
+        this.ingestEvidenceBundle(bootstrapSketchStage.stageNode.id, storedBundle);
+      }
+
+      planningEvidence = [...planningEvidence, ...bootstrapBundles];
+    }
+
     let currentNode = this.engine.transitionNode(nodeId, "abstract_plan");
     const abstractPlanStage = await this.executeStageCapability<AbstractPlanResult>(currentNode, {
       phase: "abstract_plan",
       title: "Abstract Plan",
-      objective: `Define the search scope, evidence requirements, and inspection targets for:\n${currentNode.objective}`,
+      objective: this.buildPlanningStageObjective(
+        currentNode,
+        "abstractPlan",
+        `Define the search scope, evidence requirements, and inspection targets for:\n${currentNode.objective}`,
+        planningEvidence
+      ),
       kind: "planning",
       role: "abstractPlanner",
       capability: "abstractPlan",
-      evidenceBundles: seededEvidence
+      evidenceBundles: planningEvidence
     });
     const abstractPlan = abstractPlanStage.result;
     this.recordAbstractPlanning(abstractPlanStage.stageNode, abstractPlan);
@@ -412,11 +450,16 @@ export class OrchestratorRuntime {
     const gatherStage = await this.executeStageCapability<GatherResult>(currentNode, {
       phase: "gather",
       title: "Gather",
-      objective: `Gather file, symbol, and evidence findings for:\n${currentNode.objective}`,
+      objective: this.buildPlanningStageObjective(
+        currentNode,
+        "gather",
+        `Gather file, symbol, and evidence findings for:\n${currentNode.objective}`,
+        planningEvidence
+      ),
       kind: "planning",
       role: "gatherer",
       capability: "gather",
-      evidenceBundles: seededEvidence
+      evidenceBundles: planningEvidence
     });
     const gather = gatherStage.result;
     this.mergeProjectStructureReport(gatherStage.stageNode, gather.projectStructure);
@@ -434,7 +477,7 @@ export class OrchestratorRuntime {
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "evidence_consolidation");
     const bundleIdsForConsolidation = [
-      ...seededEvidence.map((bundle) => bundle.id),
+      ...planningEvidence.map((bundle) => bundle.id),
       ...gatheredBundles.map((bundle) => bundle.id)
     ];
     const consolidatedEvidence = this.evidenceStore.mergeBundles({
@@ -972,6 +1015,42 @@ export class OrchestratorRuntime {
     return this.engine.transitionNode(stageNode.id, "done");
   }
 
+  private shouldRunBootstrapSketch(node: PlanNode, seededEvidence: EvidenceBundle[]): boolean {
+    if (!this.enableRootBootstrapSketch) {
+      return false;
+    }
+
+    if (node.depth !== 0 || node.kind !== "planning") {
+      return false;
+    }
+
+    if (!this.isUsableModelForRole(node.assignedModels.gatherer, "gatherer")) {
+      return false;
+    }
+
+    if (seededEvidence.length > 0) {
+      return false;
+    }
+
+    if (!this.isValidModelRef(node.assignedModels.gatherer)) {
+      return false;
+    }
+
+    const workingMemory = this.getWorkingMemorySnapshot(node.runId);
+    const projectStructure = this.getProjectStructureSnapshot(node.runId);
+
+    return workingMemory.facts.length === 0
+      && workingMemory.openQuestions.length === 0
+      && workingMemory.unknowns.length === 0
+      && workingMemory.conflicts.length === 0
+      && workingMemory.decisions.length === 0
+      && projectStructure.summary.trim().length === 0
+      && projectStructure.directories.length === 0
+      && projectStructure.keyFiles.length === 0
+      && projectStructure.entryPoints.length === 0
+      && projectStructure.modules.length === 0;
+  }
+
   private buildStageAssignedModels(parentNode: PlanNode, roles: AssignedModelRole[]): ModelAssignment {
     const assignment: ModelAssignment = {};
 
@@ -1177,6 +1256,10 @@ export class OrchestratorRuntime {
   }
 
   private getWorkflowStage(node: PlanNode, _capability: OrchestratorCapability): OrchestratorWorkflowStage {
+    if (node.role === "stage" && node.title === "Bootstrap Sketch") {
+      return "bootstrap_sketch";
+    }
+
     if (this.isProjectStructureInspectionNode(node)) {
       return "project_structure_inspection";
     }
@@ -1284,9 +1367,6 @@ export class OrchestratorRuntime {
     request: ProjectStructureInspectionRequest,
     attempt: number
   ) {
-    const projectStructure = this.requireProjectStructureMemory(node.runId);
-    projectStructure.recordInspectionObjectives(node.id, request.objectives);
-    projectStructure.recordContradictions(node.id, request.contradictions);
     this.engine.appendEvent(node.runId, node.id, "scheduler_progress", {
       message: "Project structure inspection requested",
       attempt,
@@ -1334,7 +1414,10 @@ export class OrchestratorRuntime {
     const resolution = this.dedupeTextEntries(inspectionSummaries).join(" | ") || "Project structure inspection completed";
     const projectStructure = this.requireProjectStructureMemory(parentNode.runId);
     const snapshot = projectStructure.getSnapshot();
-    const relatedNodeIds = this.collectNodeResolutionScope(parentNode);
+    const relatedNodeIds = new Set([
+      ...this.collectNodeResolutionScope(parentNode),
+      ...this.collectNodeSubtreeIds(childNode)
+    ]);
     const parentOpenQuestions = snapshot.openQuestions
       .filter((question) => question.status === "open" && question.relatedNodeIds.some((nodeId) => relatedNodeIds.has(nodeId)))
       .map((question) => question.question);
@@ -1533,6 +1616,12 @@ export class OrchestratorRuntime {
       evidenceBundles,
       requestUserApproval: (request) => this.handleUserApprovalRequest(node, capability, assignedModel, request),
       requestUserInput: (request) => this.handleUserInputRequest(node, capability, assignedModel, request),
+      reportProgress: (message, details) => {
+        this.engine.appendEvent(node.runId, node.id, "scheduler_progress", {
+          message,
+          ...(details ?? {})
+        });
+      },
       reportExecutionStatus: (state, message, details) => this.recordExecutionStatus(node, state, message, details)
     };
   }
@@ -1869,6 +1958,30 @@ export class OrchestratorRuntime {
     return relatedNodeIds;
   }
 
+  private collectNodeSubtreeIds(node: PlanNode): Set<string> {
+    const relatedNodeIds = new Set<string>();
+    const stack = [node.id];
+
+    while (stack.length > 0) {
+      const currentNodeId = stack.pop();
+      if (!currentNodeId || relatedNodeIds.has(currentNodeId)) {
+        continue;
+      }
+
+      relatedNodeIds.add(currentNodeId);
+      const currentNode = this.engine.getNode(currentNodeId);
+      if (!currentNode) {
+        continue;
+      }
+
+      for (const childNodeId of currentNode.childIds) {
+        stack.push(childNodeId);
+      }
+    }
+
+    return relatedNodeIds;
+  }
+
   private markPendingAcceptanceCriteriaMet(nodeId: string) {
     const node = this.engine.getNode(nodeId);
     if (!node) {
@@ -1953,12 +2066,104 @@ export class OrchestratorRuntime {
   private getProjectStructureInspectionFingerprint(runId: string): string {
     const snapshot = this.getProjectStructureSnapshot(runId);
     return JSON.stringify({
-      summary: snapshot.summary,
-      directories: snapshot.directories.map((entry) => `${entry.path}:${entry.summary}:${entry.confidence}`),
-      keyFiles: snapshot.keyFiles.map((entry) => `${entry.path}:${entry.summary}:${entry.confidence}`),
-      entryPoints: snapshot.entryPoints.map((entry) => `${entry.path}:${entry.role}:${entry.summary}:${entry.confidence}`),
-      modules: snapshot.modules.map((entry) => `${entry.name}:${entry.summary}:${entry.relatedPaths.join("|")}:${entry.confidence}`)
+      // Ignore prose-only summary churn. Repeat detection should key off
+      // concrete structure facts and unresolved structure issues instead.
+      directories: snapshot.directories
+        .map((entry) => `${entry.path}:${entry.summary}:${entry.confidence}`)
+        .sort(),
+      keyFiles: snapshot.keyFiles
+        .map((entry) => `${entry.path}:${entry.summary}:${entry.confidence}`)
+        .sort(),
+      entryPoints: snapshot.entryPoints
+        .map((entry) => `${entry.path}:${entry.role}:${entry.summary}:${entry.confidence}`)
+        .sort(),
+      modules: snapshot.modules
+        .map((entry) => `${entry.name}:${entry.summary}:${entry.relatedPaths.join("|")}:${entry.confidence}`)
+        .sort(),
+      openQuestions: snapshot.openQuestions
+        .filter((entry) => entry.status === "open")
+        .map((entry) => entry.question)
+        .sort(),
+      contradictions: snapshot.contradictions
+        .filter((entry) => entry.status === "open")
+        .map((entry) => entry.summary)
+        .sort()
     });
+  }
+
+  private buildPlanningStageObjective(
+    node: PlanNode,
+    capability: "abstractPlan" | "gather",
+    baseObjective: string,
+    evidenceBundles: EvidenceBundle[]
+  ): string {
+    if (this.getWorkflowStage(node, capability) !== "task_orchestration") {
+      return baseObjective;
+    }
+
+    const memoryCues = this.buildTaskOrchestrationMemoryCues(node.runId, evidenceBundles);
+    if (memoryCues.length === 0) {
+      return baseObjective;
+    }
+
+    return `${baseObjective}\n\nPriority memory cues:\n${memoryCues.map((cue) => `- ${cue}`).join("\n")}`;
+  }
+
+  private buildTaskOrchestrationMemoryCues(runId: string, evidenceBundles: EvidenceBundle[]): string[] {
+    const workingMemory = this.getWorkingMemorySnapshot(runId);
+    const projectStructure = this.getProjectStructureSnapshot(runId);
+    const unresolvedQuestions = this.dedupeTextEntries([
+      ...workingMemory.openQuestions
+        .filter((entry) => entry.status === "open")
+        .map((entry) => entry.question),
+      ...workingMemory.unknowns
+        .filter((entry) => entry.status === "open")
+        .map((entry) => entry.description),
+      ...workingMemory.conflicts
+        .filter((entry) => entry.status === "open")
+        .map((entry) => entry.summary),
+      ...projectStructure.openQuestions
+        .filter((entry) => entry.status === "open")
+        .map((entry) => entry.question),
+      ...projectStructure.contradictions
+        .filter((entry) => entry.status === "open")
+        .map((entry) => entry.summary)
+    ]).slice(0, 3);
+    const recentDecisions = this.dedupeTextEntries(
+      workingMemory.decisions
+        .slice(-3)
+        .map((entry) => `${entry.summary}: ${entry.rationale}`)
+    );
+    const structureAnchors = this.dedupeTextEntries([
+      ...projectStructure.entryPoints.map((entry) => entry.path),
+      ...projectStructure.keyFiles.map((entry) => entry.path),
+      ...projectStructure.modules.flatMap((entry) => entry.relatedPaths),
+      ...projectStructure.directories.map((entry) => entry.path)
+    ]).slice(0, 4);
+    const evidenceAnchors = this.dedupeTextEntries(
+      evidenceBundles.flatMap((bundle) => [
+        bundle.summary,
+        ...bundle.relevantTargets.map((target) => target.filePath ?? target.symbol ?? target.note ?? "")
+      ])
+    )
+      .filter((entry) => entry.length > 0)
+      .slice(0, 4);
+
+    const cues: string[] = [];
+    if (recentDecisions.length > 0) {
+      cues.push(`Recent memory decisions: ${recentDecisions.join(" | ")}`);
+    }
+    if (unresolvedQuestions.length > 0) {
+      cues.push(`Unresolved memory questions: ${unresolvedQuestions.join(" | ")}`);
+    }
+    if (structureAnchors.length > 0) {
+      cues.push(`Known structure anchors: ${structureAnchors.join(" | ")}`);
+    }
+    if (evidenceAnchors.length > 0) {
+      cues.push(`Existing evidence anchors: ${evidenceAnchors.join(" | ")}`);
+    }
+
+    return cues;
   }
 
   private getWorkingMemorySnapshot(runId: string): WorkingMemorySnapshot {

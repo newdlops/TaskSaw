@@ -83,6 +83,13 @@ export class WorkspaceAccessManager {
     this.activeScopes.delete(normalizedPath);
   }
 
+  listKnownWorkspacePaths(): string[] {
+    return [...new Set([
+      ...this.authorizedPaths.values(),
+      ...this.bookmarks.keys()
+    ])];
+  }
+
   resetAllAccess() {
     for (const activeScope of this.activeScopes.values()) {
       activeScope.stopAccessing?.();

@@ -112,6 +112,7 @@ export type ModelInvocationContext = {
   evidenceBundles: EvidenceBundle[];
   requestUserApproval?: (request: OrchestratorApprovalRequestDraft) => Promise<OrchestratorApprovalDecision>;
   requestUserInput?: (request: OrchestratorUserInputRequestDraft) => Promise<OrchestratorUserInputResponse>;
+  reportProgress?: (message: string, details?: Record<string, unknown>) => void;
   reportExecutionStatus?: (state: string, message: string, details?: Record<string, unknown>) => void;
 };
 

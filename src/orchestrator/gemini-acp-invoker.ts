@@ -58,6 +58,7 @@ type GeminiAcpInvokerOptions = {
   cwd?: string;
   env?: Record<string, string>;
   timeoutMs?: number;
+  promptInactivityTimeoutMs?: number;
   modeId?: string;
   fallbackModelIds?: string[];
   invalidStreamRetryCount?: number;
@@ -80,6 +81,9 @@ type GeminiPromptResponse = {
 type GeminiPromptRuntime = {
   agentMessageChunks: string[];
   workspaceRoot: string;
+  touchActivity: () => void;
+  pauseActivity: () => void;
+  resumeActivity: () => void;
   requestPermissionHandler: (params: {
     options?: Array<{
       optionId?: string;
@@ -194,6 +198,7 @@ class TasksawGeminiAcpClient {
       && update.content?.type === "text"
       && typeof update.content.text === "string"
     ) {
+      runtime.touchActivity();
       runtime.agentMessageChunks.push(update.content.text);
     }
 
@@ -259,6 +264,9 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const spawnProcess = options.dependencies?.spawnProcess ?? defaultSpawnProcess;
   const desiredModeId = options.modeId?.trim();
   const startupTimeoutMs = Math.max(5_000, options.timeoutMs ?? 30_000);
+  const promptInactivityTimeoutMs = typeof options.promptInactivityTimeoutMs === "number" && Number.isFinite(options.promptInactivityTimeoutMs)
+    ? Math.max(1_000, Math.trunc(options.promptInactivityTimeoutMs))
+    : null;
   const command = [options.executablePath, ...options.executableArgs, "--acp"];
   const fallbackModelIds = options.fallbackModelIds ?? [];
   const invalidStreamRetryCount = Math.max(0, options.invalidStreamRetryCount ?? 1);
@@ -317,10 +325,18 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
           }
 
           const agentMessageChunks: string[] = [];
-          activeRuntime = {
+          const promptActivity = createInactivityController(
+            promptInactivityTimeoutMs,
+            `Timed out while waiting for Gemini ACP prompt activity for ${capability} with ${modelId}`
+          );
+          const runtime: GeminiPromptRuntime = {
             agentMessageChunks,
             workspaceRoot,
+            touchActivity: () => promptActivity.touch(),
+            pauseActivity: () => promptActivity.pause(),
+            resumeActivity: () => promptActivity.resume(),
             requestPermissionHandler: async (permissionRequest) => {
+              const toolCallSummary = summarizePermissionToolCall(permissionRequest.toolCall);
               const optionsForUi: OrchestratorApprovalOption[] = (permissionRequest.options ?? [])
                 .map((option) => ({
                   optionId: option.optionId?.trim() ?? "",
@@ -331,9 +347,10 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               const allowOption = optionsForUi.find((option) => option.kind === "allow_once")
                 ?? optionsForUi.find((option) => option.kind?.startsWith("allow"))
                 ?? optionsForUi[0];
+              promptActivity.touch();
 
               if (!context.requestUserApproval) {
-                return allowOption
+                const decision: OrchestratorApprovalDecision = allowOption
                   ? {
                       outcome: "selected",
                       optionId: allowOption.optionId
@@ -341,33 +358,71 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                   : {
                       outcome: "cancelled"
                     };
+                context.reportProgress?.(
+                  decision.outcome === "selected"
+                    ? "Gemini tool call auto-approved and resumed"
+                    : "Gemini tool call auto-rejected",
+                  {
+                    capability,
+                    model: modelId,
+                    toolCall: toolCallSummary ?? null
+                  }
+                );
+                promptActivity.touch();
+                return decision;
               }
 
-              return context.requestUserApproval({
-                abortSignal: context.abortSignal,
-                title: permissionRequest.toolCall?.title?.trim() || undefined,
-                message: buildPermissionRequestMessage(capability, modelId),
-                details: buildPermissionRequestDetails(permissionRequest.toolCall),
-                kind: permissionRequest.toolCall?.kind?.trim() || undefined,
-                locations: extractPermissionRequestLocations(permissionRequest.toolCall),
-                options: optionsForUi
-              });
+              promptActivity.pause();
+              try {
+                const decision = await context.requestUserApproval({
+                  abortSignal: context.abortSignal,
+                  title: permissionRequest.toolCall?.title?.trim() || undefined,
+                  message: buildPermissionRequestMessage(capability, modelId),
+                  details: buildPermissionRequestDetails(permissionRequest.toolCall),
+                  kind: permissionRequest.toolCall?.kind?.trim() || undefined,
+                  locations: extractPermissionRequestLocations(permissionRequest.toolCall),
+                  options: optionsForUi
+                });
+                context.reportProgress?.(
+                  decision.outcome === "selected"
+                    ? "Gemini tool call approved and waiting for result"
+                    : "Gemini tool call rejected",
+                  {
+                    capability,
+                    model: modelId,
+                    toolCall: toolCallSummary ?? null,
+                    optionId: decision.optionId ?? null
+                  }
+                );
+                return decision;
+              } finally {
+                promptActivity.resume();
+                promptActivity.touch();
+              }
             }
           };
+          activeRuntime = runtime;
 
           try {
+            context.reportProgress?.("Waiting for Gemini ACP prompt completion", {
+              capability,
+              model: modelId
+            });
             const promptResult = await withAbort(
-              session.connection.prompt({
-                sessionId: session.sessionId,
-                prompt: [
-                  {
-                    type: "text",
-                    text: prompt
-                  }
-                ]
-              }) as Promise<GeminiPromptResponse>,
+              promptActivity.wrap(
+                session.connection.prompt({
+                  sessionId: session.sessionId,
+                  prompt: [
+                    {
+                      type: "text",
+                      text: prompt
+                    }
+                  ]
+                }) as Promise<GeminiPromptResponse>
+              ),
               context.abortSignal,
               async () => {
+                promptActivity.stop();
                 await invalidateSession(session);
               },
               [
@@ -391,6 +446,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               command
             };
           } finally {
+            promptActivity.stop();
             activeRuntime = null;
           }
         } catch (error) {
@@ -654,6 +710,28 @@ function buildPermissionRequestDetails(toolCall: {
   return lines.length > 0 ? lines.join("\n\n") : undefined;
 }
 
+function summarizePermissionToolCall(toolCall: {
+  title?: string;
+  kind?: string;
+  locations?: Array<{ path?: string; uri?: string; label?: string }>;
+} | undefined): string | undefined {
+  if (!toolCall) {
+    return undefined;
+  }
+
+  const title = toolCall.title?.trim();
+  if (title) {
+    return title;
+  }
+
+  const kind = toolCall.kind?.trim();
+  if (kind) {
+    return kind;
+  }
+
+  return extractPermissionRequestLocations(toolCall)[0];
+}
+
 function extractPermissionRequestLocations(toolCall: {
   locations?: Array<{ path?: string; uri?: string; label?: string }>;
 } | undefined): string[] {
@@ -715,6 +793,95 @@ function formatGeminiAcpError(error: unknown): string {
   }
 
   return String(error);
+}
+
+type InactivityController = {
+  wrap: <T>(promise: Promise<T>) => Promise<T>;
+  touch: () => void;
+  pause: () => void;
+  resume: () => void;
+  stop: () => void;
+};
+
+function createInactivityController(timeoutMs: number | null, message: string): InactivityController {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return {
+      wrap: <T>(promise: Promise<T>) => promise,
+      touch: () => undefined,
+      pause: () => undefined,
+      resume: () => undefined,
+      stop: () => undefined
+    };
+  }
+
+  let timer: NodeJS.Timeout | null = null;
+  let paused = false;
+  let stopped = false;
+  let rejectTimeout: ((error: Error) => void) | null = null;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = (error) => reject(error);
+  });
+
+  const schedule = () => {
+    if (paused || stopped) {
+      return;
+    }
+
+    if (timer) {
+      clearTimeout(timer);
+    }
+
+    timer = setTimeout(() => {
+      timer = null;
+      stopped = true;
+      rejectTimeout?.(new Error(message));
+    }, timeoutMs);
+  };
+
+  const clear = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  return {
+    wrap: <T>(promise: Promise<T>) => {
+      schedule();
+      return Promise.race([
+        promise.finally(() => {
+          stopped = true;
+          clear();
+        }),
+        timeoutPromise
+      ]);
+    },
+    touch: () => {
+      if (!paused && !stopped) {
+        schedule();
+      }
+    },
+    pause: () => {
+      if (stopped) {
+        return;
+      }
+
+      paused = true;
+      clear();
+    },
+    resume: () => {
+      if (stopped) {
+        return;
+      }
+
+      paused = false;
+      schedule();
+    },
+    stop: () => {
+      stopped = true;
+      clear();
+    }
+  };
 }
 
 function extractNestedErrorMessage(value: unknown): string | null {

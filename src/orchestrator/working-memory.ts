@@ -48,6 +48,18 @@ export type RecordDecisionInput = {
   relatedNodeIds?: string[];
 };
 
+export function createEmptyWorkingMemorySnapshot(runId: string, updatedAt: string): WorkingMemorySnapshot {
+  return {
+    runId,
+    facts: [],
+    openQuestions: [],
+    unknowns: [],
+    conflicts: [],
+    decisions: [],
+    updatedAt
+  };
+}
+
 export class WorkingMemoryStore {
   private readonly facts = new Map<string, WorkingMemoryFact>();
   private readonly openQuestions = new Map<string, WorkingMemoryQuestion>();

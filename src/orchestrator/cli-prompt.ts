@@ -239,6 +239,15 @@ function buildStageInstructions(
 ): string {
   const workflowStage = context.workflowStage;
 
+  if (workflowStage === "bootstrap_sketch" && capability === "gather") {
+    return [
+      "Produce a low-cost, approximate sketch of the repository before deeper planning starts.",
+      "Limit yourself to top-level structure, likely entrypoints, main runtime boundaries, and a few anchor files or directories.",
+      "Do not over-explore or speculate in detail.",
+      "Return only compact clues that reduce future search cost."
+    ].join(" ");
+  }
+
   if (workflowStage === "project_structure_discovery") {
     if (capability === "abstractPlan") {
       return [
@@ -282,7 +291,9 @@ function buildStageInstructions(
   if (workflowStage === "task_orchestration" && capability === "concretePlan") {
     return [
       "Plan execution using the current projectStructure memory.",
-      "If projectStructure is contradictory or missing critical facts, set needsProjectStructureInspection=true, provide inspectionObjectives, and explain the contradiction in projectStructureContradictions.",
+      "Set needsProjectStructureInspection=true only for repository-structure gaps: contradictory file paths, entrypoints, modules, runtime boundaries, IPC/preload wiring, or renderer DOM locations that must be re-read from the workspace.",
+      "Do not request projectStructure inspection for non-structural gaps such as unsupported product capabilities, missing external quota APIs, absent managed-tool features, auth limitations, or implementation tradeoffs. Treat those as execution-planning facts instead.",
+      "If the key blocker is a missing or unsupported data source rather than ambiguous repository structure, keep needsProjectStructureInspection=false and explain the blocker or fallback in executionNotes or childTasks.",
       "Decide only at the current node level whether more planning is needed.",
       "Set needsMorePlanning=true only if this node must split into separately planned subproblems.",
       "If the current node is already execution-ready, set needsMorePlanning=false, keep childTasks empty when possible, and put the actionable execution detail into executionNotes.",
@@ -296,17 +307,21 @@ function buildStageInstructions(
 
   if (workflowStage === "task_orchestration" && capability === "abstractPlan") {
     return [
-      "Start from the smallest useful next step instead of mapping the whole repository.",
-      "Prefer 1-3 high-signal inspection targets that are most likely to unblock execution planning.",
-      "Do not ask for broad repository exploration unless the task explicitly requires an architecture-wide answer."
+      "Start from the provided evidence, workingMemory, and projectStructure before doing any new search.",
+      "Turn the existing open questions, contradictions, keyFiles, entryPoints, relevantTargets, and recent memory decisions into 1-3 concrete inspection targets.",
+      "If the current memory already names likely files, modules, entrypoints, or managed tool locations, inspect those first instead of widening the search.",
+      "Do not ask for broad repository or external tool exploration unless the current memory is insufficient to name a concrete next target."
     ].join(" ");
   }
 
   if (workflowStage === "task_orchestration" && capability === "gather") {
     return [
+      "Start from the provided evidence, workingMemory, and projectStructure before doing any new search.",
       "Gather only the minimum evidence needed to unblock the next concrete plan or execution step.",
-      "Prefer direct implementation targets over broad repository sweeps.",
-      "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node."
+      "Prefer confirming or disproving the current memory's open questions at the named files, entrypoints, modules, relevantTargets, or managed tool locations before running broader searches.",
+      "If the current memory already suggests a likely absence or integration gap, confirm that directly and return compact evidence instead of expanding the search surface.",
+      "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node.",
+      "Do not search outside the workspace or managed tool installation paths unless the current node explicitly requires it."
     ].join(" ");
   }
 

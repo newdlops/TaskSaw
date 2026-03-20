@@ -519,6 +519,192 @@ test("gemini ACP invoker aborts an in-flight prompt only when cancellation is re
   );
 });
 
+test("gemini ACP invoker times out when the prompt stays inactive", async () => {
+  const fakeChild = new FakeChildProcess();
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      promptInactivityTimeoutMs: 10,
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            constructor(_toClient: () => object) {}
+
+            async initialize() {
+              return {
+                protocolVersion: 1
+              };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              return new Promise<never>(() => undefined);
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  await assert.rejects(
+    adapter.gather!(createContext(TEST_MODEL)),
+    /Timed out while waiting for Gemini ACP prompt activity/
+  );
+});
+
+test("gemini ACP invoker pauses inactivity timeout while awaiting approval and reports tool-call progress", async () => {
+  const fakeChild = new FakeChildProcess();
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      promptInactivityTimeoutMs: 10,
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{
+                    optionId?: string;
+                    kind?: string;
+                  }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<unknown>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return {
+                protocolVersion: 1
+              };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "gemini --status",
+                  kind: "execute"
+                }
+              });
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Gathered through approval",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    requestUserApproval: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Gathered through approval");
+  assert.equal(
+    progressMessages.some((entry) => entry.message === "Waiting for Gemini ACP prompt completion"),
+    true
+  );
+  assert.equal(
+    progressMessages.some((entry) =>
+      entry.message === "Gemini tool call approved and waiting for result"
+      && entry.details?.toolCall === "gemini --status"
+    ),
+    true
+  );
+});
+
 test("gemini ACP invoker retries invalid streams and falls back to another Gemini model", async () => {
   const sessionModelIds: string[] = [];
   let currentModelId = "";

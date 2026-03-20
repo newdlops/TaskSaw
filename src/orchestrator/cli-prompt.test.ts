@@ -1,0 +1,165 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { buildCliPrompt } from "./cli-prompt";
+import { ModelInvocationContext } from "./model-adapter";
+import { ModelRef } from "./types";
+
+const TEST_MODEL: ModelRef = {
+  id: "test-model",
+  provider: "tasksaw-test",
+  model: "test-model",
+  tier: "upper",
+  reasoningEffort: "medium"
+};
+
+function createContext(model: ModelRef): ModelInvocationContext {
+  return {
+    run: {
+      id: "run-test",
+      goal: "Add a compact quota indicator",
+      status: "running",
+      rootNodeId: "node-root",
+      config: {
+        maxDepth: 2,
+        reviewPolicy: "light",
+        plannerBias: "balanced",
+        carefulnessMode: "balanced",
+        defaultBudget: {
+          maxDepth: 2,
+          evidenceBudget: 8,
+          rereadBudget: 4,
+          upperModelCallBudget: 6,
+          reviewBudget: 2
+        }
+      },
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      completedAt: null
+    },
+    node: {
+      id: "node-root",
+      runId: "run-test",
+      parentId: null,
+      childIds: [],
+      kind: "planning",
+      role: "task",
+      stagePhase: null,
+      title: "Root Task",
+      objective: "Add a compact quota indicator",
+      depth: 0,
+      phase: "abstract_plan",
+      assignedModels: {
+        abstractPlanner: model,
+        gatherer: model
+      },
+      reviewPolicy: "light",
+      acceptanceCriteria: {
+        items: []
+      },
+      executionBudget: {
+        maxDepth: 2,
+        evidenceBudget: 8,
+        rereadBudget: 4,
+        upperModelCallBudget: 6,
+        reviewBudget: 2
+      },
+      evidenceBundleIds: [],
+      createdAt: "2026-03-19T00:00:00.000Z",
+      updatedAt: "2026-03-19T00:00:00.000Z",
+      completedAt: null
+    },
+    config: {
+      maxDepth: 2,
+      reviewPolicy: "light",
+      plannerBias: "balanced",
+      carefulnessMode: "balanced",
+      defaultBudget: {
+        maxDepth: 2,
+        evidenceBudget: 8,
+        rereadBudget: 4,
+        upperModelCallBudget: 6,
+        reviewBudget: 2
+      }
+    },
+    assignedModel: model,
+    outputLanguage: "en",
+    abortSignal: new AbortController().signal,
+    workflowStage: "task_orchestration",
+    reviewPolicy: "light",
+    executionBudget: {
+      maxDepth: 2,
+      evidenceBudget: 8,
+      rereadBudget: 4,
+      upperModelCallBudget: 6,
+      reviewBudget: 2
+    },
+    workingMemory: {
+      runId: "run-test",
+      facts: [],
+      openQuestions: [],
+      unknowns: [],
+      conflicts: [],
+      decisions: [],
+      updatedAt: "2026-03-19T00:00:00.000Z"
+    },
+    projectStructure: {
+      runId: "run-test",
+      summary: "Quota UI work touches the main and renderer layers",
+      directories: [],
+      keyFiles: [],
+      entryPoints: [],
+      modules: [],
+      openQuestions: [],
+      contradictions: [],
+      updatedAt: "2026-03-19T00:00:00.000Z"
+    },
+    evidenceBundles: []
+  };
+}
+
+test("task orchestration abstract plan prompt prioritizes existing memory before new search", () => {
+  const prompt = buildCliPrompt("abstractPlan", createContext(TEST_MODEL));
+
+  assert.match(
+    prompt,
+    /Start from the provided evidence, workingMemory, and projectStructure before doing any new search\./
+  );
+  assert.match(
+    prompt,
+    /Turn the existing open questions, contradictions, keyFiles, entryPoints, relevantTargets, and recent memory decisions into 1-3 concrete inspection targets\./
+  );
+});
+
+test("task orchestration gather prompt forbids broad search before checking memory-derived targets", () => {
+  const prompt = buildCliPrompt("gather", createContext(TEST_MODEL));
+
+  assert.match(
+    prompt,
+    /Start from the provided evidence, workingMemory, and projectStructure before doing any new search\./
+  );
+  assert.match(
+    prompt,
+    /Prefer confirming or disproving the current memory's open questions at the named files, entrypoints, modules, relevantTargets, or managed tool locations before running broader searches\./
+  );
+  assert.match(
+    prompt,
+    /Do not search outside the workspace or managed tool installation paths unless the current node explicitly requires it\./
+  );
+});
+
+test("task orchestration concrete plan prompt distinguishes structural gaps from missing external capabilities", () => {
+  const prompt = buildCliPrompt("concretePlan", createContext(TEST_MODEL));
+
+  assert.match(
+    prompt,
+    /Set needsProjectStructureInspection=true only for repository-structure gaps: contradictory file paths, entrypoints, modules, runtime boundaries, IPC\/preload wiring, or renderer DOM locations that must be re-read from the workspace\./
+  );
+  assert.match(
+    prompt,
+    /Do not request projectStructure inspection for non-structural gaps such as unsupported product capabilities, missing external quota APIs, absent managed-tool features, auth limitations, or implementation tradeoffs\./
+  );
+  assert.match(
+    prompt,
+    /If the key blocker is a missing or unsupported data source rather than ambiguous repository structure, keep needsProjectStructureInspection=false and explain the blocker or fallback in executionNotes or childTasks\./
+  );
+});

@@ -45,6 +45,7 @@ export const OUTPUT_LANGUAGE_CODES = ["en", "ko"] as const;
 export type OutputLanguageCode = (typeof OUTPUT_LANGUAGE_CODES)[number];
 
 export const ORCHESTRATOR_WORKFLOW_STAGES = [
+  "bootstrap_sketch",
   "project_structure_discovery",
   "project_structure_inspection",
   "task_orchestration"
@@ -388,6 +389,7 @@ export type PlanNode = {
 export type Run = {
   id: string;
   goal: string;
+  workspacePath?: string | null;
   language?: OutputLanguageCode;
   status: RunStatus;
   rootNodeId: string;
@@ -462,6 +464,7 @@ export type ContinuationSeed = {
 
 export type CreateRunInput = {
   goal: string;
+  workspacePath?: string | null;
   language?: OutputLanguageCode;
   title?: string;
   objective?: string;

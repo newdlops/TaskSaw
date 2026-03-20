@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createEmptyProjectStructureSnapshot } from "./project-structure-memory";
 import { OrchestratorFinalReport, RunSnapshot } from "./types";
+import { WorkspaceContextCache } from "./workspace-context-cache";
 
 export class OrchestratorPersistence {
   constructor(private readonly rootDirectory: string) {
@@ -21,6 +22,11 @@ export class OrchestratorPersistence {
 
     if (snapshot.finalReport) {
       this.writeJsonFile(path.join(runDirectory, "final-report.json"), snapshot.finalReport);
+    }
+
+    const workspacePath = snapshot.run.workspacePath?.trim();
+    if (workspacePath && snapshot.run.status === "done" && snapshot.finalReport) {
+      new WorkspaceContextCache(workspacePath).saveSnapshot(snapshot);
     }
   }
 
@@ -49,6 +55,41 @@ export class OrchestratorPersistence {
 
   getRunDirectory(runId: string): string {
     return path.join(this.rootDirectory, runId);
+  }
+
+  loadWorkspaceSeed(workspacePath: string): import("./types").ContinuationSeed | undefined {
+    return new WorkspaceContextCache(workspacePath).loadSeed();
+  }
+
+  clearWorkspaceCache(workspacePath: string) {
+    new WorkspaceContextCache(workspacePath).clear();
+  }
+
+  clearWorkspaceCachesForSavedRuns() {
+    for (const workspacePath of this.listWorkspacePaths()) {
+      this.clearWorkspaceCache(workspacePath);
+    }
+  }
+
+  private listWorkspacePaths(): string[] {
+    if (!fs.existsSync(this.rootDirectory)) {
+      return [];
+    }
+
+    const workspaces = new Set<string>();
+    for (const entry of fs.readdirSync(this.rootDirectory, { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      const run = this.readOptionalJsonFile<RunSnapshot["run"]>(path.join(this.getRunDirectory(entry.name), "run.json"));
+      const workspacePath = run?.workspacePath?.trim();
+      if (workspacePath) {
+        workspaces.add(workspacePath);
+      }
+    }
+
+    return [...workspaces];
   }
 
   private writeJsonFile(filePath: string, value: unknown) {

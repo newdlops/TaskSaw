@@ -17,6 +17,9 @@ export type ManagedToolStatus = {
   displayName: string;
   installed: boolean;
   version: string | null;
+  usage?: {
+    remainingPercent: number;
+  } | null;
 };
 
 export type ManagedToolModel = {
