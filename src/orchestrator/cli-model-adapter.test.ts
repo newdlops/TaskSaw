@@ -81,6 +81,7 @@ function createContext(model: ModelRef): ModelInvocationContext {
       }
     },
     assignedModel: model,
+    outputLanguage: "en",
     abortSignal: new AbortController().signal,
     workflowStage: "task_orchestration",
     reviewPolicy: "light",

@@ -13,6 +13,7 @@ export type CliPromptEnvelope = {
   nodeTitle: string;
   objective: string;
   goal: string;
+  outputLanguage: ModelInvocationContext["outputLanguage"];
   assignedModel: {
     id: string;
     provider: string;
@@ -116,7 +117,7 @@ const PHASE_RESPONSE_SCHEMAS: Record<OrchestratorCapability, string> = {
   concretePlan:
     '{"summary": string, "childTasks": Array<{"title": string, "objective": string, "importance": "critical" | "high" | "medium" | "low", "assignedModels": ModelAssignment, "reviewPolicy"?: ReviewPolicy, "acceptanceCriteria"?: AcceptanceCriteria, "executionBudget"?: Partial<ExecutionBudget>}>, "executionNotes": string[], "needsMorePlanning"?: boolean, "needsProjectStructureInspection"?: boolean, "inspectionObjectives"?: string[], "projectStructureContradictions"?: string[]}',
   review:
-    '{"summary": string, "approved": boolean, "followUpQuestions": string[]}',
+    '{"summary": string, "followUpQuestions": string[], "approved"?: boolean, "nextActions"?: Array<{"title": string, "objective": string, "rationale": string, "priority": "critical" | "high" | "medium" | "low"}>, "carryForward"?: {"facts": string[], "openQuestions": string[], "projectPaths": string[], "evidenceSummaries": string[]}}',
   execute:
     '{"summary": string, "outputs": string[], "completed"?: boolean, "blockedReason"?: string}',
   verify:
@@ -137,6 +138,7 @@ export function buildCliPrompt(capability: OrchestratorCapability, context: Mode
     nodeTitle: context.node.title,
     objective: context.node.objective,
     goal: context.run.goal,
+    outputLanguage: context.outputLanguage,
     assignedModel: {
       id: context.assignedModel.id,
       provider: context.assignedModel.provider,
@@ -200,7 +202,7 @@ export function buildCliPrompt(capability: OrchestratorCapability, context: Mode
     }
   };
 
-  const stageInstructions = buildStageInstructions(capability, context.workflowStage);
+  const stageInstructions = buildStageInstructions(capability, context);
 
   return [
     "You are the TaskSaw orchestration model adapter.",
@@ -233,8 +235,10 @@ export function extractCliPromptEnvelope(prompt: string): CliPromptEnvelope {
 
 function buildStageInstructions(
   capability: OrchestratorCapability,
-  workflowStage: ModelInvocationContext["workflowStage"]
+  context: ModelInvocationContext
 ): string {
+  const workflowStage = context.workflowStage;
+
   if (workflowStage === "project_structure_discovery") {
     if (capability === "abstractPlan") {
       return [
@@ -290,11 +294,41 @@ function buildStageInstructions(
     ].join(" ");
   }
 
+  if (workflowStage === "task_orchestration" && capability === "abstractPlan") {
+    return [
+      "Start from the smallest useful next step instead of mapping the whole repository.",
+      "Prefer 1-3 high-signal inspection targets that are most likely to unblock execution planning.",
+      "Do not ask for broad repository exploration unless the task explicitly requires an architecture-wide answer."
+    ].join(" ");
+  }
+
+  if (workflowStage === "task_orchestration" && capability === "gather") {
+    return [
+      "Gather only the minimum evidence needed to unblock the next concrete plan or execution step.",
+      "Prefer direct implementation targets over broad repository sweeps.",
+      "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node."
+    ].join(" ");
+  }
+
   if (workflowStage === "task_orchestration" && capability === "execute") {
     return [
       "Carry out the requested implementation work instead of restating the plan.",
       "Set completed=true only if the execution actually changed or completed the intended work.",
       "If execution was blocked, denied, or intentionally not performed, set completed=false and explain the concrete reason in blockedReason."
+    ].join(" ");
+  }
+
+  if (capability === "review") {
+    return [
+      "This review happens after execution and verification.",
+      "Do not approve, reject, or block work in this phase.",
+      "Use the review only to summarize the completed work, the verification outcome, and any remaining follow-up questions.",
+      "Propose 0-3 concrete nextActions only when there is a meaningful follow-up task.",
+      "Each nextAction should be execution-ready enough to become the next run goal.",
+      "Use carryForward to list only the facts, openQuestions, projectPaths, and evidenceSummaries that should seed the next action.",
+      context.outputLanguage === "ko"
+        ? "Write the review summary, followUpQuestions, nextActions, and carryForward text in Korean."
+        : "Write the review summary, followUpQuestions, nextActions, and carryForward text in English."
     ].join(" ");
   }
 

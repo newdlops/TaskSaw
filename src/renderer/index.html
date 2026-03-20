@@ -96,7 +96,8 @@
           <div class="topbar-group">
             <button id="orchestrator-refresh" type="button">Refresh Runs</button>
             <button id="orchestrator-stop" type="button">Stop Run</button>
-            <button id="orchestrator-continue" type="button">Continue Selected</button>
+            <button id="orchestrator-continue" type="button">Resume Selected</button>
+            <button id="orchestrator-run-next-action" type="button">Run Next Action</button>
             <button id="orchestrator-run" type="button">Run Orchestrator</button>
           </div>
         </div>
@@ -145,6 +146,15 @@
                     <button id="orchestrator-detail-tab-memory" class="orchestrator-detail-tab" type="button" role="tab" aria-selected="false">Working Memory</button>
                   </div>
                 </div>
+
+                <section id="orchestrator-next-actions" class="orchestrator-node-approval-card orchestrator-next-actions-card" hidden>
+                  <div class="orchestrator-section-header">
+                    <div id="orchestrator-next-actions-title" class="section-title section-title-small">Review Next Actions</div>
+                    <span id="orchestrator-next-actions-status" class="orchestrator-node-approval-status">0</span>
+                  </div>
+                  <div id="orchestrator-next-actions-summary" class="orchestrator-next-actions-summary"></div>
+                  <div id="orchestrator-next-actions-list" class="orchestrator-next-actions-list"></div>
+                </section>
 
                 <section id="orchestrator-detail-panel-node" class="orchestrator-node-live-card">
                   <div class="orchestrator-node-live-header">

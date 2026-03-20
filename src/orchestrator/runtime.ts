@@ -131,13 +131,6 @@ export class MissingChildTaskModelAssignmentError extends Error {
   }
 }
 
-export class ReviewRejectedError extends Error {
-  constructor(nodeId: string, summary: string) {
-    super(`Review rejected node ${nodeId}: ${summary}`);
-    this.name = "ReviewRejectedError";
-  }
-}
-
 export class VerificationFailedError extends Error {
   constructor(nodeId: string, summary: string) {
     super(`Verification failed for node ${nodeId}: ${summary}`);
@@ -323,7 +316,12 @@ export class OrchestratorRuntime {
       this.throwIfCancelled(run.id, rootNode.id);
       const rootExecution = await this.executeNode(rootNode.id, allowDecomposition);
       const rootPhaseResults = this.requireRootPhaseResults(rootExecution.phaseResults, rootNode.id);
-      const finalReport = this.buildFinalReport(run.id, rootExecution.outputs, rootExecution.verifySummaries);
+      const finalReport = this.buildFinalReport(
+        run.id,
+        rootExecution.outputs,
+        rootExecution.verifySummaries,
+        rootPhaseResults.review
+      );
       this.finalReports.set(run.id, finalReport);
       this.engine.appendEvent(run.id, rootExecution.node.id, "run_completed", {
         summary: finalReport.summary,
@@ -645,33 +643,6 @@ export class OrchestratorRuntime {
     let review: ReviewResult | undefined;
     const phaseResults: NodePhaseResults = {};
 
-    if (this.shouldRunReview(currentNode)) {
-      this.throwIfCancelled(currentNode.runId, currentNode.id);
-      currentNode = this.engine.transitionNode(nodeId, "review");
-      this.recordExecutionStatus(currentNode, "reviewing", "Reviewing execution readiness");
-      const reviewStage = await this.executeStageCapability<ReviewResult>(currentNode, {
-        phase: "review",
-        title: "Review",
-        objective: `Review the execution readiness for:\n${currentNode.objective}`,
-        kind: "execution",
-        role: "reviewer",
-        capability: "review",
-        evidenceBundles: executionEvidence
-      });
-      review = reviewStage.result;
-      phaseResults.review = review;
-      this.recordDecision(currentNode.runId, reviewStage.stageNode.id, "Review completed", review.summary);
-      this.recordExecutionStatus(
-        currentNode,
-        review.approved ? "review_approved" : "review_rejected",
-        review.summary
-      );
-
-      if (!review.approved) {
-        throw new ReviewRejectedError(currentNode.id, review.summary);
-      }
-    }
-
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "execute");
     this.recordExecutionStatus(currentNode, "running", "Executing routed model command");
@@ -713,9 +684,9 @@ export class OrchestratorRuntime {
     phaseResults.verify = verify;
     this.recordDecision(currentNode.runId, verifyStage.stageNode.id, "Verification completed", verify.summary);
     this.recordExecutionStatus(currentNode, verify.passed ? "completed" : "verification_failed", verify.summary);
-
-    if (!verify.passed) {
-      throw new VerificationFailedError(currentNode.id, verify.summary);
+    review = await this.runFinalExecutionReviewIfNeeded(currentNode, executionEvidence, execute, verify);
+    if (review) {
+      phaseResults.review = review;
     }
 
     this.resolveCoveredQuestions(currentNode, {
@@ -725,6 +696,11 @@ export class OrchestratorRuntime {
       verifySummaries: [verify.summary, ...verify.findings],
       evidenceBundles: executionEvidence
     });
+
+    if (!verify.passed) {
+      throw new VerificationFailedError(currentNode.id, verify.summary);
+    }
+
     this.markPendingAcceptanceCriteriaMet(currentNode.id);
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "done");
@@ -736,6 +712,56 @@ export class OrchestratorRuntime {
       verifySummaries: [verify.summary],
       verificationPassed: verify.passed
     };
+  }
+
+  private async runFinalExecutionReviewIfNeeded(
+    node: PlanNode,
+    executionEvidence: EvidenceBundle[],
+    execute: ExecuteResult,
+    verify: VerifyResult
+  ): Promise<ReviewResult | undefined> {
+    if (!this.shouldRunReview(node)) {
+      return undefined;
+    }
+
+    this.throwIfCancelled(node.runId, node.id);
+    this.recordExecutionStatus(node, "reviewing", "Reviewing completed execution result");
+
+    try {
+      const reviewStage = await this.executeStageCapability<ReviewResult>(node, {
+        phase: "review",
+        title: "Review",
+        objective: [
+          `Review the completed execution result for:\n${node.objective}`,
+          `Execution summary:\n${execute.summary}`,
+          execute.outputs.length > 0
+            ? `Execution outputs:\n${execute.outputs.join("\n")}`
+            : null,
+          `Verification summary:\n${verify.summary}`,
+          verify.findings.length > 0
+            ? `Verification findings:\n${verify.findings.join("\n")}`
+            : null
+        ].filter((section): section is string => Boolean(section)).join("\n\n"),
+        kind: "execution",
+        role: "reviewer",
+        capability: "review",
+        evidenceBundles: executionEvidence,
+        escalateOnFailure: false
+      });
+      const review = reviewStage.result;
+      this.recordDecision(node.runId, reviewStage.stageNode.id, "Review completed", review.summary);
+      this.recordExecutionStatus(node, "review_completed", review.summary);
+      return review;
+    } catch (error) {
+      if (this.isCancellationError(error)) {
+        throw this.toCancellationError(error, node.runId, node.id);
+      }
+
+      const failureSummary = `Final review failed: ${this.formatRuntimeError(error)}`;
+      this.recordDecision(node.runId, node.id, "Review failed", failureSummary);
+      this.recordExecutionStatus(node, "review_failed", failureSummary);
+      return undefined;
+    }
   }
 
   private async executeExecutionLeafForPlan(
@@ -971,6 +997,7 @@ export class OrchestratorRuntime {
       role: AssignedModelRole;
       capability: OrchestratorCapability;
       evidenceBundles: EvidenceBundle[];
+      escalateOnFailure?: boolean;
     }
   ): Promise<{ stageNode: PlanNode; result: TResult }> {
     const stageNode = this.createStageNode(parentNode, {
@@ -1011,7 +1038,9 @@ export class OrchestratorRuntime {
           error: this.formatRuntimeError(error)
         });
       }
-      this.escalateRunIfPossible(stageNode.id);
+      if (input.escalateOnFailure !== false) {
+        this.escalateRunIfPossible(stageNode.id);
+      }
       throw error;
     }
   }
@@ -1147,13 +1176,9 @@ export class OrchestratorRuntime {
     };
   }
 
-  private getWorkflowStage(node: PlanNode, capability: OrchestratorCapability): OrchestratorWorkflowStage {
+  private getWorkflowStage(node: PlanNode, _capability: OrchestratorCapability): OrchestratorWorkflowStage {
     if (this.isProjectStructureInspectionNode(node)) {
       return "project_structure_inspection";
-    }
-
-    if (node.depth === 0 && (capability === "abstractPlan" || capability === "gather")) {
-      return "project_structure_discovery";
     }
 
     return "task_orchestration";
@@ -1494,6 +1519,7 @@ export class OrchestratorRuntime {
       node,
       config: run.config,
       assignedModel,
+      outputLanguage: run.language ?? "ko",
       abortSignal: this.abortController.signal,
       workflowStage: this.getWorkflowStage(node, capability),
       reviewPolicy: node.reviewPolicy,
@@ -1855,10 +1881,16 @@ export class OrchestratorRuntime {
     }
   }
 
-  private buildFinalReport(runId: string, outputs: string[], verifySummaries: string[]): OrchestratorFinalReport {
+  private buildFinalReport(
+    runId: string,
+    outputs: string[],
+    verifySummaries: string[],
+    review?: ReviewResult
+  ): OrchestratorFinalReport {
     const workingMemory = this.getWorkingMemorySnapshot(runId);
     const projectStructure = this.getProjectStructureSnapshot(runId);
     const unresolvedRisks = this.dedupeTextEntries([
+      ...(review?.followUpQuestions ?? []),
       ...workingMemory.openQuestions.filter((question) => question.status === "open").map((question) => question.question),
       ...workingMemory.unknowns.filter((unknown) => unknown.status === "open").map((unknown) => unknown.description),
       ...workingMemory.conflicts.filter((conflict) => conflict.status === "open").map((conflict) => conflict.summary),
@@ -1872,9 +1904,11 @@ export class OrchestratorRuntime {
 
     return {
       runId,
-      summary: verifySummaries.at(-1) ?? "Run completed",
+      summary: review?.summary ?? verifySummaries.at(-1) ?? "Run completed",
       outcomes: this.dedupeTextEntries(outputs),
       unresolvedRisks,
+      nextActions: review?.nextActions ?? [],
+      carryForward: review?.carryForward,
       createdAt: this.now()
     };
   }

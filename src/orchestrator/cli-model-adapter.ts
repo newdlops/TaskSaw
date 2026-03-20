@@ -437,7 +437,9 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
         return {
           summary: this.readString(record.summary, "No review summary returned"),
           approved: this.readBoolean(record.approved, followUpQuestions.length === 0),
-          followUpQuestions
+          followUpQuestions,
+          nextActions: this.normalizeReviewNextActions(record.nextActions ?? record.followUpTasks ?? record.nextSteps),
+          carryForward: this.normalizeReviewCarryForward(record.carryForward ?? record.handoff ?? record.seedContext)
         } satisfies ReviewResult;
       }
 
@@ -659,6 +661,56 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
     }
 
     return undefined;
+  }
+
+  private normalizeReviewNextActions(value: unknown): ReviewResult["nextActions"] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    const nextActions: ReviewResult["nextActions"] = [];
+    for (const item of value) {
+      const record = this.asOptionalRecord(item);
+      if (!record) {
+        continue;
+      }
+
+      const title = this.readString(record.title ?? record.name, "");
+      const objective = this.readString(record.objective ?? record.goal ?? record.description, "");
+      if (!title || !objective) {
+        continue;
+      }
+
+      nextActions.push({
+        title,
+        objective,
+        rationale: this.readString(record.rationale ?? record.why ?? record.note, objective),
+        priority: this.normalizeChildTaskImportance(record.priority ?? record.importance) ?? "medium"
+      });
+    }
+
+    return nextActions;
+  }
+
+  private normalizeReviewCarryForward(value: unknown): ReviewResult["carryForward"] {
+    const record = this.asOptionalRecord(value);
+    if (!record) {
+      return undefined;
+    }
+
+    const carryForward = {
+      facts: this.normalizeStringArray(record.facts ?? record.factStatements),
+      openQuestions: this.normalizeStringArray(record.openQuestions ?? record.questions),
+      projectPaths: this.normalizeStringArray(record.projectPaths ?? record.paths),
+      evidenceSummaries: this.normalizeStringArray(record.evidenceSummaries ?? record.evidence)
+    } satisfies NonNullable<ReviewResult["carryForward"]>;
+
+    return carryForward.facts.length > 0
+      || carryForward.openQuestions.length > 0
+      || carryForward.projectPaths.length > 0
+      || carryForward.evidenceSummaries.length > 0
+      ? carryForward
+      : undefined;
   }
 
   private normalizeConfidence(value: unknown): ConfidenceLevel {

@@ -17,6 +17,37 @@ type ToolManagerTestDouble = {
     authenticated: boolean;
     message: string | null;
   }>;
+  prepareWorkspaceContext: (toolId: "gemini" | "codex", workspacePath?: string | null) => Promise<void>;
+  importManagedGeminiModelsModule: () => Promise<{
+    PREVIEW_GEMINI_MODEL: string;
+    PREVIEW_GEMINI_3_1_MODEL: string;
+    PREVIEW_GEMINI_3_1_CUSTOM_TOOLS_MODEL: string;
+    PREVIEW_GEMINI_FLASH_MODEL: string;
+    PREVIEW_GEMINI_3_1_FLASH_LITE_MODEL: string;
+    DEFAULT_GEMINI_MODEL: string;
+    DEFAULT_GEMINI_FLASH_MODEL: string;
+    DEFAULT_GEMINI_FLASH_LITE_MODEL: string;
+    PREVIEW_GEMINI_MODEL_AUTO: string;
+    DEFAULT_GEMINI_MODEL_AUTO: string;
+    VALID_GEMINI_MODELS: Set<string>;
+    resolveModel: (
+      requestedModel: string,
+      useGemini3_1?: boolean,
+      useCustomToolModel?: boolean,
+      hasAccessToPreview?: boolean
+    ) => string;
+    resolveClassifierModel: (
+      requestedModel: string,
+      modelAlias: string,
+      useGemini3_1?: boolean,
+      useCustomToolModel?: boolean
+    ) => string;
+  }>;
+};
+
+type MutableToolManagerInternals = {
+  prepareWorkspaceContext: (toolId: "gemini" | "codex", workspacePath?: string | null) => Promise<void>;
+  importManagedGeminiModelsModule: ToolManagerTestDouble["importManagedGeminiModelsModule"];
 };
 
 function createTempDirectory(prefix: string): string {
@@ -249,5 +280,74 @@ test("tool manager treats Gemini oauth login as logged out when managed credenti
     fs.rmSync(userHome, { recursive: true, force: true });
     fs.rmSync(userData, { recursive: true, force: true });
     fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("tool manager resolves Gemini auto aliases to concrete catalog models before routing", async () => {
+  const originalGeminiModel = process.env.GEMINI_MODEL;
+  const userData = createTempDirectory("tasksaw-user-data-");
+
+  process.env.GEMINI_MODEL = "auto-gemini-3";
+
+  try {
+    const manager = new ToolManager(userData);
+    const managerStub = manager as unknown as MutableToolManagerInternals;
+
+    managerStub.prepareWorkspaceContext = async () => undefined;
+    managerStub.importManagedGeminiModelsModule = async () => ({
+      PREVIEW_GEMINI_MODEL: "gemini-3-pro-preview",
+      PREVIEW_GEMINI_3_1_MODEL: "gemini-3.1-pro-preview",
+      PREVIEW_GEMINI_3_1_CUSTOM_TOOLS_MODEL: "gemini-3.1-pro-preview-customtools",
+      PREVIEW_GEMINI_FLASH_MODEL: "gemini-3-flash-preview",
+      PREVIEW_GEMINI_3_1_FLASH_LITE_MODEL: "gemini-3.1-flash-lite-preview",
+      DEFAULT_GEMINI_MODEL: "gemini-2.5-pro",
+      DEFAULT_GEMINI_FLASH_MODEL: "gemini-2.5-flash",
+      DEFAULT_GEMINI_FLASH_LITE_MODEL: "gemini-2.5-flash-lite",
+      PREVIEW_GEMINI_MODEL_AUTO: "auto-gemini-3",
+      DEFAULT_GEMINI_MODEL_AUTO: "auto-gemini-2.5",
+      VALID_GEMINI_MODELS: new Set([
+        "gemini-3-pro-preview",
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-pro-preview-customtools",
+        "gemini-3-flash-preview",
+        "gemini-3.1-flash-lite-preview",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite"
+      ]),
+      resolveModel: (requestedModel: string, useGemini3_1?: boolean) => {
+        if (requestedModel === "auto-gemini-3") {
+          return useGemini3_1 ? "gemini-3.1-pro-preview" : "gemini-3-pro-preview";
+        }
+
+        if (requestedModel === "auto-gemini-2.5") {
+          return "gemini-2.5-pro";
+        }
+
+        return requestedModel;
+      },
+      resolveClassifierModel: (requestedModel: string, modelAlias: string, useGemini3_1?: boolean) => {
+        if (modelAlias !== "flash") {
+          return requestedModel;
+        }
+
+        return useGemini3_1 ? "gemini-3.1-flash-lite-preview" : "gemini-3-flash-preview";
+      }
+    });
+
+    const catalog = await manager.discoverModelCatalog("gemini");
+
+    assert.equal(catalog.currentModelId, "gemini-3.1-pro-preview");
+    assert.equal(catalog.recommendedPlannerModelId, "gemini-3.1-pro-preview");
+    assert.equal(catalog.recommendedWorkerModelId, "gemini-3.1-flash-lite-preview");
+    assert.ok(catalog.models.every((model) => !model.model.startsWith("auto-")));
+  } finally {
+    if (originalGeminiModel === undefined) {
+      delete process.env.GEMINI_MODEL;
+    } else {
+      process.env.GEMINI_MODEL = originalGeminiModel;
+    }
+
+    fs.rmSync(userData, { recursive: true, force: true });
   }
 });

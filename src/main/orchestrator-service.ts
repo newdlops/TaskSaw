@@ -21,6 +21,7 @@ import {
 import { ToolManager } from "./tool-manager";
 import {
   ManagedToolId,
+  OrchestratorContinuationMode,
   ManagedToolModelCatalog,
   OrchestratorMode,
   OrchestratorRunSummary,
@@ -100,7 +101,10 @@ export class OrchestratorService {
 
     const requestedMaxDepth = this.normalizeRequestedMaxDepth(input.maxDepth);
     const modeConfig = await this.resolveModeConfig(input.mode, workspacePath);
-    const continuation = this.loadContinuationSeed(input.continueFromRunId);
+    const continuationSnapshot = this.loadContinuationSnapshot(input.continueFromRunId);
+    const continuationMode = this.normalizeContinuationMode(input.continuationMode);
+    const continuation = this.buildContinuationSeed(continuationSnapshot, continuationMode);
+    const goal = this.resolveRunGoal(input, continuationSnapshot);
     let activeRunId: string | null = null;
     const runtime = new OrchestratorRuntime(await this.createRegistry(workspacePath, modeConfig.toolModels), {
       persistence: this.persistence,
@@ -118,9 +122,10 @@ export class OrchestratorService {
 
     try {
       const result = await runtime.executeScheduledRun({
-        goal: input.goal,
+        goal,
+        language: input.language,
         title: modeConfig.title,
-        objective: input.goal,
+        objective: goal,
         config: requestedMaxDepth === undefined
           ? undefined
           : {
@@ -211,19 +216,174 @@ export class OrchestratorService {
     return Math.min(6, Math.max(1, normalized));
   }
 
-  private loadContinuationSeed(runId: string | null | undefined): ContinuationSeed | undefined {
+  private loadContinuationSnapshot(runId: string | null | undefined): RunSnapshot | undefined {
     const trimmedRunId = runId?.trim();
     if (!trimmedRunId) {
       return undefined;
     }
 
-    const snapshot = this.persistence.loadSnapshot(trimmedRunId);
+    return this.persistence.loadSnapshot(trimmedRunId);
+  }
+
+  private normalizeContinuationMode(value: OrchestratorContinuationMode | null | undefined): OrchestratorContinuationMode {
+    return value === "next_action" ? "next_action" : "resume";
+  }
+
+  private resolveRunGoal(input: RunOrchestratorInput, continuationSnapshot: RunSnapshot | undefined): string {
+    const explicitGoal = input.goal.trim();
+    if (explicitGoal.length > 0) {
+      return explicitGoal;
+    }
+
+    if (input.continuationMode === "next_action" && continuationSnapshot) {
+      const nextAction = this.getContinuationNextAction(continuationSnapshot, input.nextActionIndex);
+      if (nextAction) {
+        return nextAction.objective;
+      }
+    }
+
+    return continuationSnapshot?.run.goal ?? explicitGoal;
+  }
+
+  private buildContinuationSeed(
+    snapshot: RunSnapshot | undefined,
+    continuationMode: OrchestratorContinuationMode
+  ): ContinuationSeed | undefined {
+    if (!snapshot) {
+      return undefined;
+    }
+
+    if (continuationMode === "next_action") {
+      return this.buildTrimmedContinuationSeed(snapshot);
+    }
+
     return {
       sourceRunId: snapshot.run.id,
       evidenceBundles: snapshot.evidenceBundles,
       workingMemory: snapshot.workingMemory,
       projectStructure: snapshot.projectStructure
     };
+  }
+
+  private buildTrimmedContinuationSeed(snapshot: RunSnapshot): ContinuationSeed {
+    const carryForward = snapshot.finalReport?.carryForward;
+    if (!carryForward) {
+      return {
+        sourceRunId: snapshot.run.id,
+        evidenceBundles: snapshot.evidenceBundles,
+        workingMemory: snapshot.workingMemory,
+        projectStructure: snapshot.projectStructure
+      };
+    }
+
+    const factKeys = new Set(carryForward.facts.map((entry) => this.normalizeContinuationText(entry)).filter(Boolean));
+    const questionKeys = new Set(carryForward.openQuestions.map((entry) => this.normalizeContinuationText(entry)).filter(Boolean));
+    const pathKeys = new Set(carryForward.projectPaths.map((entry) => entry.trim()).filter(Boolean));
+    const evidenceKeys = new Set(carryForward.evidenceSummaries.map((entry) => this.normalizeContinuationText(entry)).filter(Boolean));
+
+    const evidenceBundles = snapshot.evidenceBundles.filter((bundle) => {
+      const summaryKey = this.normalizeContinuationText(bundle.summary);
+      if (evidenceKeys.has(summaryKey)) {
+        return true;
+      }
+
+      return bundle.relevantTargets.some((target) => this.pathMatches(pathKeys, target.filePath))
+        || bundle.facts.some((fact) => factKeys.has(this.normalizeContinuationText(fact.statement)))
+        || bundle.unknowns.some((unknown) => questionKeys.has(this.normalizeContinuationText(unknown.question)));
+    });
+
+    const workingMemory = {
+      ...snapshot.workingMemory,
+      facts: snapshot.workingMemory.facts.filter((fact) =>
+        factKeys.has(this.normalizeContinuationText(fact.statement))
+        || this.referencesPath(pathKeys, fact.statement)
+      ),
+      openQuestions: snapshot.workingMemory.openQuestions.filter((question) =>
+        questionKeys.has(this.normalizeContinuationText(question.question))
+      ),
+      unknowns: snapshot.workingMemory.unknowns.filter((unknown) =>
+        questionKeys.has(this.normalizeContinuationText(unknown.description))
+      ),
+      conflicts: snapshot.workingMemory.conflicts.filter((conflict) =>
+        this.referencesPath(pathKeys, conflict.summary)
+        || questionKeys.has(this.normalizeContinuationText(conflict.summary))
+      ),
+      decisions: snapshot.workingMemory.decisions.filter((decision) =>
+        this.referencesPath(pathKeys, decision.summary)
+        || factKeys.has(this.normalizeContinuationText(decision.summary))
+      )
+    };
+
+    const projectStructure = {
+      ...snapshot.projectStructure,
+      directories: snapshot.projectStructure.directories.filter((entry) => this.pathMatches(pathKeys, entry.path)),
+      keyFiles: snapshot.projectStructure.keyFiles.filter((entry) => this.pathMatches(pathKeys, entry.path)),
+      entryPoints: snapshot.projectStructure.entryPoints.filter((entry) => this.pathMatches(pathKeys, entry.path)),
+      modules: snapshot.projectStructure.modules.filter((module) =>
+        module.relatedPaths.some((relatedPath) => this.pathMatches(pathKeys, relatedPath))
+      ),
+      openQuestions: snapshot.projectStructure.openQuestions.filter((question) =>
+        questionKeys.has(this.normalizeContinuationText(question.question))
+      ),
+      contradictions: snapshot.projectStructure.contradictions.filter((contradiction) =>
+        questionKeys.has(this.normalizeContinuationText(contradiction.summary))
+        || this.referencesPath(pathKeys, contradiction.summary)
+      )
+    };
+
+    return {
+      sourceRunId: snapshot.run.id,
+      evidenceBundles: evidenceBundles.length > 0 ? evidenceBundles : snapshot.evidenceBundles,
+      workingMemory,
+      projectStructure
+    };
+  }
+
+  private getContinuationNextAction(snapshot: RunSnapshot, nextActionIndex: number | null | undefined) {
+    const nextActions = snapshot.finalReport?.nextActions ?? [];
+    if (nextActions.length === 0) {
+      return undefined;
+    }
+
+    if (typeof nextActionIndex !== "number" || !Number.isFinite(nextActionIndex)) {
+      return nextActions[0];
+    }
+
+    return nextActions[Math.max(0, Math.min(nextActions.length - 1, Math.trunc(nextActionIndex)))];
+  }
+
+  private normalizeContinuationText(value: string): string {
+    return value
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/[`"'’“”]/g, "")
+      .replace(/[()[\]{}:;,.!?]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  private pathMatches(pathKeys: Set<string>, candidate: string | undefined): boolean {
+    if (!candidate) {
+      return false;
+    }
+
+    for (const pathKey of pathKeys) {
+      if (pathKey === candidate || candidate.includes(pathKey) || pathKey.includes(candidate)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private referencesPath(pathKeys: Set<string>, text: string): boolean {
+    for (const pathKey of pathKeys) {
+      if (text.includes(pathKey)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private async resolveModeConfig(mode: OrchestratorMode, workspacePath: string): Promise<ResolvedModeConfig> {
@@ -323,47 +483,63 @@ export class OrchestratorService {
   }
 
   private selectCodexPlanningModel(catalog: ManagedToolModelCatalog): ModelRef {
-    const selectedModel = this.pickBestModel(catalog, (model) => this.scoreCodexPlanningModel(model));
+    const selectedModel = this.findCatalogModel(catalog, catalog.recommendedPlannerModelId)
+      ?? this.pickBestModel(catalog, (model) =>
+        (model.hidden ? -1_000_000 : 0)
+        + (this.scoreReasoningCapability(model) * 10)
+        + (model.isDefault ? 1 : 0)
+      );
     if (!selectedModel) {
       throw new Error("Codex CLI did not report any available models");
     }
 
-    return this.toModelRef("OpenAI", selectedModel, "upper", "planner");
+    return this.toModelRef(catalog.provider, selectedModel, "upper", "planner");
   }
 
   private selectCodexWorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef | undefined): ModelRef | undefined {
-    const lightweightCandidates = this.listSelectableModels(catalog).filter((model) =>
-      this.looksLikeOpenAiFrontierModel(model.model) && this.isLightweightCodexModel(model.model)
-    );
-    const selectedModel = this.pickBestCandidate(lightweightCandidates, (model) => this.scoreCodexWorkerModel(model));
+    const selectedModel = this.findCatalogModel(catalog, catalog.recommendedWorkerModelId)
+      ?? this.findCatalogModel(catalog, catalog.currentModelId)
+      ?? this.pickBestCandidate(this.listSelectableModels(catalog), (model) =>
+        (model.hidden ? -1_000_000 : 0)
+        + (model.isDefault ? 10_000 : 0)
+        + (this.scoreLighterReasoningPreference(model) * 10)
+      );
 
     if (!selectedModel) {
       return planningModel;
     }
 
-    return this.toModelRef("OpenAI", selectedModel, "lower", "worker");
+    return this.toModelRef(catalog.provider, selectedModel, "lower", "worker");
   }
 
   private selectGeminiPlanningModel(catalog: ManagedToolModelCatalog): ModelRef {
-    const selectedModel = this.pickBestModel(catalog, (model) => this.scoreGeminiPlanningModel(model));
+    const selectedModel = this.findCatalogModel(catalog, catalog.recommendedPlannerModelId)
+      ?? this.findCatalogModel(catalog, catalog.currentModelId)
+      ?? this.pickBestCandidate(
+        this.listSelectableModels(catalog).filter((model) => this.isConcreteGeminiModel(model.model)),
+        (model) => (model.isDefault ? 1 : 0)
+      )
+      ?? this.pickBestModel(catalog, (model) => (model.isDefault ? 1 : 0));
     if (!selectedModel) {
       throw new Error("Gemini CLI did not report any available models");
     }
 
-    return this.toModelRef("Google", selectedModel, "upper", "planner");
+    return this.toModelRef(catalog.provider, selectedModel, "upper", "planner");
   }
 
   private selectGeminiWorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef | undefined): ModelRef | undefined {
-    const lightweightCandidates = this.listSelectableModels(catalog).filter((model) =>
-      this.isConcreteGeminiModel(model.model) && this.isLightweightGeminiModel(model.model)
-    );
-    const selectedModel = this.pickBestCandidate(lightweightCandidates, (model) => this.scoreGeminiWorkerModel(model));
+    const selectedModel = this.findCatalogModel(catalog, catalog.recommendedWorkerModelId)
+      ?? this.findCatalogModel(catalog, catalog.currentModelId)
+      ?? this.pickBestCandidate(
+        this.listSelectableModels(catalog).filter((model) => this.isConcreteGeminiModel(model.model)),
+        (model) => (model.isDefault ? 1 : 0)
+      );
 
     if (!selectedModel) {
       return planningModel;
     }
 
-    return this.toModelRef("Google", selectedModel, "lower", "worker");
+    return this.toModelRef(catalog.provider, selectedModel, "lower", "worker");
   }
 
   private isConcreteGeminiModel(model: string): boolean {
@@ -480,50 +656,6 @@ export class OrchestratorService {
     return visibleModels.length > 0 ? visibleModels : [...catalog.models];
   }
 
-  private scoreCodexPlanningModel(model: ManagedToolModelCatalog["models"][number]): number {
-    return (model.hidden ? -1_000_000 : 0)
-      + (this.isMiniModel(model.model) ? -500_000 : 0)
-      + (this.looksLikeOpenAiFrontierModel(model.model) ? 10_000 : -10_000)
-      + (this.scoreReasoningCapability(model) * 1_000)
-      + (this.scoreVersion(model.model, "gpt-") * 100)
-      + (model.isDefault ? 25 : 0);
-  }
-
-  private scoreCodexWorkerModel(model: ManagedToolModelCatalog["models"][number]): number {
-    return (model.hidden ? -1_000_000 : 0)
-      + (this.looksLikeOpenAiFrontierModel(model.model) ? 1_000_000 : -1_000_000)
-      + (this.isLightweightCodexModel(model.model) ? 1_000_000 : -1_000_000)
-      + (this.scoreVersion(model.model, "gpt-") * 10_000)
-      + (this.scoreCodexLightweightFamily(model.model) * 1_000)
-      + (this.scoreLighterReasoningPreference(model) * 10)
-      + (model.isDefault ? 1 : 0);
-  }
-
-  private scoreGeminiPlanningModel(model: ManagedToolModelCatalog["models"][number]): number {
-    const normalizedModelName = model.model.toLowerCase();
-
-    return (model.hidden ? -1_000_000 : 0)
-      + (this.isConcreteGeminiModel(model.model) ? 0 : -500_000)
-      + (this.scoreGeminiPlanningFamily(normalizedModelName) * 10_000)
-      + (this.scoreVersion(model.model, "gemini-") * 100)
-      + (normalizedModelName.includes("preview") ? 75 : 0)
-      + (normalizedModelName.includes("exp") ? -250 : 0);
-  }
-
-  private scoreGeminiWorkerModel(model: ManagedToolModelCatalog["models"][number]): number {
-    const normalizedModelName = model.model.toLowerCase();
-
-    return (model.hidden ? -1_000_000 : 0)
-      + (this.isConcreteGeminiModel(model.model) ? 1_000_000 : -1_000_000)
-      + (this.isLightweightGeminiModel(model.model) ? 1_000_000 : -1_000_000)
-      + (this.scoreGeminiWorkerSeries(normalizedModelName) * 100_000)
-      + (this.scoreVersion(model.model, "gemini-") * 10_000)
-      + (this.scoreGeminiWorkerFamily(normalizedModelName) * 1_000)
-      + (model.isDefault ? 1 : 0)
-      + (normalizedModelName.includes("preview") ? -10 : 0)
-      + (normalizedModelName.includes("exp") ? -100 : 0);
-  }
-
   private scoreReasoningCapability(model: ManagedToolModelCatalog["models"][number]): number {
     if (model.supportedReasoningEfforts.includes("xhigh")) return 400;
     if (model.supportedReasoningEfforts.includes("high")) return 300;
@@ -552,66 +684,17 @@ export class OrchestratorService {
     return 0;
   }
 
-  private scoreGeminiPlanningFamily(model: string): number {
-    if (model.includes("ultra")) return 500;
-    if (model.includes("pro")) return 400;
-    if (model.includes("flash")) return 200;
-    if (model.includes("lite")) return 100;
-    return 0;
-  }
-
-  private scoreGeminiWorkerFamily(model: string): number {
-    if (model.includes("flash-lite")) return 500;
-    if (model.includes("flash")) return 450;
-    if (model.includes("lite")) return 425;
-    if (model.includes("pro")) return 250;
-    if (model.includes("ultra")) return 150;
-    return 0;
-  }
-
-  private scoreGeminiWorkerSeries(model: string): number {
-    if (model.startsWith("gemini-3.")) return 500;
-    if (model.startsWith("gemini-2.5-")) return 400;
-    if (model.startsWith("gemini-2.")) return 300;
-    if (model.startsWith("gemini-1.5-")) return 300;
-    return 0;
-  }
-
-  private scoreCodexLightweightFamily(model: string): number {
-    const normalizedModel = model.toLowerCase();
-    if (normalizedModel.includes("nano")) return 500;
-    if (normalizedModel.includes("mini")) return 450;
-    return 0;
-  }
-
-  private scoreVersion(model: string, prefix: string): number {
-    const match = model.match(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\d+)(?:\\.(\\d+))?`));
-    if (!match) {
-      return 0;
+  private findCatalogModel(
+    catalog: ManagedToolModelCatalog,
+    requestedModelId: string | null | undefined
+  ): ManagedToolModelCatalog["models"][number] | undefined {
+    if (!requestedModelId) {
+      return undefined;
     }
 
-    const major = Number.parseInt(match[1] ?? "0", 10);
-    const minor = Number.parseInt(match[2] ?? "0", 10);
-    return (major * 100) + minor;
-  }
-
-  private isMiniModel(model: string): boolean {
-    return this.isLightweightCodexModel(model);
-  }
-
-  private isLightweightCodexModel(model: string): boolean {
-    return /\bmini\b/i.test(model) || /\bnano\b/i.test(model);
-  }
-
-  private isLightweightGeminiModel(model: string): boolean {
-    const normalizedModel = model.toLowerCase();
-    return normalizedModel.includes("flash-lite")
-      || normalizedModel.includes("flash")
-      || normalizedModel.includes("lite");
-  }
-
-  private looksLikeOpenAiFrontierModel(model: string): boolean {
-    return /^gpt-\d/i.test(model);
+    const selectableModels = this.listSelectableModels(catalog);
+    return selectableModels.find((model) => model.id === requestedModelId || model.model === requestedModelId)
+      ?? catalog.models.find((model) => model.id === requestedModelId || model.model === requestedModelId);
   }
 
   private toModelRef(

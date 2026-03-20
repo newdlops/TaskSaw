@@ -1,8 +1,9 @@
-import type { RunSnapshot, RunStatus } from "../orchestrator";
+import type { OutputLanguageCode, RunSnapshot, RunStatus } from "../orchestrator";
 
 export type SessionKind = "shell" | "codex" | "gemini";
 export type ManagedToolId = Extract<SessionKind, "codex" | "gemini">;
 export type OrchestratorMode = "gemini_only" | "codex_only" | "cross_review";
+export type OrchestratorContinuationMode = "resume" | "next_action";
 
 export type DirectoryDialogOptions = {
   defaultPath?: string;
@@ -33,6 +34,8 @@ export type ManagedToolModelCatalog = {
   toolId: ManagedToolId;
   provider: string;
   currentModelId: string | null;
+  recommendedPlannerModelId?: string | null;
+  recommendedWorkerModelId?: string | null;
   discoveredAt: string;
   models: ManagedToolModel[];
 };
@@ -53,6 +56,9 @@ export type CreateSessionInput = {
 export type RunOrchestratorInput = {
   goal: string;
   mode: OrchestratorMode;
+  language?: OutputLanguageCode;
+  continuationMode?: OrchestratorContinuationMode | null;
+  nextActionIndex?: number | null;
   maxDepth?: number | null;
   workspacePath?: string | null;
   continueFromRunId?: string | null;

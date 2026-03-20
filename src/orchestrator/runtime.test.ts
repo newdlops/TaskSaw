@@ -68,7 +68,8 @@ class MockAdapter implements OrchestratorModelAdapter {
     return this.handlers.review?.() ?? {
       summary: "Review approved",
       approved: true,
-      followUpQuestions: []
+      followUpQuestions: [],
+      nextActions: []
     };
   }
 
@@ -196,7 +197,7 @@ test("runtime executes the minimal happy path and propagates evidence into plann
               confidence: "medium"
             }
           ],
-          projectStructure: context.workflowStage === "project_structure_discovery"
+          projectStructure: context.node.depth === 0
             ? {
                 summary: "The root task is centered on src/orchestrator",
                 directories: [
@@ -337,6 +338,119 @@ test("runtime executes the minimal happy path and propagates evidence into plann
     "Confirm evidence bundle schema",
     "How should real adapters stream partial output?"
   ]);
+});
+
+test("runtime runs review after verify and does not let review reject execution", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "review", "verify"]),
+      {
+        abstractPlan: () => ({
+          summary: "Inspect the current top bar and tool state path",
+          targetsToInspect: [],
+          evidenceRequirements: []
+        }),
+        concretePlan: () => ({
+          summary: "Execution ready",
+          childTasks: [],
+          executionNotes: []
+        }),
+        review: () => ({
+          summary: "최종 리뷰: quota source 확인이 다음 단계입니다",
+          approved: false,
+          followUpQuestions: ["Codex와 Gemini의 quota source를 확정해야 합니다"],
+          nextActions: [
+            {
+              title: "Quota source 확인",
+              objective: "Codex와 Gemini의 quota source와 refresh semantics를 확정한다",
+              rationale: "남은 사용량 퍼센트 UI를 정확하게 표시하려면 먼저 데이터 소스를 고정해야 합니다",
+              priority: "high"
+            }
+          ],
+          carryForward: {
+            facts: ["topbar가 compact indicator 위치 후보다"],
+            openQuestions: ["Codex와 Gemini의 quota source를 확정해야 합니다"],
+            projectPaths: ["src/main/tool-manager.ts", "src/renderer/app.ts"],
+            evidenceSummaries: ["현재 tool state에는 quota field가 없다"]
+          }
+        }),
+        verify: () => ({
+          summary: "Verification passed",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(new MockAdapter(gatherer, new Set(["gather"]), {}, trace));
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execution complete",
+          outputs: ["usage chip UI added"]
+        })
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry);
+  const result = await runtime.executeHappyPath({
+    goal: "Add a compact usage indicator",
+    reviewPolicy: "light",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      reviewer: planner,
+      executor,
+      verifier: planner
+    }
+  });
+
+  assert.deepEqual(trace, [
+    "abstract:planner-upper",
+    "gather:gather-lower",
+    "concrete:planner-upper",
+    "execute:execute-lower",
+    "verify:planner-upper",
+    "review:planner-upper"
+  ]);
+  assert.equal(result.snapshot.run.status, "done");
+  assert.equal(result.finalReport.summary, "최종 리뷰: quota source 확인이 다음 단계입니다");
+  assert.equal(result.finalReport.nextActions.length, 1);
+  assert.deepEqual(result.finalReport.carryForward?.projectPaths, ["src/main/tool-manager.ts", "src/renderer/app.ts"]);
+  assert.deepEqual(result.finalReport.unresolvedRisks, ["Codex와 Gemini의 quota source를 확정해야 합니다"]);
 });
 
 test("runtime tolerates malformed evidence referenceIds from gather responses", async () => {
@@ -1009,8 +1123,8 @@ test("runtime reruns root concrete planning after project structure inspection u
     true
   );
   assert.deepEqual(workflowTrace, [
-    "abstract:project_structure_discovery:0",
-    "gather:project_structure_discovery:0",
+    "abstract:task_orchestration:0",
+    "gather:task_orchestration:0",
     "concrete:task_orchestration:0:Initial structure summary points to the wrong entrypoint",
     "abstract:project_structure_inspection:1",
     "gather:project_structure_inspection:1",
@@ -2494,8 +2608,8 @@ test("runtime stops repeating project structure inspection when the structure me
     true
   );
   assert.deepEqual(workflowTrace, [
-    "abstract:project_structure_discovery:0",
-    "gather:project_structure_discovery:0",
+    "abstract:task_orchestration:0",
+    "gather:task_orchestration:0",
     "concrete:task_orchestration:0:",
     "abstract:project_structure_inspection:1",
     "gather:project_structure_inspection:1",

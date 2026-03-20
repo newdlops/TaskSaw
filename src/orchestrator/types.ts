@@ -41,6 +41,9 @@ export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 export const CHILD_TASK_IMPORTANCE_LEVELS = ["critical", "high", "medium", "low"] as const;
 export type ChildTaskImportance = (typeof CHILD_TASK_IMPORTANCE_LEVELS)[number];
 
+export const OUTPUT_LANGUAGE_CODES = ["en", "ko"] as const;
+export type OutputLanguageCode = (typeof OUTPUT_LANGUAGE_CODES)[number];
+
 export const ORCHESTRATOR_WORKFLOW_STAGES = [
   "project_structure_discovery",
   "project_structure_inspection",
@@ -72,6 +75,20 @@ export type ModelAssignment = {
   reviewer?: ModelRef;
   executor?: ModelRef;
   verifier?: ModelRef;
+};
+
+export type OrchestratorNextAction = {
+  title: string;
+  objective: string;
+  rationale: string;
+  priority: ChildTaskImportance;
+};
+
+export type OrchestratorCarryForward = {
+  facts: string[];
+  openQuestions: string[];
+  projectPaths: string[];
+  evidenceSummaries: string[];
 };
 
 export type OrchestratorChildTask = {
@@ -371,6 +388,7 @@ export type PlanNode = {
 export type Run = {
   id: string;
   goal: string;
+  language?: OutputLanguageCode;
   status: RunStatus;
   rootNodeId: string;
   continuedFromRunId?: string | null;
@@ -420,6 +438,8 @@ export type OrchestratorFinalReport = {
   summary: string;
   outcomes: string[];
   unresolvedRisks: string[];
+  nextActions: OrchestratorNextAction[];
+  carryForward?: OrchestratorCarryForward;
   createdAt: string;
 };
 
@@ -442,6 +462,7 @@ export type ContinuationSeed = {
 
 export type CreateRunInput = {
   goal: string;
+  language?: OutputLanguageCode;
   title?: string;
   objective?: string;
   kind?: NodeKind;

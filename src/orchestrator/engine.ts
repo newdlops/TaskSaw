@@ -75,6 +75,7 @@ export class OrchestratorEngine {
     const run: Run = {
       id: runId,
       goal: input.goal,
+      language: input.language ?? "ko",
       status: "pending",
       rootNodeId,
       continuedFromRunId: input.continuation?.sourceRunId ?? null,

@@ -8,6 +8,8 @@ function createCodexCatalog(overrides: Partial<ManagedToolModelCatalog> = {}): M
     toolId: "codex",
     provider: "OpenAI",
     currentModelId: "gpt-5.4-mini",
+    recommendedPlannerModelId: "gpt-5.4",
+    recommendedWorkerModelId: "gpt-5.4-mini",
     discoveredAt: "2026-03-19T00:00:00.000Z",
     models: [
       {
@@ -49,9 +51,21 @@ function createGeminiCatalog(overrides: Partial<ManagedToolModelCatalog> = {}): 
   return {
     toolId: "gemini",
     provider: "Google",
-    currentModelId: "auto-gemini-3",
+    currentModelId: "gemini-3.1-pro-preview",
+    recommendedPlannerModelId: "gemini-3.1-pro-preview",
+    recommendedWorkerModelId: "gemini-3-flash-preview",
     discoveredAt: "2026-03-19T00:00:00.000Z",
     models: [
+      {
+        id: "gemini-3-flash-preview",
+        model: "gemini-3-flash-preview",
+        displayName: "Gemini 3 Flash Preview",
+        description: null,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: null,
+        supportedReasoningEfforts: []
+      },
       {
         id: "gemini-2.5-flash",
         model: "gemini-2.5-flash",
@@ -78,17 +92,17 @@ function createGeminiCatalog(overrides: Partial<ManagedToolModelCatalog> = {}): 
         displayName: "Gemini 3.1 Pro Preview",
         description: null,
         hidden: false,
-        isDefault: false,
+        isDefault: true,
         defaultReasoningEffort: null,
         supportedReasoningEfforts: []
       },
       {
-        id: "auto-gemini-3",
-        model: "auto-gemini-3",
-        displayName: "Auto Gemini 3",
+        id: "gemini-3-pro-preview",
+        model: "gemini-3-pro-preview",
+        displayName: "Gemini 3 Pro Preview",
         description: null,
         hidden: false,
-        isDefault: true,
+        isDefault: false,
         defaultReasoningEffort: null,
         supportedReasoningEfforts: []
       }
@@ -117,15 +131,16 @@ test("orchestrator service assigns the latest frontier Gemini model to planning 
     };
 
   assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gemini-3.1-pro-preview");
-  assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-2.5-flash");
+  assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-3-flash-preview");
   assert.deepEqual(modeConfig.toolModels.gemini.map((model) => model.model), [
     "gemini-3.1-pro-preview",
-    "gemini-2.5-flash"
+    "gemini-3-flash-preview"
   ]);
 });
 
 test("orchestrator service prefers a newer 3.x Gemini flash model for worker roles when available", async () => {
   const catalog = createGeminiCatalog({
+    recommendedWorkerModelId: "gemini-3-flash-preview",
     models: [
       {
         id: "gemini-2.5-flash",
@@ -138,9 +153,9 @@ test("orchestrator service prefers a newer 3.x Gemini flash model for worker rol
         supportedReasoningEfforts: []
       },
       {
-        id: "gemini-3.1-flash-preview",
-        model: "gemini-3.1-flash-preview",
-        displayName: "Gemini 3.1 Flash Preview",
+        id: "gemini-3-flash-preview",
+        model: "gemini-3-flash-preview",
+        displayName: "Gemini 3 Flash Preview",
         description: null,
         hidden: false,
         isDefault: false,
@@ -154,16 +169,6 @@ test("orchestrator service prefers a newer 3.x Gemini flash model for worker rol
         description: null,
         hidden: false,
         isDefault: false,
-        defaultReasoningEffort: null,
-        supportedReasoningEfforts: []
-      },
-      {
-        id: "auto-gemini-3",
-        model: "auto-gemini-3",
-        displayName: "Auto Gemini 3",
-        description: null,
-        hidden: false,
-        isDefault: true,
         defaultReasoningEffort: null,
         supportedReasoningEfforts: []
       }
@@ -185,13 +190,15 @@ test("orchestrator service prefers a newer 3.x Gemini flash model for worker rol
     };
 
   assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gemini-3.1-pro-preview");
-  assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-3.1-flash-preview");
-  assert.equal(modeConfig.assignedModels.executor.model, "gemini-3.1-flash-preview");
+  assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-3-flash-preview");
+  assert.equal(modeConfig.assignedModels.executor.model, "gemini-3-flash-preview");
 });
 
 test("orchestrator service falls back to a concrete Gemini model when currentModelId is unavailable", async () => {
   const catalog = createGeminiCatalog({
     currentModelId: null,
+    recommendedPlannerModelId: null,
+    recommendedWorkerModelId: null,
     models: [
       {
         id: "gemini-2.5-pro",
@@ -200,16 +207,6 @@ test("orchestrator service falls back to a concrete Gemini model when currentMod
         description: null,
         hidden: false,
         isDefault: false,
-        defaultReasoningEffort: null,
-        supportedReasoningEfforts: []
-      },
-      {
-        id: "auto-gemini-3",
-        model: "auto-gemini-3",
-        displayName: "Auto Gemini 3",
-        description: null,
-        hidden: false,
-        isDefault: true,
         defaultReasoningEffort: null,
         supportedReasoningEfforts: []
       }
@@ -233,6 +230,7 @@ test("orchestrator service falls back to a concrete Gemini model when currentMod
 
 test("orchestrator service falls back to the latest concrete Gemini model for worker roles when no lightweight Gemini model exists", async () => {
   const catalog = createGeminiCatalog({
+    recommendedWorkerModelId: null,
     models: [
       {
         id: "gemini-2.5-pro",
@@ -251,16 +249,6 @@ test("orchestrator service falls back to the latest concrete Gemini model for wo
         description: null,
         hidden: false,
         isDefault: false,
-        defaultReasoningEffort: null,
-        supportedReasoningEfforts: []
-      },
-      {
-        id: "auto-gemini-3",
-        model: "auto-gemini-3",
-        displayName: "Auto Gemini 3",
-        description: null,
-        hidden: false,
-        isDefault: true,
         defaultReasoningEffort: null,
         supportedReasoningEfforts: []
       }
@@ -309,6 +297,54 @@ test("orchestrator service assigns the strongest non-mini Codex model to plannin
     "gpt-5.4",
     "gpt-5.4-mini"
   ]);
+});
+
+test("orchestrator service honors catalog-recommended Codex models even when names do not match legacy family rules", async () => {
+  const catalog = createCodexCatalog({
+    currentModelId: "router-worker",
+    recommendedPlannerModelId: "router-planner",
+    recommendedWorkerModelId: "router-worker",
+    models: [
+      {
+        id: "router-worker",
+        model: "router-worker",
+        displayName: "Router Worker",
+        description: null,
+        hidden: false,
+        isDefault: true,
+        defaultReasoningEffort: "low",
+        supportedReasoningEfforts: ["low", "medium"]
+      },
+      {
+        id: "router-planner",
+        model: "router-planner",
+        displayName: "Router Planner",
+        description: null,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: "high",
+        supportedReasoningEfforts: ["medium", "high", "xhigh"]
+      }
+    ]
+  });
+  const toolManager = {
+    prepareWorkspaceContext: async () => undefined,
+    discoverModelCatalog: async () => catalog
+  };
+  const service = new OrchestratorService("/tmp/tasksaw-app", "/tmp/tasksaw-user-data", toolManager as never);
+
+  const modeConfig = await (service as unknown as { resolveModeConfig(mode: string, workspacePath: string): Promise<unknown> })
+    .resolveModeConfig("codex_only", "/tmp/tasksaw-workspace") as {
+      assignedModels: {
+        abstractPlanner: { model: string };
+        gatherer: { model: string };
+        executor: { model: string };
+      };
+    };
+
+  assert.equal(modeConfig.assignedModels.abstractPlanner.model, "router-planner");
+  assert.equal(modeConfig.assignedModels.gatherer.model, "router-worker");
+  assert.equal(modeConfig.assignedModels.executor.model, "router-worker");
 });
 
 test("orchestrator service keeps higher reasoning for Codex planners and lighter reasoning for Codex workers", async () => {

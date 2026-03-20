@@ -4,8 +4,10 @@ import {
   ExecutionBudget,
   ModelExecutionDebugInfo,
   ModelRef,
+  OrchestratorCarryForward,
   OrchestratorChildTask,
   OrchestratorConfig,
+  OrchestratorNextAction,
   OrchestratorWorkflowStage,
   PlanNode,
   ProjectStructureReport,
@@ -100,6 +102,7 @@ export type ModelInvocationContext = {
   node: PlanNode;
   config: OrchestratorConfig;
   assignedModel: ModelRef;
+  outputLanguage: "en" | "ko";
   abortSignal: AbortSignal;
   workflowStage: OrchestratorWorkflowStage;
   reviewPolicy: ReviewPolicy;
@@ -139,8 +142,10 @@ export type ConcretePlanResult = {
 
 export type ReviewResult = {
   summary: string;
-  approved: boolean;
+  approved?: boolean;
   followUpQuestions: string[];
+  nextActions: OrchestratorNextAction[];
+  carryForward?: OrchestratorCarryForward;
   debug?: ModelExecutionDebugInfo;
 };
 

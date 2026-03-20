@@ -36,6 +36,32 @@ type ManagedGeminiAuthPreflight = {
   message: string | null;
 };
 
+type GeminiModelsModule = {
+  PREVIEW_GEMINI_MODEL: string;
+  PREVIEW_GEMINI_3_1_MODEL: string;
+  PREVIEW_GEMINI_3_1_CUSTOM_TOOLS_MODEL: string;
+  PREVIEW_GEMINI_FLASH_MODEL: string;
+  PREVIEW_GEMINI_3_1_FLASH_LITE_MODEL: string;
+  DEFAULT_GEMINI_MODEL: string;
+  DEFAULT_GEMINI_FLASH_MODEL: string;
+  DEFAULT_GEMINI_FLASH_LITE_MODEL: string;
+  PREVIEW_GEMINI_MODEL_AUTO: string;
+  DEFAULT_GEMINI_MODEL_AUTO: string;
+  VALID_GEMINI_MODELS: Set<string>;
+  resolveModel: (
+    requestedModel: string,
+    useGemini3_1?: boolean,
+    useCustomToolModel?: boolean,
+    hasAccessToPreview?: boolean
+  ) => string;
+  resolveClassifierModel: (
+    requestedModel: string,
+    modelAlias: string,
+    useGemini3_1?: boolean,
+    useCustomToolModel?: boolean
+  ) => string;
+};
+
 type InstructionSource = {
   path: string;
   content: string;
@@ -281,6 +307,19 @@ export class ToolManager {
     );
   }
 
+  getGeminiModelsModulePath(): string {
+    return path.join(
+      this.getInstallDirectory("gemini"),
+      "node_modules",
+      "@google",
+      "gemini-cli-core",
+      "dist",
+      "src",
+      "config",
+      "models.js"
+    );
+  }
+
   private syncManagedGlobalCodexInstructions() {
     const source = this.readInstructionSource(os.homedir(), CODEX_INSTRUCTION_CANDIDATES);
     this.syncManagedInstructionFile(path.join(this.homeDirectory, "AGENTS.md"), source);
@@ -501,6 +540,59 @@ export class ToolManager {
   private createModelCatalogCacheKey(toolId: ManagedToolId, workspacePath?: string | null): string {
     const normalizedWorkspace = workspacePath?.trim() || "";
     return `${toolId}:${normalizedWorkspace}`;
+  }
+
+  private scoreManagedReasoningCapability(model: ManagedToolModelCatalog["models"][number]): number {
+    if (model.supportedReasoningEfforts.includes("xhigh")) return 400;
+    if (model.supportedReasoningEfforts.includes("high")) return 300;
+    if (model.supportedReasoningEfforts.includes("medium")) return 200;
+    if (model.supportedReasoningEfforts.includes("low")) return 100;
+
+    if (model.defaultReasoningEffort === "xhigh") return 350;
+    if (model.defaultReasoningEffort === "high") return 250;
+    if (model.defaultReasoningEffort === "medium") return 150;
+    if (model.defaultReasoningEffort === "low") return 50;
+    return 0;
+  }
+
+  private pickBestCatalogModel(
+    models: ManagedToolModelCatalog["models"],
+    score: (model: ManagedToolModelCatalog["models"][number]) => number
+  ): ManagedToolModelCatalog["models"][number] | undefined {
+    return [...models]
+      .sort((left, right) => score(right) - score(left))
+      .find((model) => !model.hidden)
+      ?? [...models].sort((left, right) => score(right) - score(left))[0];
+  }
+
+  private selectCodexRecommendedPlannerModelId(models: ManagedToolModelCatalog["models"]): string | null {
+    const selectedModel = this.pickBestCatalogModel(models, (model) =>
+      (model.hidden ? -1_000_000 : 0)
+      + (this.scoreManagedReasoningCapability(model) * 10)
+      + (model.isDefault ? 1 : 0)
+    );
+    return selectedModel?.id ?? null;
+  }
+
+  private selectCodexRecommendedWorkerModelId(
+    models: ManagedToolModelCatalog["models"],
+    currentModelId: string | null
+  ): string | null {
+    const visibleModels = models.filter((model) => !model.hidden);
+    const selectableModels = visibleModels.length > 0 ? visibleModels : models;
+    const currentModel = currentModelId
+      ? selectableModels.find((model) => model.id === currentModelId || model.model === currentModelId)
+      : undefined;
+    if (currentModel) {
+      return currentModel.id;
+    }
+
+    const selectedModel = this.pickBestCatalogModel(selectableModels, (model) =>
+      (model.hidden ? -1_000_000 : 0)
+      + (model.isDefault ? 10_000 : 0)
+      - (this.scoreManagedReasoningCapability(model) * 10)
+    );
+    return selectedModel?.id ?? null;
   }
 
   private async discoverModelCatalogInternal(
@@ -909,75 +1001,140 @@ export class ToolManager {
       });
     });
 
+    const mappedModels = models.map((model) => ({
+      id: model.id,
+      model: model.model,
+      displayName: model.displayName,
+      description: model.description ?? null,
+      hidden: model.hidden,
+      isDefault: model.isDefault,
+      defaultReasoningEffort: model.defaultReasoningEffort ?? null,
+      supportedReasoningEfforts: model.supportedReasoningEfforts.map((entry) => entry.reasoningEffort)
+    }));
+    const currentModelId = mappedModels.find((model) => model.isDefault)?.id ?? null;
+
     return {
       toolId: "codex",
       provider: "OpenAI",
-      currentModelId: models.find((model) => model.isDefault)?.id ?? null,
+      currentModelId,
+      recommendedPlannerModelId: this.selectCodexRecommendedPlannerModelId(mappedModels),
+      recommendedWorkerModelId: this.selectCodexRecommendedWorkerModelId(mappedModels, currentModelId),
       discoveredAt: new Date().toISOString(),
-      models: models.map((model) => ({
-        id: model.id,
-        model: model.model,
-        displayName: model.displayName,
-        description: model.description ?? null,
-        hidden: model.hidden,
-        isDefault: model.isDefault,
-        defaultReasoningEffort: model.defaultReasoningEffort ?? null,
-        supportedReasoningEfforts: model.supportedReasoningEfforts.map((entry) => entry.reasoningEffort)
-      }))
+      models: mappedModels
     };
   }
 
   private async discoverGeminiModelCatalog(workspacePath?: string | null): Promise<ManagedToolModelCatalog> {
     void workspacePath;
+    const modelsModule = await this.importManagedGeminiModelsModule();
+    const configuredModelId = (process.env.GEMINI_MODEL?.trim() || this.getManagedGeminiConfiguredModel())
+      ?? modelsModule.PREVIEW_GEMINI_MODEL_AUTO;
+    const useGemini31 = this.shouldUseGemini31Routing(configuredModelId, modelsModule);
+    const currentModelId = modelsModule.resolveModel(configuredModelId, useGemini31, false, true);
+    const recommendedPlannerModelId = currentModelId;
+    const recommendedWorkerModelId = this.isLightweightDiscoveredGeminiModel(currentModelId)
+      ? currentModelId
+      : modelsModule.resolveClassifierModel(currentModelId, "flash", useGemini31, false);
+    const modelIds = this.mergeStringLists(
+      this.listKnownGeminiModelIds(modelsModule),
+      [currentModelId, recommendedPlannerModelId, recommendedWorkerModelId]
+    );
 
     return {
       toolId: "gemini",
       provider: "Google",
-      currentModelId: "auto-gemini-3",
+      currentModelId,
+      recommendedPlannerModelId,
+      recommendedWorkerModelId,
       discoveredAt: new Date().toISOString(),
-      models: [
-        {
-          id: "gemini-2.5-flash",
-          model: "gemini-2.5-flash",
-          displayName: "Gemini 2.5 Flash",
-          description: "Lightweight Gemini worker model",
-          hidden: false,
-          isDefault: false,
-          defaultReasoningEffort: null,
-          supportedReasoningEfforts: []
-        },
-        {
-          id: "gemini-2.5-pro",
-          model: "gemini-2.5-pro",
-          displayName: "Gemini 2.5 Pro",
-          description: "Concrete Gemini planning model",
-          hidden: false,
-          isDefault: false,
-          defaultReasoningEffort: null,
-          supportedReasoningEfforts: []
-        },
-        {
-          id: "gemini-3.1-pro-preview",
-          model: "gemini-3.1-pro-preview",
-          displayName: "Gemini 3.1 Pro Preview",
-          description: "Preferred frontier Gemini planning model",
-          hidden: false,
-          isDefault: false,
-          defaultReasoningEffort: null,
-          supportedReasoningEfforts: []
-        },
-        {
-          id: "auto-gemini-3",
-          model: "auto-gemini-3",
-          displayName: "Auto Gemini 3",
-          description: "Gemini CLI automatic routing alias",
-          hidden: false,
-          isDefault: true,
-          defaultReasoningEffort: null,
-          supportedReasoningEfforts: []
-        }
-      ]
+      models: modelIds.map((modelId) => this.createGeminiCatalogModel(modelId, currentModelId, modelsModule))
     };
+  }
+
+  private getManagedGeminiConfiguredModel(): string | null {
+    const settingsPath = path.join(this.homeDirectory, ".gemini", "settings.json");
+    const settings = this.readJsonObject(settingsPath);
+    return this.readNestedString(settings, ["model", "name"]);
+  }
+
+  private shouldUseGemini31Routing(currentModelId: string, modelsModule: GeminiModelsModule): boolean {
+    return currentModelId !== modelsModule.DEFAULT_GEMINI_MODEL_AUTO
+      && currentModelId !== modelsModule.DEFAULT_GEMINI_MODEL
+      && currentModelId !== modelsModule.DEFAULT_GEMINI_FLASH_MODEL
+      && currentModelId !== modelsModule.DEFAULT_GEMINI_FLASH_LITE_MODEL;
+  }
+
+  private listKnownGeminiModelIds(modelsModule: GeminiModelsModule): string[] {
+    return [
+      modelsModule.PREVIEW_GEMINI_MODEL,
+      modelsModule.PREVIEW_GEMINI_3_1_MODEL,
+      modelsModule.PREVIEW_GEMINI_3_1_CUSTOM_TOOLS_MODEL,
+      modelsModule.PREVIEW_GEMINI_FLASH_MODEL,
+      modelsModule.PREVIEW_GEMINI_3_1_FLASH_LITE_MODEL,
+      modelsModule.DEFAULT_GEMINI_MODEL,
+      modelsModule.DEFAULT_GEMINI_FLASH_MODEL,
+      modelsModule.DEFAULT_GEMINI_FLASH_LITE_MODEL
+    ];
+  }
+
+  private isLightweightDiscoveredGeminiModel(modelId: string): boolean {
+    const normalizedModelId = modelId.toLowerCase();
+    return normalizedModelId.includes("flash") || normalizedModelId.includes("lite");
+  }
+
+  private createGeminiCatalogModel(
+    modelId: string,
+    currentModelId: string,
+    modelsModule: GeminiModelsModule
+  ): ManagedToolModelCatalog["models"][number] {
+    const displayName = this.getGeminiCatalogDisplayName(modelId, modelsModule);
+    const isAlias = modelId === modelsModule.PREVIEW_GEMINI_MODEL_AUTO || modelId === modelsModule.DEFAULT_GEMINI_MODEL_AUTO;
+    const isCustomToolsModel = modelId === modelsModule.PREVIEW_GEMINI_3_1_CUSTOM_TOOLS_MODEL;
+
+    return {
+      id: modelId,
+      model: modelId,
+      displayName,
+      description: isAlias
+        ? "Gemini CLI router alias"
+        : isCustomToolsModel
+          ? "Gemini CLI custom-tools variant"
+          : "Discovered from the installed Gemini CLI model catalog",
+      hidden: isAlias || isCustomToolsModel,
+      isDefault: modelId === currentModelId,
+      defaultReasoningEffort: null,
+      supportedReasoningEfforts: []
+    };
+  }
+
+  private getGeminiCatalogDisplayName(modelId: string, modelsModule: GeminiModelsModule): string {
+    if (modelId === modelsModule.PREVIEW_GEMINI_MODEL_AUTO) {
+      return "Auto Gemini 3";
+    }
+
+    if (modelId === modelsModule.DEFAULT_GEMINI_MODEL_AUTO) {
+      return "Auto Gemini 2.5";
+    }
+
+    return modelId
+      .split("-")
+      .map((segment) => {
+        if (/^\d+(\.\d+)?$/.test(segment)) {
+          return segment;
+        }
+
+        if (segment.length <= 3) {
+          return segment.toUpperCase();
+        }
+
+        return `${segment[0]?.toUpperCase() ?? ""}${segment.slice(1)}`;
+      })
+      .join(" ");
+  }
+
+  private async importManagedGeminiModelsModule(): Promise<GeminiModelsModule> {
+    const modulePath = this.getGeminiModelsModulePath();
+    return dynamicImport(pathToFileURL(modulePath).href) as Promise<GeminiModelsModule>;
   }
 
   private async importManagedGeminiAcpModule(): Promise<{

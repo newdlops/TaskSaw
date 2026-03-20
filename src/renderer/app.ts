@@ -4,6 +4,7 @@ type ThemePreference = "light" | "dark";
 type ResolvedTheme = "light" | "dark";
 type LanguageCode = "en" | "ko";
 type OrchestratorMode = "gemini_only" | "codex_only" | "cross_review";
+type OrchestratorContinuationMode = "resume" | "next_action";
 type OrchestratorNodeRole = "task" | "stage";
 type XtermTerminal = import("@xterm/xterm").Terminal;
 type XtermTheme = NonNullable<import("@xterm/xterm").ITerminalOptions["theme"]>;
@@ -131,6 +132,18 @@ type OrchestratorWorkingMemory = {
   conflicts: Array<{ summary: string; status: string }>;
   decisions: Array<{ summary: string; rationale: string }>;
 };
+type OrchestratorNextAction = {
+  title: string;
+  objective: string;
+  rationale: string;
+  priority: "critical" | "high" | "medium" | "low";
+};
+type OrchestratorCarryForward = {
+  facts: string[];
+  openQuestions: string[];
+  projectPaths: string[];
+  evidenceSummaries: string[];
+};
 type OrchestratorRunDetail = {
   run: {
     id: string;
@@ -149,6 +162,8 @@ type OrchestratorRunDetail = {
     summary: string;
     outcomes: string[];
     unresolvedRisks: string[];
+    nextActions?: OrchestratorNextAction[];
+    carryForward?: OrchestratorCarryForward;
   };
 };
 type OrchestratorRunResponse =
@@ -217,6 +232,9 @@ type TasksawApi = {
   runOrchestrator(input: {
     goal: string;
     mode: OrchestratorMode;
+    language?: LanguageCode;
+    continuationMode?: OrchestratorContinuationMode | null;
+    nextActionIndex?: number | null;
     maxDepth?: number | null;
     workspacePath?: string | null;
     continueFromRunId?: string | null;
@@ -288,7 +306,10 @@ const TEXT = {
       orchestratorGoalPlaceholder: "Describe the task you want the orchestrator to run",
       orchestratorRun: "Run Orchestrator",
       orchestratorStop: "Stop Run",
-      orchestratorContinue: "Continue Selected",
+      orchestratorContinue: "Resume Selected",
+      orchestratorRunNextAction: "Run Next Action",
+      orchestratorResumeTooltip: "Resume the selected run with the same goal. TaskSaw reuses the previous run's full evidence bundles, working memory, and project structure so the orchestrator can continue from the same local context.",
+      orchestratorRunNextActionTooltip: "Start a new run from the selected review handoff task. TaskSaw uses the selected next action objective as the new goal and carries forward only the trimmed handoff memory that the previous review marked as relevant.",
       orchestratorRefresh: "Refresh Runs",
       orchestratorRunsTitle: "Recent Runs",
       orchestratorDetailTitle: "Run Detail",
@@ -319,6 +340,8 @@ const TEXT = {
       orchestratorApprovalQueueButton: "Input Waiting ({count})",
       orchestratorPendingApprovalsTitle: "Input Waiting",
       orchestratorPendingApprovalsEmpty: "No pending approval requests.",
+      orchestratorNextActionsTitle: "Review Next Actions",
+      orchestratorNextActionsEmpty: "No review-derived next actions are available for this run yet.",
       orchestratorApprovalEmpty: "No pending approval request.",
       orchestratorUserInputTitle: "Input Required",
       orchestratorUserInputWaiting: "Waiting for response",
@@ -350,6 +373,9 @@ const TEXT = {
       orchestratorNodeTerminalEmpty: "Select a node to inspect its live interaction stream.",
       orchestratorNodeLogEmpty: "No node events yet.",
       orchestratorLogEmpty: "No orchestrator events yet.",
+      orchestratorNextActionSelected: "Selected",
+      orchestratorNextActionPriority: "{priority} priority",
+      orchestratorCarryForwardSummary: "Trimmed handoff: {facts} facts, {questions} open questions, {paths} project paths, {evidence} evidence bundles",
       orchestratorCommandStatusIdle: "Queued",
       orchestratorCommandStatusDispatched: "Dispatched",
       orchestratorCommandStatusResponded: "Response received",
@@ -389,6 +415,7 @@ const TEXT = {
       failedReset: "Failed to reset TaskSaw data: {message}",
       orchestratorGoalMissing: "Enter an orchestrator goal first.",
       orchestratorContinueMissing: "Select an orchestrator run to continue.",
+      orchestratorNextActionMissing: "Select a review next action from the selected run first.",
       orchestratorWorkspaceMissing: "Select the workspace folder before running the orchestrator.",
       orchestratorStopUnavailable: "There is no active orchestrator run to stop.",
       orchestratorLoginRequired: "Missing login session for {tools}. Log in from a TaskSaw terminal tab, then retry.",
@@ -439,7 +466,10 @@ const TEXT = {
       orchestratorGoalPlaceholder: "오케스트레이터가 수행할 작업을 입력하세요",
       orchestratorRun: "오케스트레이터 실행",
       orchestratorStop: "실행 중단",
-      orchestratorContinue: "선택 실행 이어서",
+      orchestratorContinue: "같은 목표 재개",
+      orchestratorRunNextAction: "다음 과제 실행",
+      orchestratorResumeTooltip: "선택한 실행을 같은 목표로 다시 이어서 시작합니다. 이전 실행의 evidence bundle, working memory, project structure를 그대로 승계해 같은 로컬 맥락에서 재개합니다.",
+      orchestratorRunNextActionTooltip: "선택한 리뷰 handoff의 다음 과제를 새 목표로 시작합니다. 이전 리뷰가 중요하다고 표시한 축약 메모리만 승계해 다음 작업에 맞는 가벼운 컨텍스트로 이어갑니다.",
       orchestratorRefresh: "실행 목록 새로고침",
       orchestratorRunsTitle: "최근 실행",
       orchestratorDetailTitle: "실행 상세",
@@ -470,6 +500,8 @@ const TEXT = {
       orchestratorApprovalQueueButton: "입력 대기중 ({count})",
       orchestratorPendingApprovalsTitle: "입력 대기중",
       orchestratorPendingApprovalsEmpty: "대기 중인 승인 요청이 없습니다.",
+      orchestratorNextActionsTitle: "리뷰 다음 과제",
+      orchestratorNextActionsEmpty: "이 실행에는 리뷰에서 정리된 다음 과제가 아직 없습니다.",
       orchestratorApprovalEmpty: "대기 중인 승인 요청이 없습니다.",
       orchestratorUserInputTitle: "입력 요청",
       orchestratorUserInputWaiting: "응답 대기 중",
@@ -501,6 +533,9 @@ const TEXT = {
       orchestratorNodeTerminalEmpty: "노드를 선택하면 실시간 상호작용 흐름을 볼 수 있습니다.",
       orchestratorNodeLogEmpty: "아직 노드 이벤트가 없습니다.",
       orchestratorLogEmpty: "아직 오케스트레이터 이벤트가 없습니다.",
+      orchestratorNextActionSelected: "선택됨",
+      orchestratorNextActionPriority: "{priority} 우선순위",
+      orchestratorCarryForwardSummary: "축약 handoff: 사실 {facts}개, 열린 질문 {questions}개, 프로젝트 경로 {paths}개, 근거 번들 {evidence}개",
       orchestratorCommandStatusIdle: "대기 중",
       orchestratorCommandStatusDispatched: "전달됨",
       orchestratorCommandStatusResponded: "응답 수신",
@@ -540,6 +575,7 @@ const TEXT = {
       failedReset: "TaskSaw 데이터 초기화 실패: {message}",
       orchestratorGoalMissing: "먼저 오케스트레이터 목표를 입력하세요.",
       orchestratorContinueMissing: "이어갈 오케스트레이터 실행을 먼저 선택하세요.",
+      orchestratorNextActionMissing: "선택한 실행에서 리뷰 다음 과제를 먼저 고르세요.",
       orchestratorWorkspaceMissing: "오케스트레이터를 실행하기 전에 워크스페이스 폴더를 선택하세요.",
       orchestratorStopUnavailable: "중단할 활성 오케스트레이터 실행이 없습니다.",
       orchestratorLoginRequired: "{tools} 로그인 세션이 없습니다. TaskSaw 터미널에서 로그인한 뒤 다시 실행하세요.",
@@ -584,12 +620,18 @@ const orchestratorDepthInput = document.getElementById("orchestrator-depth") as 
 const orchestratorRefreshButton = document.getElementById("orchestrator-refresh") as HTMLButtonElement;
 const orchestratorStopButton = document.getElementById("orchestrator-stop") as HTMLButtonElement;
 const orchestratorContinueButton = document.getElementById("orchestrator-continue") as HTMLButtonElement;
+const orchestratorRunNextActionButton = document.getElementById("orchestrator-run-next-action") as HTMLButtonElement;
 const orchestratorRunButton = document.getElementById("orchestrator-run") as HTMLButtonElement;
 const orchestratorRunsTitleEl = document.getElementById("orchestrator-runs-title") as HTMLDivElement;
 const orchestratorRunListEl = document.getElementById("orchestrator-run-list") as HTMLUListElement;
 const orchestratorDetailTitleEl = document.getElementById("orchestrator-detail-title") as HTMLDivElement;
 const orchestratorDetailTabNodeButton = document.getElementById("orchestrator-detail-tab-node") as HTMLButtonElement;
 const orchestratorDetailTabMemoryButton = document.getElementById("orchestrator-detail-tab-memory") as HTMLButtonElement;
+const orchestratorNextActionsEl = document.getElementById("orchestrator-next-actions") as HTMLElement;
+const orchestratorNextActionsTitleEl = document.getElementById("orchestrator-next-actions-title") as HTMLDivElement;
+const orchestratorNextActionsStatusEl = document.getElementById("orchestrator-next-actions-status") as HTMLSpanElement;
+const orchestratorNextActionsSummaryEl = document.getElementById("orchestrator-next-actions-summary") as HTMLDivElement;
+const orchestratorNextActionsListEl = document.getElementById("orchestrator-next-actions-list") as HTMLDivElement;
 const orchestratorDetailPanelNodeEl = document.getElementById("orchestrator-detail-panel-node") as HTMLElement;
 const orchestratorDetailPanelMemoryEl = document.getElementById("orchestrator-detail-panel-memory") as HTMLElement;
 const orchestratorNodeLiveTitleEl = document.getElementById("orchestrator-node-live-title") as HTMLDivElement;
@@ -672,6 +714,7 @@ const sessionCloseButtons = new Map<string, HTMLButtonElement>();
 const terminalDimensions = new Map<string, { cols: number; rows: number }>();
 const sessions: SessionInfo[] = [];
 const orchestratorRuns: OrchestratorRunSummary[] = [];
+const selectedNextActionIndexByRun = new Map<string, number>();
 
 const THEME_STORAGE_KEY = "tasksaw-theme";
 const WORKSPACE_STORAGE_KEY = "tasksaw-last-workspace";
@@ -686,9 +729,9 @@ const ORCHESTRATOR_PHASE_TRACK = [
   "gather",
   "evidence_consolidation",
   "concrete_plan",
-  "review",
   "execute",
-  "verify"
+  "verify",
+  "review"
 ] as const;
 const TASKSAW_PROMPT_MARKER = "TASKSAW_PROMPT_ENVELOPE_JSON";
 const XTERM_THEMES = {
@@ -1523,12 +1566,31 @@ function getTaskStageChildren(detail: OrchestratorRunDetail, node: OrchestratorP
   return detail.nodes.filter((candidate) => candidate.parentId === node.id && candidate.role === "stage");
 }
 
+function collectNodeSubtreeIds(detail: OrchestratorRunDetail, nodeId: string, acc: Set<string>) {
+  if (acc.has(nodeId)) {
+    return;
+  }
+
+  acc.add(nodeId);
+  for (const child of detail.nodes) {
+    if (child.parentId === nodeId) {
+      collectNodeSubtreeIds(detail, child.id, acc);
+    }
+  }
+}
+
 function getDisplayNodeEvents(detail: OrchestratorRunDetail, node: OrchestratorPlanNode): OrchestratorEvent[] {
   if (node.role === "stage") {
     return getNodeEvents(detail, node.id);
   }
 
   const visibleNodeIds = new Set([node.id, ...getTaskStageChildren(detail, node).map((child) => child.id)]);
+  for (const child of detail.nodes) {
+    if (child.parentId === node.id && child.role === "task" && child.kind === "execution") {
+      collectNodeSubtreeIds(detail, child.id, visibleNodeIds);
+    }
+  }
+
   return detail.events.filter((event) => event.nodeId !== null && visibleNodeIds.has(event.nodeId));
 }
 
@@ -1783,6 +1845,65 @@ function formatModelResponseDebugLog(event: OrchestratorEvent): string[] {
   return lines;
 }
 
+function formatExecutionStatusDebugLog(event: OrchestratorEvent): string[] {
+  const lines = summarizeEvent(event);
+  const state = typeof event.payload.state === "string" ? event.payload.state : "";
+  const message = typeof event.payload.message === "string" ? event.payload.message.trim() : "";
+  const command = typeof event.payload.command === "string" ? event.payload.command.trim() : "";
+  const cwd = typeof event.payload.cwd === "string" ? event.payload.cwd.trim() : "";
+  const outputPreview = typeof event.payload.outputPreview === "string" ? event.payload.outputPreview.trim() : "";
+  const processId = typeof event.payload.processId === "string" ? event.payload.processId.trim() : "";
+
+  if (command.length > 0) {
+    lines.push(`command: ${command}`);
+  }
+
+  if (cwd.length > 0) {
+    lines.push(`cwd: ${cwd}`);
+  }
+
+  if (state === "command_output" && message.length > 0) {
+    lines.push("");
+    lines.push(languagePreference === "ko" ? "command output" : "command output");
+    lines.push(formatDisplayString(message, 2400));
+  }
+
+  if (state === "terminal_interaction" && message.length > 0) {
+    lines.push("");
+    lines.push(languagePreference === "ko" ? "stdin" : "stdin");
+    lines.push(formatDisplayString(message, 2400));
+  }
+
+  if (outputPreview.length > 0) {
+    lines.push("");
+    lines.push(languagePreference === "ko" ? "output preview" : "output preview");
+    lines.push(formatDisplayString(outputPreview, 2400));
+  }
+
+  if (processId.length > 0) {
+    lines.push(`process id: ${processId}`);
+  }
+
+  const detailLines = formatPayloadDetails(
+    event.payload,
+    [
+      "state",
+      "message",
+      "command",
+      "cwd",
+      "outputPreview",
+      "processId"
+    ],
+    2400
+  );
+
+  if (detailLines.length > 0) {
+    lines.push(...detailLines);
+  }
+
+  return lines;
+}
+
 function serializeViewerValue(value: unknown): string {
   if (value === undefined) {
     return "";
@@ -1965,6 +2086,8 @@ function formatExecutionStatusLabel(state: string | undefined): string {
     const labels: Record<string, string> = {
       queued: "대기 중",
       reviewing: "검토 중",
+      review_completed: "검토 정리 완료",
+      review_failed: "검토 정리 실패",
       review_approved: "검토 승인됨",
       review_rejected: "검토 거절됨",
       running: "실행 중",
@@ -1994,6 +2117,8 @@ function formatExecutionStatusLabel(state: string | undefined): string {
   const labels: Record<string, string> = {
     queued: "Queued",
     reviewing: "Reviewing",
+    review_completed: "Review completed",
+    review_failed: "Review failed",
     review_approved: "Review approved",
     review_rejected: "Review rejected",
     running: "Running",
@@ -2648,6 +2773,8 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
       lines = formatModelInvocationDebugLog(event);
     } else if (event.type === "model_response") {
       lines = formatModelResponseDebugLog(event);
+    } else if (event.type === "execution_status") {
+      lines = formatExecutionStatusDebugLog(event);
     } else {
       lines = summarizeEvent(event);
     }
@@ -3062,6 +3189,160 @@ function setActiveOrchestratorDetailTab(tab: OrchestratorDetailTab) {
   renderOrchestratorDetailTabs();
 }
 
+function getReviewNextActions(detail: OrchestratorRunDetail | null): OrchestratorNextAction[] {
+  return detail?.finalReport?.nextActions ?? [];
+}
+
+function getSelectedNextActionIndex(detail: OrchestratorRunDetail | null): number | null {
+  if (!detail) {
+    return null;
+  }
+
+  const nextActions = getReviewNextActions(detail);
+  if (nextActions.length === 0) {
+    selectedNextActionIndexByRun.delete(detail.run.id);
+    return null;
+  }
+
+  const storedIndex = selectedNextActionIndexByRun.get(detail.run.id);
+  const normalizedIndex = storedIndex === undefined
+    ? 0
+    : Math.max(0, Math.min(nextActions.length - 1, storedIndex));
+  selectedNextActionIndexByRun.set(detail.run.id, normalizedIndex);
+  return normalizedIndex;
+}
+
+function getSelectedNextAction(detail: OrchestratorRunDetail | null): OrchestratorNextAction | null {
+  const index = getSelectedNextActionIndex(detail);
+  if (index === null) {
+    return null;
+  }
+
+  return getReviewNextActions(detail)[index] ?? null;
+}
+
+function formatNextActionPriority(priority: OrchestratorNextAction["priority"]): string {
+  const localizedPriority = languagePreference === "ko"
+    ? ({
+        critical: "매우 높음",
+        high: "높음",
+        medium: "보통",
+        low: "낮음"
+      } as const)[priority]
+    : ({
+        critical: "Critical",
+        high: "High",
+        medium: "Medium",
+        low: "Low"
+      } as const)[priority];
+  return translate("ui.orchestratorNextActionPriority", { priority: localizedPriority });
+}
+
+function buildCarryForwardSummary(carryForward: OrchestratorCarryForward | undefined): string {
+  return translate("ui.orchestratorCarryForwardSummary", {
+    facts: String(carryForward?.facts.length ?? 0),
+    questions: String(carryForward?.openQuestions.length ?? 0),
+    paths: String(carryForward?.projectPaths.length ?? 0),
+    evidence: String(carryForward?.evidenceSummaries.length ?? 0)
+  });
+}
+
+function buildNextActionTooltip(action: OrchestratorNextAction, detail: OrchestratorRunDetail): string {
+  const carryForwardSummary = buildCarryForwardSummary(detail.finalReport?.carryForward);
+  return [
+    action.title,
+    "",
+    formatNextActionPriority(action.priority),
+    "",
+    action.objective,
+    "",
+    action.rationale,
+    "",
+    carryForwardSummary,
+    detail.finalReport?.carryForward?.projectPaths.length
+      ? detail.finalReport.carryForward.projectPaths.join("\n")
+      : null
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
+function renderReviewNextActionsCard(detail: OrchestratorRunDetail | null) {
+  const nextActions = getReviewNextActions(detail);
+  const selectedAction = getSelectedNextAction(detail);
+  orchestratorNextActionsTitleEl.textContent = translate("ui.orchestratorNextActionsTitle");
+  orchestratorNextActionsSummaryEl.textContent = detail?.finalReport?.carryForward
+    ? buildCarryForwardSummary(detail.finalReport.carryForward)
+    : selectedAction?.rationale ?? "";
+  orchestratorNextActionsSummaryEl.title = detail?.finalReport?.carryForward
+    ? [
+        buildCarryForwardSummary(detail.finalReport.carryForward),
+        "",
+        ...detail.finalReport.carryForward.facts,
+        ...detail.finalReport.carryForward.openQuestions,
+        ...detail.finalReport.carryForward.projectPaths,
+        ...detail.finalReport.carryForward.evidenceSummaries
+      ].join("\n")
+    : (selectedAction?.rationale ?? "");
+  orchestratorNextActionsListEl.innerHTML = "";
+  orchestratorNextActionsStatusEl.textContent = String(nextActions.length);
+  orchestratorNextActionsEl.hidden = false;
+
+  if (!detail || nextActions.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "orchestrator-next-action-empty";
+    empty.textContent = translate("ui.orchestratorNextActionsEmpty");
+    orchestratorNextActionsListEl.appendChild(empty);
+    return;
+  }
+
+  const selectedIndex = getSelectedNextActionIndex(detail) ?? 0;
+  for (const [index, action] of nextActions.entries()) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "orchestrator-next-action-item";
+    button.classList.toggle("active", index === selectedIndex);
+    button.title = buildNextActionTooltip(action, detail);
+
+    const header = document.createElement("div");
+    header.className = "orchestrator-next-action-head";
+
+    const title = document.createElement("strong");
+    title.className = "orchestrator-next-action-title";
+    title.textContent = action.title;
+
+    const badges = document.createElement("div");
+    badges.className = "orchestrator-next-action-badges";
+
+    const priority = document.createElement("span");
+    priority.className = "orchestrator-next-action-badge";
+    priority.textContent = formatNextActionPriority(action.priority);
+
+    badges.appendChild(priority);
+    if (index === selectedIndex) {
+      const selectedBadge = document.createElement("span");
+      selectedBadge.className = "orchestrator-next-action-badge selected";
+      selectedBadge.textContent = translate("ui.orchestratorNextActionSelected");
+      badges.appendChild(selectedBadge);
+    }
+
+    header.append(title, badges);
+
+    const objective = document.createElement("div");
+    objective.className = "orchestrator-next-action-objective";
+    objective.textContent = action.objective;
+
+    const rationale = document.createElement("div");
+    rationale.className = "orchestrator-next-action-rationale";
+    rationale.textContent = action.rationale;
+
+    button.append(header, objective, rationale);
+    button.addEventListener("click", () => {
+      selectedNextActionIndexByRun.set(detail.run.id, index);
+      renderOrchestratorDetail();
+    });
+    orchestratorNextActionsListEl.appendChild(button);
+  }
+}
+
 function getNodeActivityPreview(detail: OrchestratorRunDetail, node: OrchestratorPlanNode): {
   tone: OrchestratorProgressTone;
   summary: string;
@@ -3181,6 +3462,8 @@ function renderOrchestratorDetail() {
       String(selectedOrchestratorRun.nodes.length),
       String(selectedOrchestratorRun.events.length),
       selectedOrchestratorRun.finalReport?.summary ?? "",
+      selectedOrchestratorRun.finalReport?.nextActions?.map((action) => `${action.title}:${action.priority}`).join("~") ?? "",
+      String(getSelectedNextActionIndex(selectedOrchestratorRun) ?? -1),
       selectedNode?.id ?? "",
       shouldTickSelectedNodeProgress(selectedOrchestratorRun) ? String(orchestratorElapsedClock) : "",
       String(selectedOrchestratorRun.workingMemory.facts.length),
@@ -3198,6 +3481,7 @@ function renderOrchestratorDetail() {
   lastOrchestratorDetailSignature = signature;
   const liveView = buildSelectedNodeLiveView(selectedOrchestratorRun);
   const pendingApprovals = listPendingApprovals(selectedOrchestratorRun);
+  renderReviewNextActionsCard(selectedOrchestratorRun);
   orchestratorNodeLiveStatusEl.textContent = liveView.status;
   renderNodeProgressPanel(orchestratorNodeLiveMetaEl, liveView.progress);
   renderPendingApprovalsCard(pendingApprovals);
@@ -3666,6 +3950,7 @@ function updateOrchestratorControls() {
   orchestratorRunButton.disabled = controlsDisabled || missingWorkspace;
   orchestratorStopButton.disabled = !isOrchestratorRunning || !liveOrchestratorRunId || isOrchestratorStopRequested || isResetting;
   orchestratorContinueButton.disabled = controlsDisabled || !selectedOrchestratorRunId || missingWorkspace;
+  orchestratorRunNextActionButton.disabled = controlsDisabled || !getSelectedNextAction(selectedOrchestratorRun) || missingWorkspace;
   orchestratorRefreshButton.disabled = controlsDisabled;
   orchestratorModeSelect.disabled = controlsDisabled;
   resetAppButton.disabled = isToolUpdateRunning || isResetting || isOrchestratorRunning;
@@ -3702,6 +3987,9 @@ function refreshLocalizedContent() {
   orchestratorDepthLabelEl.textContent = translate("ui.orchestratorDepthLabel");
   orchestratorGoalInput.placeholder = translate("ui.orchestratorGoalPlaceholder");
   orchestratorContinueButton.textContent = translate("ui.orchestratorContinue");
+  orchestratorContinueButton.title = translate("ui.orchestratorResumeTooltip");
+  orchestratorRunNextActionButton.textContent = translate("ui.orchestratorRunNextAction");
+  orchestratorRunNextActionButton.title = translate("ui.orchestratorRunNextActionTooltip");
   orchestratorStopButton.textContent = translate("ui.orchestratorStop");
   orchestratorRunButton.textContent = translate("ui.orchestratorRun");
   orchestratorRefreshButton.textContent = translate("ui.orchestratorRefresh");
@@ -4091,13 +4379,20 @@ async function stopOrchestratorRun() {
   }
 }
 
-async function runOrchestrator(continueFromRunId: string | null = null) {
+async function runOrchestrator(options?: {
+  continueFromRunId?: string | null;
+  continuationMode?: OrchestratorContinuationMode;
+  nextActionIndex?: number | null;
+  goalOverride?: string | null;
+}) {
+  const continueFromRunId = options?.continueFromRunId ?? null;
+  const continuationMode = options?.continuationMode ?? "resume";
   if (continueFromRunId && !selectedOrchestratorRunId) {
     logLocalized("errors.orchestratorContinueMissing");
     return;
   }
 
-  const goal = orchestratorGoalInput.value.trim() || (
+  const goal = options?.goalOverride?.trim() || orchestratorGoalInput.value.trim() || (
     continueFromRunId
       ? (selectedOrchestratorRun?.run.goal ?? orchestratorRuns.find((run) => run.id === continueFromRunId)?.goal ?? "")
       : ""
@@ -4134,6 +4429,9 @@ async function runOrchestrator(continueFromRunId: string | null = null) {
     const response = await appWindow.tasksaw.runOrchestrator({
       goal,
       mode: orchestratorMode,
+      language: languagePreference,
+      continuationMode: continueFromRunId ? continuationMode : null,
+      nextActionIndex: continueFromRunId ? (options?.nextActionIndex ?? null) : null,
       maxDepth,
       workspacePath: currentWorkspacePath,
       continueFromRunId,
@@ -4191,6 +4489,27 @@ async function runOrchestrator(continueFromRunId: string | null = null) {
     liveOrchestratorRunId = null;
     updateOrchestratorControls();
   }
+}
+
+async function runSelectedNextAction() {
+  if (!selectedOrchestratorRunId || !selectedOrchestratorRun) {
+    logLocalized("errors.orchestratorContinueMissing");
+    return;
+  }
+
+  const nextActionIndex = getSelectedNextActionIndex(selectedOrchestratorRun);
+  const nextAction = getSelectedNextAction(selectedOrchestratorRun);
+  if (nextActionIndex === null || !nextAction) {
+    logLocalized("errors.orchestratorNextActionMissing");
+    return;
+  }
+
+  await runOrchestrator({
+    continueFromRunId: selectedOrchestratorRunId,
+    continuationMode: "next_action",
+    nextActionIndex,
+    goalOverride: nextAction.objective
+  });
 }
 
 function hasSession(sessionId: string | null): sessionId is string {
@@ -4964,7 +5283,13 @@ orchestratorStopButton.addEventListener("click", () => {
   void stopOrchestratorRun();
 });
 orchestratorContinueButton.addEventListener("click", () => {
-  void runOrchestrator(selectedOrchestratorRunId);
+  void runOrchestrator({
+    continueFromRunId: selectedOrchestratorRunId,
+    continuationMode: "resume"
+  });
+});
+orchestratorRunNextActionButton.addEventListener("click", () => {
+  void runSelectedNextAction();
 });
 orchestratorRunButton.addEventListener("click", () => {
   void runOrchestrator();
