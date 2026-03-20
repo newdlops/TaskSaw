@@ -3,9 +3,14 @@ import path from "node:path";
 import {
   CliModelAdapter,
   ContinuationSeed,
+  createCodexAppServerInvoker,
   createGeminiAcpInvoker,
   ModelAssignment,
   ModelAdapterRegistry,
+  OrchestratorApprovalDecision,
+  OrchestratorApprovalRequest,
+  OrchestratorUserInputRequest,
+  OrchestratorUserInputResponse,
   ModelRef,
   OrchestratorCapability,
   OrchestratorEvent,
@@ -84,7 +89,9 @@ export class OrchestratorService {
 
   async runOrchestrator(
     input: RunOrchestratorInput,
-    onEvent?: (event: OrchestratorEvent) => void
+    onEvent?: (event: OrchestratorEvent) => void,
+    requestUserApproval?: (request: OrchestratorApprovalRequest) => Promise<OrchestratorApprovalDecision>,
+    requestUserInput?: (request: OrchestratorUserInputRequest) => Promise<OrchestratorUserInputResponse>
   ): Promise<RunSnapshot> {
     const workspacePath = input.workspacePath?.trim();
     if (!workspacePath) {
@@ -96,6 +103,8 @@ export class OrchestratorService {
     let activeRunId: string | null = null;
     const runtime = new OrchestratorRuntime(await this.createRegistry(workspacePath, modeConfig.toolModels), {
       persistence: this.persistence,
+      requestUserApproval,
+      requestUserInput,
       onEvent: (event) => {
         if (!activeRunId) {
           activeRunId = event.runId;
@@ -376,22 +385,15 @@ export class OrchestratorService {
               ...codexEnv,
               ...codexCommand.env
             },
-            buildInvocationArgs: (capability, prompt, context) => [
-              cliRunnerPath,
-              codexEntryPath,
-              ...codexConfigArgs,
-              "exec",
-              "--json",
-              "--skip-git-repo-check",
-              "--ephemeral",
-              "-C",
-              workspacePath,
-              "-s",
-              capability === "execute" ? "workspace-write" : "read-only",
-              "-m",
-              context.assignedModel.model,
-              prompt
-            ],
+            customInvoke: createCodexAppServerInvoker({
+              executablePath: codexCommand.command,
+              executableArgs: [cliRunnerPath, codexEntryPath, ...codexConfigArgs],
+              cwd: workspacePath,
+              env: {
+                ...codexEnv,
+                ...codexCommand.env
+              }
+            }),
             supportedCapabilities: ORCHESTRATOR_CAPABILITIES
           })
         );

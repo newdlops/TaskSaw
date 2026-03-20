@@ -281,7 +281,9 @@ function buildStageInstructions(
       "If projectStructure is contradictory or missing critical facts, set needsProjectStructureInspection=true, provide inspectionObjectives, and explain the contradiction in projectStructureContradictions.",
       "Child tasks created here are planning nodes only. Do not merge execution into the planning node.",
       "Each child task must include an importance field and explicit assignedModels chosen from nodeModelRouting.",
-      "There is no model inheritance. The orchestrator will execute child nodes only with the exact assignedModels you return."
+      "There is no model inheritance. The orchestrator will execute child nodes only with the exact assignedModels you return.",
+      "If a different model should handle a different part of the work, split that work into a separate child task node with its own assignedModels.",
+      "Do not switch model responsibility inside a single child task."
     ].join(" ");
   }
 

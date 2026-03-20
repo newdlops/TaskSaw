@@ -1,6 +1,7 @@
 export * from "./adapter-registry";
 export * from "./cli-model-adapter";
 export * from "./cli-prompt";
+export * from "./codex-app-server-invoker";
 export * from "./engine";
 export * from "./evidence-store";
 export * from "./gemini-acp-invoker";

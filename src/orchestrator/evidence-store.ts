@@ -52,24 +52,9 @@ export class EvidenceStore {
       runId: input.runId,
       nodeId: input.nodeId,
       summary: input.summary,
-      facts: (input.facts ?? []).map((fact) => ({
-        id: fact.id ?? randomUUID(),
-        statement: fact.statement,
-        confidence: fact.confidence,
-        referenceIds: [...fact.referenceIds]
-      })),
-      hypotheses: (input.hypotheses ?? []).map((hypothesis) => ({
-        id: hypothesis.id ?? randomUUID(),
-        statement: hypothesis.statement,
-        confidence: hypothesis.confidence,
-        referenceIds: [...hypothesis.referenceIds]
-      })),
-      unknowns: (input.unknowns ?? []).map((unknown) => ({
-        id: unknown.id ?? randomUUID(),
-        question: unknown.question,
-        impact: unknown.impact,
-        referenceIds: [...unknown.referenceIds]
-      })),
+      facts: this.normalizeFacts(input.facts),
+      hypotheses: this.normalizeHypotheses(input.hypotheses),
+      unknowns: this.normalizeUnknowns(input.unknowns),
       relevantTargets: (input.relevantTargets ?? []).map((target) => ({ ...target })),
       snippets: (input.snippets ?? []).map((snippet) => ({
         id: snippet.id ?? randomUUID(),
@@ -97,12 +82,9 @@ export class EvidenceStore {
   upsertBundle(bundle: EvidenceBundle) {
     this.bundles.set(bundle.id, {
       ...bundle,
-      facts: bundle.facts.map((fact) => ({ ...fact, referenceIds: [...fact.referenceIds] })),
-      hypotheses: bundle.hypotheses.map((hypothesis) => ({
-        ...hypothesis,
-        referenceIds: [...hypothesis.referenceIds]
-      })),
-      unknowns: bundle.unknowns.map((unknown) => ({ ...unknown, referenceIds: [...unknown.referenceIds] })),
+      facts: this.normalizeFacts(bundle.facts),
+      hypotheses: this.normalizeHypotheses(bundle.hypotheses),
+      unknowns: this.normalizeUnknowns(bundle.unknowns),
       relevantTargets: bundle.relevantTargets.map((target) => ({ ...target })),
       snippets: bundle.snippets.map((snippet) => ({
         ...snippet,
@@ -185,6 +167,114 @@ export class EvidenceStore {
     }
 
     return "mixed";
+  }
+
+  private normalizeStringArray(value: unknown): string[] {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => {
+          if (typeof item === "string") {
+            return item.trim();
+          }
+
+          if (typeof item === "number" || typeof item === "boolean") {
+            return String(item);
+          }
+
+          return "";
+        })
+        .filter((item): item is string => item.length > 0);
+    }
+
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? [trimmed] : [];
+    }
+
+    if (typeof value === "number" || typeof value === "boolean") {
+      return [String(value)];
+    }
+
+    return [];
+  }
+
+  private normalizeFacts(input: CreateEvidenceBundleInput["facts"] | EvidenceBundle["facts"] | undefined): EvidenceFact[] {
+    const normalized: EvidenceFact[] = [];
+
+    for (const fact of input ?? []) {
+      const statement = this.normalizeNonEmptyString((fact as { statement?: unknown }).statement);
+      if (!statement) continue;
+
+      normalized.push({
+        id: fact.id ?? randomUUID(),
+        statement,
+        confidence: this.normalizeConfidence((fact as { confidence?: unknown }).confidence),
+        referenceIds: this.normalizeStringArray((fact as { referenceIds?: unknown }).referenceIds)
+      });
+    }
+
+    return normalized;
+  }
+
+  private normalizeHypotheses(
+    input: CreateEvidenceBundleInput["hypotheses"] | EvidenceBundle["hypotheses"] | undefined
+  ): EvidenceHypothesis[] {
+    const normalized: EvidenceHypothesis[] = [];
+
+    for (const hypothesis of input ?? []) {
+      const statement = this.normalizeNonEmptyString((hypothesis as { statement?: unknown }).statement);
+      if (!statement) continue;
+
+      normalized.push({
+        id: hypothesis.id ?? randomUUID(),
+        statement,
+        confidence: this.normalizeConfidence((hypothesis as { confidence?: unknown }).confidence),
+        referenceIds: this.normalizeStringArray((hypothesis as { referenceIds?: unknown }).referenceIds)
+      });
+    }
+
+    return normalized;
+  }
+
+  private normalizeUnknowns(
+    input: CreateEvidenceBundleInput["unknowns"] | EvidenceBundle["unknowns"] | undefined
+  ): EvidenceUnknown[] {
+    const normalized: EvidenceUnknown[] = [];
+
+    for (const unknown of input ?? []) {
+      const question = this.normalizeNonEmptyString((unknown as { question?: unknown }).question);
+      if (!question) continue;
+
+      normalized.push({
+        id: unknown.id ?? randomUUID(),
+        question,
+        impact: this.normalizeImpact((unknown as { impact?: unknown }).impact),
+        referenceIds: this.normalizeStringArray((unknown as { referenceIds?: unknown }).referenceIds)
+      });
+    }
+
+    return normalized;
+  }
+
+  private normalizeConfidence(value: unknown): ConfidenceLevel {
+    return value === "low" || value === "medium" || value === "high" || value === "mixed"
+      ? value
+      : "medium";
+  }
+
+  private normalizeImpact(value: unknown): EvidenceUnknown["impact"] {
+    return value === "low" || value === "medium" || value === "high"
+      ? value
+      : "medium";
+  }
+
+  private normalizeNonEmptyString(value: unknown): string | undefined {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
   }
 
   private dedupeByIdentity<T>(items: T[], keyFn: (item: T) => string): T[] {

@@ -70,6 +70,18 @@ export type OrchestratorRunSummary = {
 
 export type OrchestratorRunDetail = RunSnapshot;
 
+export type RespondOrchestratorApprovalInput = {
+  requestId: string;
+  optionId?: string | null;
+  approved: boolean;
+};
+
+export type RespondOrchestratorUserInputInput = {
+  requestId: string;
+  submitted: boolean;
+  answers?: Record<string, string[]>;
+};
+
 export type OrchestratorRunResponse =
   | {
     status: "completed";

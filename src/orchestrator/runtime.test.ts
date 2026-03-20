@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ModelAdapterRegistry } from "./adapter-registry";
 import {
-  MissingChildTaskModelAssignmentError,
   OrchestratorRunCancelledError,
   OrchestratorRuntime
 } from "./runtime";
@@ -336,6 +335,134 @@ test("runtime executes the minimal happy path and propagates evidence into plann
     "Confirm evidence bundle schema",
     "How should real adapters stream partial output?"
   ]);
+});
+
+test("runtime tolerates malformed evidence referenceIds from gather responses", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        abstractPlan: () => ({
+          summary: "Inspect the runtime only",
+          targetsToInspect: [],
+          evidenceRequirements: []
+        }),
+        concretePlan: () => ({
+          summary: "Execute directly",
+          childTasks: [],
+          executionNotes: []
+        }),
+        verify: () => ({
+          summary: "Verification passed",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => ({
+          summary: "Gathered evidence with loose Gemini-style fields",
+          evidenceBundles: [
+            {
+              id: "bundle-malformed-reference-ids",
+              summary: "Collected evidence",
+              facts: [
+                {
+                  id: "fact-invalid",
+                  statement: "   " as string,
+                  confidence: "mixed",
+                  referenceIds: []
+                },
+                {
+                  id: "fact-main-ipc",
+                  statement: "The main process owns tool discovery",
+                  confidence: "high",
+                  referenceIds: "ref-main-ipc" as unknown as string[]
+                }
+              ],
+              hypotheses: [],
+              unknowns: [
+                {
+                  id: "unknown-invalid",
+                  question: "",
+                  impact: "medium",
+                  referenceIds: []
+                }
+              ],
+              relevantTargets: [],
+              snippets: [],
+              references: [],
+              confidence: "mixed"
+            }
+          ]
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execution complete",
+          outputs: ["ok"]
+        })
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry);
+  const result = await runtime.executeScheduledRun({
+    goal: "Handle loose gather evidence from Gemini",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    }
+  });
+
+  assert.equal(result.snapshot.run.status, "done");
+  assert.equal(result.snapshot.workingMemory.facts.length, 1);
+  assert.equal(result.snapshot.workingMemory.unknowns.length, 0);
+  assert.deepEqual(result.snapshot.workingMemory.facts[0]?.referenceIds, ["ref-main-ipc"]);
 });
 
 test("runtime seeds continuation snapshots into the next run", async () => {
@@ -1106,8 +1233,9 @@ test("runtime records failure events when a node invocation throws", async () =>
   );
 });
 
-test("runtime rejects decomposed child tasks that omit explicit routed models", async () => {
+test("runtime materializes missing child task routing from the parent node model routing set", async () => {
   const trace: string[] = [];
+  const events: string[] = [];
   const registry = new ModelAdapterRegistry();
 
   const planner: ModelRef = {
@@ -1135,22 +1263,33 @@ test("runtime rejects decomposed child tasks that omit explicit routed models", 
   registry.register(
     new MockAdapter(
       planner,
-      new Set(["abstractPlan", "concretePlan"]),
+      new Set(["abstractPlan", "concretePlan", "verify"]),
       {
         abstractPlan: () => ({
           summary: "Decompose the task into a child node",
           targetsToInspect: [],
           evidenceRequirements: []
         }),
-        concretePlan: () => ({
-          summary: "A child planner is required here",
-          childTasks: [
-            {
-              title: "Child without routing",
-              objective: "This child should fail before execution"
+        concretePlan: (_evidenceCount, _factCount, context) => context.node.depth === 0
+          ? {
+              summary: "A child planner is required here",
+              childTasks: [
+                {
+                  title: "Child without routing",
+                  objective: "This child should inherit no hidden state and be materialized explicitly"
+                }
+              ],
+              executionNotes: []
             }
-          ],
-          executionNotes: []
+          : {
+              summary: "Leaf planning complete",
+              childTasks: [],
+              executionNotes: []
+            },
+        verify: () => ({
+          summary: "Verification passed",
+          passed: true,
+          findings: []
         })
       },
       trace
@@ -1171,29 +1310,54 @@ test("runtime rejects decomposed child tasks that omit explicit routed models", 
       trace
     )
   );
-  registry.register(new MockAdapter(executor, new Set(["execute"]), {}, trace));
-
-  const runtime = new OrchestratorRuntime(registry);
-  await assert.rejects(
-    runtime.executeScheduledRun({
-      goal: "Fail when the planner omits explicit child model routing",
-      reviewPolicy: "none",
-      assignedModels: {
-        abstractPlanner: planner,
-        gatherer,
-        concretePlanner: planner,
-        executor,
-        verifier: planner
-      }
-    }),
-    (error: unknown) => error instanceof MissingChildTaskModelAssignmentError
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execution complete",
+          outputs: ["ok"]
+        })
+      },
+      trace
+    )
   );
+
+  const runtime = new OrchestratorRuntime(registry, {
+    onEvent: (event) => {
+      if (event.type === "scheduler_progress") {
+        events.push(String(event.payload.message));
+      }
+    }
+  });
+  const result = await runtime.executeScheduledRun({
+    goal: "Repair child routing when the planner omits explicit model assignments",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    }
+  });
 
   assert.deepEqual(trace, [
     "abstract:planner-upper",
     "gather:gather-lower",
-    "concrete:planner-upper"
+    "concrete:planner-upper",
+    "abstract:planner-upper",
+    "gather:gather-lower",
+    "concrete:planner-upper",
+    "execute:executor-lower",
+    "verify:planner-upper"
   ]);
+  assert.equal(result.run.status, "done");
+  assert.equal(
+    events.includes("Materialized missing child task routing from nodeModelRouting"),
+    true
+  );
 });
 
 test("runtime invokes only the exact routed model without cross-model fallback", async () => {

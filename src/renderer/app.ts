@@ -63,8 +63,12 @@ type OrchestratorPlanNode = {
   title: string;
   objective: string;
   depth: number;
+  kind: "planning" | "execution";
   phase: string;
   assignedModels?: OrchestratorModelAssignment;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
   acceptanceCriteria: {
     items: OrchestratorAcceptanceCriterion[];
   };
@@ -76,6 +80,36 @@ type OrchestratorEvent = {
   type: string;
   createdAt: string;
   payload: Record<string, unknown>;
+};
+type OrchestratorApprovalOption = {
+  optionId: string;
+  kind?: string | null;
+  label?: string | null;
+};
+type OrchestratorPendingApproval = {
+  requestId: string;
+  title: string;
+  message: string;
+  details: string;
+  options: OrchestratorApprovalOption[];
+};
+type OrchestratorUserInputOption = {
+  label: string;
+  description?: string | null;
+};
+type OrchestratorUserInputQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  options?: OrchestratorUserInputOption[];
+  isOther?: boolean;
+  isSecret?: boolean;
+};
+type OrchestratorPendingUserInput = {
+  requestId: string;
+  title: string;
+  message: string;
+  questions: OrchestratorUserInputQuestion[];
 };
 type OrchestratorWorkingMemory = {
   facts: Array<{ statement: string }>;
@@ -134,6 +168,8 @@ type OrchestratorNodeProgressView = {
   detail: string;
   objective: string;
   model: string;
+  executionStatus: string;
+  elapsed: string;
   updatedAt: string;
   completionRatio: number;
   steps: OrchestratorNodeProgressStep[];
@@ -147,6 +183,8 @@ type SelectedNodeLiveView = {
   responseJson: string;
   executionPlan: string;
   hasExecutionPlan: boolean;
+  pendingApproval: OrchestratorPendingApproval | null;
+  pendingUserInput: OrchestratorPendingUserInput | null;
 };
 
 type TasksawApi = {
@@ -166,6 +204,16 @@ type TasksawApi = {
     workspaceAccessDialog?: DirectoryDialogOptions;
   }): Promise<OrchestratorRunResponse | null>;
   cancelOrchestratorRun(runId: string): Promise<boolean>;
+  respondOrchestratorApproval(input: {
+    requestId: string;
+    optionId?: string | null;
+    approved: boolean;
+  }): Promise<boolean>;
+  respondOrchestratorUserInput(input: {
+    requestId: string;
+    submitted: boolean;
+    answers?: Record<string, string[]>;
+  }): Promise<boolean>;
   listOrchestratorRuns(): Promise<OrchestratorRunSummary[]>;
   getOrchestratorRun(runId: string): Promise<OrchestratorRunDetail>;
   selectDirectory(options?: DirectoryDialogOptions): Promise<string | null>;
@@ -235,10 +283,24 @@ const TEXT = {
       orchestratorNodeProgressCurrent: "Current Work",
       orchestratorNodeProgressObjective: "Objective",
       orchestratorNodeProgressModel: "Active Model",
+      orchestratorNodeProgressExecution: "Execution",
+      orchestratorNodeProgressElapsed: "Elapsed",
       orchestratorNodeProgressUpdated: "Latest Update",
       orchestratorNodeProgressTrack: "Phase Track",
       orchestratorNodeCommandTitle: "Command",
       orchestratorNodeLogTitle: "Node Log",
+      orchestratorApprovalTitle: "Approval Required",
+      orchestratorApprovalWaiting: "Waiting for input",
+      orchestratorApprovalApprove: "Approve",
+      orchestratorApprovalDeny: "Deny",
+      orchestratorApprovalEmpty: "No pending approval request.",
+      orchestratorUserInputTitle: "Input Required",
+      orchestratorUserInputWaiting: "Waiting for response",
+      orchestratorUserInputSubmit: "Submit",
+      orchestratorUserInputCancel: "Cancel",
+      orchestratorUserInputEmpty: "No pending input request.",
+      orchestratorUserInputPlaceholder: "Type your response",
+      orchestratorUserInputOtherLabel: "Other",
       orchestratorWorkingMemoryTitle: "Working Memory",
       orchestratorWorkingMemoryEmpty: "No working-memory entries yet.",
       orchestratorWorkingMemoryFacts: "Facts",
@@ -364,10 +426,24 @@ const TEXT = {
       orchestratorNodeProgressCurrent: "현재 작업",
       orchestratorNodeProgressObjective: "목표",
       orchestratorNodeProgressModel: "실행 모델",
+      orchestratorNodeProgressExecution: "실행 상태",
+      orchestratorNodeProgressElapsed: "경과 시간",
       orchestratorNodeProgressUpdated: "최근 업데이트",
       orchestratorNodeProgressTrack: "단계 진행",
       orchestratorNodeCommandTitle: "전달 명령",
       orchestratorNodeLogTitle: "노드 로그",
+      orchestratorApprovalTitle: "승인 요청",
+      orchestratorApprovalWaiting: "입력 대기 중",
+      orchestratorApprovalApprove: "승인",
+      orchestratorApprovalDeny: "거절",
+      orchestratorApprovalEmpty: "대기 중인 승인 요청이 없습니다.",
+      orchestratorUserInputTitle: "입력 요청",
+      orchestratorUserInputWaiting: "응답 대기 중",
+      orchestratorUserInputSubmit: "제출",
+      orchestratorUserInputCancel: "취소",
+      orchestratorUserInputEmpty: "대기 중인 입력 요청이 없습니다.",
+      orchestratorUserInputPlaceholder: "응답을 입력하세요",
+      orchestratorUserInputOtherLabel: "직접 입력",
       orchestratorWorkingMemoryTitle: "워킹 메모리",
       orchestratorWorkingMemoryEmpty: "아직 working memory 항목이 없습니다.",
       orchestratorWorkingMemoryFacts: "사실",
@@ -481,6 +557,18 @@ const orchestratorDetailPanelMemoryEl = document.getElementById("orchestrator-de
 const orchestratorNodeLiveTitleEl = document.getElementById("orchestrator-node-live-title") as HTMLDivElement;
 const orchestratorNodeLiveStatusEl = document.getElementById("orchestrator-node-live-status") as HTMLSpanElement;
 const orchestratorNodeLiveMetaEl = document.getElementById("orchestrator-node-live-meta") as HTMLDivElement;
+const orchestratorNodeApprovalEl = document.getElementById("orchestrator-node-approval") as HTMLElement;
+const orchestratorNodeApprovalTitleEl = document.getElementById("orchestrator-node-approval-title") as HTMLDivElement;
+const orchestratorNodeApprovalStatusEl = document.getElementById("orchestrator-node-approval-status") as HTMLSpanElement;
+const orchestratorNodeApprovalMessageEl = document.getElementById("orchestrator-node-approval-message") as HTMLDivElement;
+const orchestratorNodeApprovalDetailsEl = document.getElementById("orchestrator-node-approval-details") as HTMLPreElement;
+const orchestratorNodeApprovalActionsEl = document.getElementById("orchestrator-node-approval-actions") as HTMLDivElement;
+const orchestratorNodeUserInputEl = document.getElementById("orchestrator-node-user-input") as HTMLElement;
+const orchestratorNodeUserInputTitleEl = document.getElementById("orchestrator-node-user-input-title") as HTMLDivElement;
+const orchestratorNodeUserInputStatusEl = document.getElementById("orchestrator-node-user-input-status") as HTMLSpanElement;
+const orchestratorNodeUserInputMessageEl = document.getElementById("orchestrator-node-user-input-message") as HTMLDivElement;
+const orchestratorNodeUserInputFormEl = document.getElementById("orchestrator-node-user-input-form") as HTMLFormElement;
+const orchestratorNodeUserInputActionsEl = document.getElementById("orchestrator-node-user-input-actions") as HTMLDivElement;
 const orchestratorNodeRequestOpenButton = document.getElementById("orchestrator-node-request-open") as HTMLButtonElement;
 const orchestratorNodeResponseOpenButton = document.getElementById("orchestrator-node-response-open") as HTMLButtonElement;
 const orchestratorNodePlanOpenButton = document.getElementById("orchestrator-node-plan-open") as HTMLButtonElement;
@@ -630,11 +718,15 @@ let activeWorkspaceTabId: string | null = "orchestrator";
 let isOrchestratorTabOpen = true;
 let selectedOrchestratorNodeId: string | null = null;
 let activeOrchestratorDetailTab: OrchestratorDetailTab = "node";
+let pendingApprovalActionRequestId: string | null = null;
+let pendingUserInputActionRequestId: string | null = null;
+let orchestratorElapsedClock = 0;
 let activeLogViewerSource: {
   titleElement: HTMLElement;
   contentElement: HTMLElement;
   emptyMessage: string;
 } | null = null;
+const pendingUserInputDrafts = new Map<string, Record<string, string>>();
 
 function translate(key: string, params: Record<string, string> = {}): string {
   const resolvedValue = key.split(".").reduce<unknown>((current, part) => {
@@ -698,6 +790,45 @@ function formatTimestamp(timestamp: string | null): string {
   return date.toLocaleString(languagePreference === "ko" ? "ko-KR" : "en-US", {
     hour12: false
   });
+}
+
+function parseIsoTimestamp(timestamp: string | null | undefined): number | null {
+  if (!timestamp) {
+    return null;
+  }
+
+  const value = Date.parse(timestamp);
+  return Number.isNaN(value) ? null : value;
+}
+
+function formatElapsedDuration(startAt: string | null | undefined, endAt?: string | null | undefined): string {
+  const startMs = parseIsoTimestamp(startAt);
+  if (startMs === null) {
+    return languagePreference === "ko" ? "알 수 없음" : "Unknown";
+  }
+
+  const endMs = parseIsoTimestamp(endAt ?? null) ?? Date.now();
+  const durationMs = Math.max(0, endMs - startMs);
+  const totalSeconds = Math.floor(durationMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (languagePreference === "ko") {
+    const parts: string[] = [];
+    if (hours > 0) parts.push(`${hours}시간`);
+    if (hours > 0 || minutes > 0) parts.push(`${minutes}분`);
+    parts.push(`${seconds}초`);
+    return parts.join(" ");
+  }
+
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${seconds}s`;
 }
 
 function truncateText(value: string, maxLength = 320): string {
@@ -808,8 +939,12 @@ function upsertLiveOrchestratorNode(detail: OrchestratorRunDetail, event: Orches
       title,
       objective,
       depth,
+      kind: typeof event.payload.kind === "string" && event.payload.kind === "execution" ? "execution" : "planning",
       phase,
       assignedModels: existingNodeIndex === -1 ? undefined : detail.nodes[existingNodeIndex]!.assignedModels,
+      createdAt: existingNodeIndex === -1 ? event.createdAt : detail.nodes[existingNodeIndex]!.createdAt,
+      updatedAt: event.createdAt,
+      completedAt: phase === "done" ? event.createdAt : (existingNodeIndex === -1 ? null : detail.nodes[existingNodeIndex]!.completedAt),
       acceptanceCriteria: {
         items: existingNodeIndex === -1 ? [] : detail.nodes[existingNodeIndex]!.acceptanceCriteria.items
       }
@@ -829,13 +964,19 @@ function upsertLiveOrchestratorNode(detail: OrchestratorRunDetail, event: Orches
     return;
   }
 
+  node.updatedAt = event.createdAt;
+
   if (event.type === "phase_transition" && typeof event.payload.to === "string") {
     node.phase = event.payload.to;
+    if (event.payload.to === "done") {
+      node.completedAt = event.createdAt;
+    }
     return;
   }
 
   if (event.type === "node_failed" && typeof event.payload.phase === "string") {
     node.phase = event.payload.phase;
+    node.completedAt = event.createdAt;
   }
 }
 
@@ -1005,6 +1146,51 @@ function summarizeEvent(event: OrchestratorEvent): string[] {
     return [
       `[${formatTimestamp(event.createdAt)}] ${eventLabel("decomposed")}`,
       `children: ${childTitles || "n/a"}`
+    ];
+  }
+
+  if (event.type === "approval_requested") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("approval requested")}`,
+      typeof payload.title === "string" && payload.title.trim().length > 0
+        ? payload.title.trim()
+        : (typeof payload.message === "string" ? payload.message : translate("ui.orchestratorApprovalWaiting"))
+    ];
+  }
+
+  if (event.type === "approval_resolved") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("approval resolved")}`,
+      Boolean(payload.approved)
+        ? (languagePreference === "ko" ? "사용자 승인" : "User approved")
+        : (languagePreference === "ko" ? "사용자 거절" : "User denied")
+    ];
+  }
+
+  if (event.type === "user_input_requested") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("input requested")}`,
+      typeof payload.title === "string" && payload.title.trim().length > 0
+        ? payload.title.trim()
+        : (typeof payload.message === "string" ? payload.message : translate("ui.orchestratorUserInputWaiting"))
+    ];
+  }
+
+  if (event.type === "user_input_resolved") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("input resolved")}`,
+      Boolean(payload.submitted)
+        ? (languagePreference === "ko" ? "사용자 입력 제출" : "User input submitted")
+        : (languagePreference === "ko" ? "사용자 입력 취소" : "User input cancelled")
+    ];
+  }
+
+  if (event.type === "execution_status") {
+    return [
+      `[${formatTimestamp(event.createdAt)}] ${eventLabel("execution status")}`,
+      typeof payload.message === "string" && payload.message.trim().length > 0
+        ? payload.message.trim()
+        : formatExecutionStatusLabel(typeof payload.state === "string" ? payload.state : undefined)
     ];
   }
 
@@ -1253,6 +1439,11 @@ function isNodeDetailEvent(event: OrchestratorEvent): boolean {
     || event.type === "evidence_attached"
     || event.type === "model_invocation"
     || event.type === "model_response"
+    || event.type === "approval_requested"
+    || event.type === "approval_resolved"
+    || event.type === "user_input_requested"
+    || event.type === "user_input_resolved"
+    || event.type === "execution_status"
     || event.type === "node_failed";
 }
 
@@ -1292,6 +1483,16 @@ function humanizePayloadKey(key: string): string {
       "inspection objectives": "inspection 목표",
       resolution: "정리 결과",
       "bundle id": "번들 ID",
+      title: "제목",
+      details: "세부 내용",
+      locations: "위치",
+      options: "선택지",
+      questions: "질문",
+      answers: "응답",
+      approved: "승인됨",
+      submitted: "제출됨",
+      "option id": "선택 옵션 ID",
+      state: "실행 상태",
       status: "상태",
       summary: "요약",
       reason: "사유",
@@ -1316,6 +1517,11 @@ function translateOrchestratorEventLabel(label: string): string {
       decomposed: "분해",
       invoke: "호출",
       response: "응답",
+      "approval requested": "승인 요청",
+      "approval resolved": "승인 처리",
+      "input requested": "입력 요청",
+      "input resolved": "입력 처리",
+      "execution status": "실행 상태",
       "node failed": "노드 실패",
       "run failed": "실행 실패",
       "run paused": "실행 일시중지",
@@ -1586,9 +1792,212 @@ function buildNodeExecutionPlanView(nodeEvents: OrchestratorEvent[]): { text: st
   };
 }
 
+function describeApprovalOptionLabel(option: OrchestratorApprovalOption): string {
+  const explicitLabel = option.label?.trim();
+  if (explicitLabel) {
+    return explicitLabel;
+  }
+
+  const kind = option.kind?.trim() ?? "";
+  if (kind === "allow_once") {
+    return languagePreference === "ko" ? "한 번만 승인" : "Allow once";
+  }
+  if (kind === "allow_for_session") {
+    return languagePreference === "ko" ? "세션 동안 승인" : "Allow for session";
+  }
+  if (kind === "reject_once") {
+    return languagePreference === "ko" ? "거절" : "Reject";
+  }
+
+  return kind.length > 0 ? kind.replaceAll("_", " ") : option.optionId;
+}
+
+function formatExecutionStatusLabel(state: string | undefined): string {
+  if (!state) {
+    return languagePreference === "ko" ? "대기 중" : "Queued";
+  }
+
+  if (languagePreference === "ko") {
+    const labels: Record<string, string> = {
+      queued: "대기 중",
+      reviewing: "검토 중",
+      review_approved: "검토 승인됨",
+      review_rejected: "검토 거절됨",
+      running: "실행 중",
+      executed: "실행 완료",
+      verifying: "검증 중",
+      completed: "완료",
+      failed: "실패",
+      verification_failed: "검증 실패",
+      awaiting_user_approval: "승인 대기",
+      awaiting_user_input: "추가 입력 대기",
+      approval_granted: "사용자 승인됨",
+      approval_denied: "사용자 거절",
+      user_input_submitted: "입력 제출됨",
+      user_input_cancelled: "입력 취소됨",
+      planning_update: "계획 갱신 중",
+      tool_progress: "도구 진행 중",
+      running_command: "명령 실행 중",
+      command_output: "명령 출력 수신 중",
+      command_completed: "명령 실행 완료",
+      command_failed: "명령 실행 실패",
+      command_declined: "명령 실행 거절됨",
+      terminal_interaction: "터미널 입력 대기"
+    };
+    return labels[state] ?? state;
+  }
+
+  const labels: Record<string, string> = {
+    queued: "Queued",
+    reviewing: "Reviewing",
+    review_approved: "Review approved",
+    review_rejected: "Review rejected",
+    running: "Running",
+    executed: "Executed",
+    verifying: "Verifying",
+    completed: "Completed",
+    failed: "Failed",
+    verification_failed: "Verification failed",
+    awaiting_user_approval: "Waiting for approval",
+    awaiting_user_input: "Waiting for additional input",
+    approval_granted: "Approved",
+    approval_denied: "Denied",
+    user_input_submitted: "Input submitted",
+    user_input_cancelled: "Input cancelled",
+    planning_update: "Planning update",
+    tool_progress: "Tool in progress",
+    running_command: "Running command",
+    command_output: "Streaming command output",
+    command_completed: "Command completed",
+    command_failed: "Command failed",
+    command_declined: "Command declined",
+    terminal_interaction: "Waiting for terminal input"
+  };
+  return labels[state] ?? state;
+}
+
+function getLatestExecutionStatusEvent(nodeEvents: OrchestratorEvent[]): OrchestratorEvent | null {
+  return getLatestEventFromList(nodeEvents, "execution_status");
+}
+
+function getPendingApproval(nodeEvents: OrchestratorEvent[]): OrchestratorPendingApproval | null {
+  const resolvedRequestIds = new Set(
+    nodeEvents
+      .filter((event) => event.type === "approval_resolved")
+      .map((event) => String(event.payload.requestId ?? "").trim())
+      .filter((requestId) => requestId.length > 0)
+  );
+  const pendingRequest = [...nodeEvents]
+    .reverse()
+    .find((event) => event.type === "approval_requested" && !resolvedRequestIds.has(String(event.payload.requestId ?? "").trim()));
+
+  if (!pendingRequest) {
+    return null;
+  }
+
+  const requestId = String(pendingRequest.payload.requestId ?? "").trim();
+  if (!requestId) {
+    return null;
+  }
+
+  const options = Array.isArray(pendingRequest.payload.options)
+    ? pendingRequest.payload.options
+      .filter((option): option is Record<string, unknown> => typeof option === "object" && option !== null)
+      .map((option) => ({
+        optionId: typeof option.optionId === "string" ? option.optionId : "",
+        kind: typeof option.kind === "string" ? option.kind : null,
+        label: typeof option.label === "string" ? option.label : null
+      }))
+      .filter((option) => option.optionId.length > 0)
+    : [];
+
+  return {
+    requestId,
+    title: typeof pendingRequest.payload.title === "string" && pendingRequest.payload.title.trim().length > 0
+      ? pendingRequest.payload.title.trim()
+      : translate("ui.orchestratorApprovalTitle"),
+    message: typeof pendingRequest.payload.message === "string" && pendingRequest.payload.message.trim().length > 0
+      ? pendingRequest.payload.message.trim()
+      : translate("ui.orchestratorApprovalWaiting"),
+    details: typeof pendingRequest.payload.details === "string" ? pendingRequest.payload.details.trim() : "",
+    options
+  };
+}
+
+function getPendingUserInput(nodeEvents: OrchestratorEvent[]): OrchestratorPendingUserInput | null {
+  const resolvedRequestIds = new Set(
+    nodeEvents
+      .filter((event) => event.type === "user_input_resolved")
+      .map((event) => String(event.payload.requestId ?? "").trim())
+      .filter((requestId) => requestId.length > 0)
+  );
+  const pendingRequest = [...nodeEvents]
+    .reverse()
+    .find((event) => event.type === "user_input_requested" && !resolvedRequestIds.has(String(event.payload.requestId ?? "").trim()));
+
+  if (!pendingRequest) {
+    return null;
+  }
+
+  const requestId = String(pendingRequest.payload.requestId ?? "").trim();
+  if (!requestId) {
+    return null;
+  }
+
+  const questions = Array.isArray(pendingRequest.payload.questions)
+    ? pendingRequest.payload.questions
+      .filter((question): question is Record<string, unknown> => typeof question === "object" && question !== null)
+      .map((question, index) => ({
+        id: typeof question.id === "string" && question.id.trim().length > 0 ? question.id.trim() : `question-${index + 1}`,
+        header: typeof question.header === "string" && question.header.trim().length > 0 ? question.header.trim() : `Question ${index + 1}`,
+        question: typeof question.question === "string" && question.question.trim().length > 0
+          ? question.question.trim()
+          : translate("ui.orchestratorUserInputPlaceholder"),
+        options: Array.isArray(question.options)
+          ? question.options
+            .filter((option): option is Record<string, unknown> => typeof option === "object" && option !== null)
+            .map((option) => ({
+              label: typeof option.label === "string" ? option.label.trim() : "",
+              description: typeof option.description === "string" ? option.description.trim() : null
+            }))
+            .filter((option) => option.label.length > 0)
+          : undefined,
+        isOther: Boolean(question.isOther),
+        isSecret: Boolean(question.isSecret)
+      }))
+    : [];
+
+  return {
+    requestId,
+    title: typeof pendingRequest.payload.title === "string" && pendingRequest.payload.title.trim().length > 0
+      ? pendingRequest.payload.title.trim()
+      : translate("ui.orchestratorUserInputTitle"),
+    message: typeof pendingRequest.payload.message === "string" && pendingRequest.payload.message.trim().length > 0
+      ? pendingRequest.payload.message.trim()
+      : translate("ui.orchestratorUserInputWaiting"),
+    questions
+  };
+}
+
+function getUserInputDraftValue(requestId: string, questionId: string): string {
+  return pendingUserInputDrafts.get(requestId)?.[questionId] ?? "";
+}
+
+function setUserInputDraftValue(requestId: string, questionId: string, value: string) {
+  const existingDraft = pendingUserInputDrafts.get(requestId) ?? {};
+  pendingUserInputDrafts.set(requestId, {
+    ...existingDraft,
+    [questionId]: value
+  });
+}
+
 function getEventLogLevel(event: OrchestratorEvent): "DEBUG" | "INFO" | "WARN" | "ERROR" {
   if (event.type === "model_invocation" || event.type === "model_response") {
     return "DEBUG";
+  }
+
+  if (event.type === "approval_requested" || event.type === "user_input_requested") {
+    return "WARN";
   }
 
   if (event.type === "run_paused") {
@@ -1628,6 +2037,18 @@ function formatOrchestratorLogEntry(detail: OrchestratorRunDetail, event: Orches
     detailLines.push(...formatPayloadDetails(event.payload, ["title", "depth"], 360));
   } else if (event.type === "phase_transition") {
     detailLines.push(...formatPayloadDetails(event.payload, ["from", "to"], 360));
+  } else if (event.type === "approval_requested") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["title", "message", "details"], 600));
+    if (typeof event.payload.details === "string" && event.payload.details.trim().length > 0) {
+      detailLines.push(formatDisplayString(event.payload.details, 600));
+    }
+  } else if (event.type === "user_input_requested") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["title", "message", "questions"], 600));
+    if (Array.isArray(event.payload.questions) && event.payload.questions.length > 0) {
+      detailLines.push(`questions: ${formatDisplayValue(event.payload.questions, 600)}`);
+    }
+  } else if (event.type === "approval_resolved" || event.type === "user_input_resolved" || event.type === "execution_status") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["message"], 480));
   } else if (event.type === "node_decomposed") {
     detailLines.push(...formatPayloadDetails(event.payload, [], 360));
   } else if (event.type === "model_invocation") {
@@ -1658,6 +2079,22 @@ function formatOrchestratorLogEntry(detail: OrchestratorRunDetail, event: Orches
     .join("\n");
 }
 
+function resolveNodeElapsedEnd(detail: OrchestratorRunDetail, node: OrchestratorPlanNode, tone: OrchestratorProgressTone): string | null {
+  if (node.completedAt) {
+    return node.completedAt;
+  }
+
+  if (tone === "failed" || tone === "done" || tone === "paused" || tone === "escalated") {
+    return node.updatedAt || detail.run.updatedAt;
+  }
+
+  if (detail.run.status === "done" || detail.run.status === "failed" || detail.run.status === "paused" || detail.run.status === "escalated") {
+    return node.updatedAt || detail.run.updatedAt;
+  }
+
+  return null;
+}
+
 function buildNodeProgressView(
   detail: OrchestratorRunDetail,
   node: OrchestratorPlanNode,
@@ -1668,6 +2105,9 @@ function buildNodeProgressView(
   const lastInvocation = getLatestEventFromList(nodeEvents, "model_invocation");
   const lastResponse = getLatestEventFromList(nodeEvents, "model_response");
   const lastFailure = getLatestEventFromList(nodeEvents, "node_failed");
+  const lastExecutionStatus = getLatestExecutionStatusEvent(nodeEvents);
+  const pendingApproval = getPendingApproval(nodeEvents);
+  const pendingUserInput = getPendingUserInput(nodeEvents);
   const lastEvent = nodeEvents[nodeEvents.length - 1] ?? null;
   const currentCapabilityPhase = mapCapabilityToPhase(
     typeof lastInvocation?.payload.capability === "string" ? lastInvocation.payload.capability : undefined
@@ -1679,6 +2119,9 @@ function buildNodeProgressView(
   const responseSummary = lastResponse ? extractModelResultSummary(lastResponse.payload.result) : "";
   const failurePhase = typeof lastFailure?.payload.phase === "string" ? lastFailure.payload.phase : node.phase;
   const modelLabel = selectedNodeModels.join(", ") || (languagePreference === "ko" ? "모델 미정" : "Model pending");
+  const executionStatus = formatExecutionStatusLabel(
+    typeof lastExecutionStatus?.payload.state === "string" ? lastExecutionStatus.payload.state : undefined
+  );
 
   let tone: OrchestratorProgressTone = "idle";
   let summary = formatNodePhaseLabel(node.phase);
@@ -1704,6 +2147,14 @@ function buildNodeProgressView(
     tone = "paused";
     summary = languagePreference === "ko" ? "inspection 뒤 재계획 중" : "Replanning after inspection";
     detailLine = defaultDetail;
+  } else if (pendingApproval) {
+    tone = "paused";
+    summary = executionStatus;
+    detailLine = pendingApproval.title || pendingApproval.message;
+  } else if (pendingUserInput) {
+    tone = "paused";
+    summary = executionStatus;
+    detailLine = pendingUserInput.title || pendingUserInput.message;
   } else if (invocationInFlight && lastInvocation) {
     tone = "active";
     const activeModelLabel = formatModelLabel(
@@ -1792,6 +2243,7 @@ function buildNodeProgressView(
   const completionRatio = steps.length === 0
     ? 0
     : Math.min(1, (completedStepCount + (tone === "done" ? 1 : activeStepCount * 0.55)) / steps.length);
+  const elapsed = formatElapsedDuration(node.createdAt, resolveNodeElapsedEnd(detail, node, tone));
 
   return {
     tone,
@@ -1799,6 +2251,8 @@ function buildNodeProgressView(
     detail: detailLine,
     objective: node.objective,
     model: modelLabel,
+    executionStatus,
+    elapsed,
     updatedAt: formatTimestamp(lastEvent?.createdAt ?? detail.run.updatedAt),
     completionRatio,
     steps
@@ -1815,7 +2269,9 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
       requestJson: translate("ui.orchestratorNodeRequestEmpty"),
       responseJson: translate("ui.orchestratorNodeResponseEmpty"),
       executionPlan: translate("ui.orchestratorNodePlanEmpty"),
-      hasExecutionPlan: false
+      hasExecutionPlan: false,
+      pendingApproval: null,
+      pendingUserInput: null
     };
   }
 
@@ -1829,12 +2285,16 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
       requestJson: translate("ui.orchestratorNodeRequestEmpty"),
       responseJson: translate("ui.orchestratorNodeResponseEmpty"),
       executionPlan: translate("ui.orchestratorNodePlanEmpty"),
-      hasExecutionPlan: false
+      hasExecutionPlan: false,
+      pendingApproval: null,
+      pendingUserInput: null
     };
   }
 
   const nodeEvents = getNodeEvents(detail, selectedNode.id);
   const progress = buildNodeProgressView(detail, selectedNode, nodeEvents);
+  const pendingApproval = getPendingApproval(nodeEvents);
+  const pendingUserInput = getPendingUserInput(nodeEvents);
   const lastInvocation = getLatestEventFromList(nodeEvents, "model_invocation");
   const lastResponse = getLatestEventFromList(nodeEvents, "model_response");
   const lastFailure = getLatestEventFromList(nodeEvents, "node_failed");
@@ -1843,7 +2303,11 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
     : [];
 
   let status = translate("ui.orchestratorCommandStatusIdle");
-  if (lastFailure) {
+  if (pendingApproval) {
+    status = translate("ui.orchestratorApprovalWaiting");
+  } else if (pendingUserInput) {
+    status = translate("ui.orchestratorUserInputWaiting");
+  } else if (lastFailure) {
     status = translate("ui.orchestratorCommandStatusFailed");
   } else if (lastResponse) {
     status = translate("ui.orchestratorCommandStatusResponded");
@@ -1880,7 +2344,9 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
     requestJson: buildNodeRequestJsonView(nodeEvents),
     responseJson: buildNodeResponseJsonView(nodeEvents),
     executionPlan: executionPlanView.text,
-    hasExecutionPlan: executionPlanView.hasPlan
+    hasExecutionPlan: executionPlanView.hasPlan,
+    pendingApproval,
+    pendingUserInput
   };
 }
 
@@ -2015,6 +2481,8 @@ function renderNodeProgressPanel(container: HTMLDivElement, progress: Orchestrat
 
   appendStat(translate("ui.orchestratorNodeProgressObjective"), progress.objective);
   appendStat(translate("ui.orchestratorNodeProgressModel"), progress.model);
+  appendStat(translate("ui.orchestratorNodeProgressExecution"), progress.executionStatus);
+  appendStat(translate("ui.orchestratorNodeProgressElapsed"), progress.elapsed);
   appendStat(translate("ui.orchestratorNodeProgressUpdated"), progress.updatedAt);
 
   const track = document.createElement("div");
@@ -2068,6 +2536,162 @@ function renderNodeProgressPanel(container: HTMLDivElement, progress: Orchestrat
   container.appendChild(shell);
 }
 
+function renderNodeApprovalCard(pendingApproval: OrchestratorPendingApproval | null) {
+  orchestratorNodeApprovalEl.hidden = pendingApproval === null;
+  orchestratorNodeApprovalActionsEl.replaceChildren();
+
+  if (!pendingApproval) {
+    orchestratorNodeApprovalTitleEl.textContent = translate("ui.orchestratorApprovalTitle");
+    orchestratorNodeApprovalStatusEl.textContent = translate("ui.orchestratorApprovalWaiting");
+    orchestratorNodeApprovalMessageEl.textContent = translate("ui.orchestratorApprovalEmpty");
+    orchestratorNodeApprovalDetailsEl.textContent = "";
+    return;
+  }
+
+  orchestratorNodeApprovalTitleEl.textContent = pendingApproval.title;
+  orchestratorNodeApprovalStatusEl.textContent = translate("ui.orchestratorApprovalWaiting");
+  orchestratorNodeApprovalMessageEl.textContent = pendingApproval.message;
+  orchestratorNodeApprovalDetailsEl.textContent = pendingApproval.details;
+
+  const hasAllowOptions = pendingApproval.options.some((option) => option.kind?.startsWith("allow"));
+  const actions = hasAllowOptions
+    ? pendingApproval.options.filter((option) => option.kind?.startsWith("allow"))
+    : pendingApproval.options;
+
+  for (const option of actions) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "orchestrator-copy-button";
+    button.textContent = describeApprovalOptionLabel(option);
+    button.disabled = pendingApprovalActionRequestId === pendingApproval.requestId;
+    button.addEventListener("click", () => {
+      void respondToPendingApproval(pendingApproval.requestId, true, option.optionId);
+    });
+    orchestratorNodeApprovalActionsEl.appendChild(button);
+  }
+
+  const denyButton = document.createElement("button");
+  denyButton.type = "button";
+  denyButton.className = "orchestrator-copy-button";
+  denyButton.textContent = translate("ui.orchestratorApprovalDeny");
+  denyButton.disabled = pendingApprovalActionRequestId === pendingApproval.requestId;
+  denyButton.addEventListener("click", () => {
+    void respondToPendingApproval(pendingApproval.requestId, false);
+  });
+  orchestratorNodeApprovalActionsEl.appendChild(denyButton);
+}
+
+function renderNodeUserInputCard(pendingUserInput: OrchestratorPendingUserInput | null) {
+  orchestratorNodeUserInputEl.hidden = pendingUserInput === null;
+  orchestratorNodeUserInputFormEl.replaceChildren();
+  orchestratorNodeUserInputActionsEl.replaceChildren();
+
+  if (!pendingUserInput) {
+    orchestratorNodeUserInputTitleEl.textContent = translate("ui.orchestratorUserInputTitle");
+    orchestratorNodeUserInputStatusEl.textContent = translate("ui.orchestratorUserInputWaiting");
+    orchestratorNodeUserInputMessageEl.textContent = translate("ui.orchestratorUserInputEmpty");
+    return;
+  }
+
+  orchestratorNodeUserInputTitleEl.textContent = pendingUserInput.title;
+  orchestratorNodeUserInputStatusEl.textContent = translate("ui.orchestratorUserInputWaiting");
+  orchestratorNodeUserInputMessageEl.textContent = pendingUserInput.message;
+
+  for (const question of pendingUserInput.questions) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "orchestrator-node-user-input-question";
+
+    const header = document.createElement("div");
+    header.className = "orchestrator-node-user-input-question-header";
+
+    const title = document.createElement("strong");
+    title.textContent = question.header;
+
+    const meta = document.createElement("span");
+    meta.textContent = question.isSecret
+      ? (languagePreference === "ko" ? "비공개 입력" : "Secret input")
+      : (question.options && question.options.length > 0
+        ? (languagePreference === "ko" ? "선택 또는 입력" : "Select or type")
+        : (languagePreference === "ko" ? "텍스트 입력" : "Text input"));
+
+    header.append(title, meta);
+
+    const copy = document.createElement("div");
+    copy.className = "orchestrator-node-user-input-question-copy";
+    copy.textContent = question.question;
+
+    wrapper.append(header, copy);
+
+    if (question.options && question.options.length > 0) {
+      const select = document.createElement("select");
+      select.name = question.id;
+      select.disabled = pendingUserInputActionRequestId === pendingUserInput.requestId;
+
+      const placeholderOption = document.createElement("option");
+      placeholderOption.value = "";
+      placeholderOption.textContent = languagePreference === "ko" ? "선택하세요" : "Select an option";
+      select.appendChild(placeholderOption);
+
+      for (const option of question.options) {
+        const optionEl = document.createElement("option");
+        optionEl.value = option.label;
+        optionEl.textContent = option.description
+          ? `${option.label} - ${option.description}`
+          : option.label;
+        select.appendChild(optionEl);
+      }
+
+      select.value = getUserInputDraftValue(pendingUserInput.requestId, question.id);
+      select.addEventListener("change", () => {
+        setUserInputDraftValue(pendingUserInput.requestId, question.id, select.value);
+      });
+      wrapper.appendChild(select);
+    }
+
+    if (!question.options || question.isOther) {
+      const draftKey = question.options ? `${question.id}__other` : question.id;
+      const control: HTMLInputElement | HTMLTextAreaElement = question.isSecret
+        ? document.createElement("input")
+        : (question.options ? document.createElement("input") : document.createElement("textarea"));
+
+      if (control instanceof HTMLInputElement) {
+        control.type = question.isSecret ? "password" : "text";
+      }
+
+      control.setAttribute("name", draftKey);
+      control.setAttribute("placeholder", translate("ui.orchestratorUserInputPlaceholder"));
+      control.disabled = pendingUserInputActionRequestId === pendingUserInput.requestId;
+      control.value = getUserInputDraftValue(pendingUserInput.requestId, draftKey);
+      control.addEventListener("input", () => {
+        setUserInputDraftValue(pendingUserInput.requestId, draftKey, control.value);
+      });
+      wrapper.appendChild(control);
+    }
+
+    orchestratorNodeUserInputFormEl.appendChild(wrapper);
+  }
+
+  const submitButton = document.createElement("button");
+  submitButton.type = "button";
+  submitButton.className = "orchestrator-copy-button";
+  submitButton.textContent = translate("ui.orchestratorUserInputSubmit");
+  submitButton.disabled = pendingUserInputActionRequestId === pendingUserInput.requestId;
+  submitButton.addEventListener("click", () => {
+    void respondToPendingUserInput(pendingUserInput);
+  });
+
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "orchestrator-copy-button";
+  cancelButton.textContent = translate("ui.orchestratorUserInputCancel");
+  cancelButton.disabled = pendingUserInputActionRequestId === pendingUserInput.requestId;
+  cancelButton.addEventListener("click", () => {
+    void respondToPendingUserInput(pendingUserInput, true);
+  });
+
+  orchestratorNodeUserInputActionsEl.append(submitButton, cancelButton);
+}
+
 function renderOrchestratorDetailTabs() {
   const isNodeTab = activeOrchestratorDetailTab === "node";
   orchestratorDetailTabNodeButton.classList.toggle("active", isNodeTab);
@@ -2112,6 +2736,19 @@ function resolveSelectedOrchestratorNode(detail: OrchestratorRunDetail | null): 
   const defaultNode = detail.nodes.find((node) => node.parentId === null) ?? detail.nodes[0] ?? null;
   selectedOrchestratorNodeId = defaultNode?.id ?? null;
   return defaultNode;
+}
+
+function shouldTickSelectedNodeProgress(detail: OrchestratorRunDetail | null): boolean {
+  if (!detail) {
+    return false;
+  }
+
+  const node = resolveSelectedOrchestratorNode(detail);
+  if (!node || node.completedAt) {
+    return false;
+  }
+
+  return detail.run.status === "pending" || detail.run.status === "running";
 }
 
 function renderOrchestratorRunList() {
@@ -2166,6 +2803,7 @@ function renderOrchestratorDetail() {
       String(selectedOrchestratorRun.events.length),
       selectedOrchestratorRun.finalReport?.summary ?? "",
       selectedNode?.id ?? "",
+      shouldTickSelectedNodeProgress(selectedOrchestratorRun) ? String(orchestratorElapsedClock) : "",
       String(selectedOrchestratorRun.workingMemory.facts.length),
       String(selectedOrchestratorRun.workingMemory.openQuestions.filter((question) => question.status === "open").length),
       String(selectedOrchestratorRun.workingMemory.unknowns.filter((unknown) => unknown.status === "open").length),
@@ -2182,6 +2820,8 @@ function renderOrchestratorDetail() {
   const liveView = buildSelectedNodeLiveView(selectedOrchestratorRun);
   orchestratorNodeLiveStatusEl.textContent = liveView.status;
   renderNodeProgressPanel(orchestratorNodeLiveMetaEl, liveView.progress);
+  renderNodeApprovalCard(liveView.pendingApproval);
+  renderNodeUserInputCard(liveView.pendingUserInput);
   orchestratorNodeRequestDataEl.textContent = liveView.requestJson;
   orchestratorNodeResponseDataEl.textContent = liveView.responseJson;
   orchestratorNodePlanDataEl.textContent = liveView.executionPlan;
@@ -2683,6 +3323,10 @@ function refreshLocalizedContent() {
   orchestratorDetailTabNodeButton.textContent = translate("ui.orchestratorDetailTabNode");
   orchestratorDetailTabMemoryButton.textContent = translate("ui.orchestratorDetailTabMemory");
   orchestratorNodeLiveTitleEl.textContent = translate("ui.orchestratorNodeLiveTitle");
+  orchestratorNodeApprovalTitleEl.textContent = translate("ui.orchestratorApprovalTitle");
+  orchestratorNodeApprovalStatusEl.textContent = translate("ui.orchestratorApprovalWaiting");
+  orchestratorNodeUserInputTitleEl.textContent = translate("ui.orchestratorUserInputTitle");
+  orchestratorNodeUserInputStatusEl.textContent = translate("ui.orchestratorUserInputWaiting");
   orchestratorNodeRequestOpenButton.textContent = translate("ui.orchestratorNodeRequestTitle");
   orchestratorNodeResponseOpenButton.textContent = translate("ui.orchestratorNodeResponseTitle");
   orchestratorNodePlanOpenButton.textContent = translate("ui.orchestratorNodePlanTitle");
@@ -2754,6 +3398,84 @@ async function copyTextToClipboard(value: string) {
   }
 }
 
+async function respondToPendingApproval(
+  requestId: string,
+  approved: boolean,
+  optionId?: string
+) {
+  pendingApprovalActionRequestId = requestId;
+  renderOrchestratorDetail();
+
+  try {
+    const acknowledged = await appWindow.tasksaw.respondOrchestratorApproval({
+      requestId,
+      approved,
+      optionId: optionId ?? null
+    });
+
+    if (!acknowledged) {
+      throw new Error("approval request was no longer pending");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logLocalized("errors.failedOrchestratorRun", { message });
+  } finally {
+    pendingApprovalActionRequestId = null;
+    renderOrchestratorDetail();
+  }
+}
+
+function collectPendingUserInputAnswers(pendingUserInput: OrchestratorPendingUserInput): Record<string, string[]> {
+  const draft = pendingUserInputDrafts.get(pendingUserInput.requestId) ?? {};
+  const answers: Record<string, string[]> = {};
+
+  for (const question of pendingUserInput.questions) {
+    const values = new Set<string>();
+    const selectedValue = draft[question.id]?.trim() ?? "";
+    const otherValue = draft[`${question.id}__other`]?.trim() ?? "";
+
+    if (selectedValue.length > 0) {
+      values.add(selectedValue);
+    }
+    if (otherValue.length > 0) {
+      values.add(otherValue);
+    }
+
+    answers[question.id] = [...values];
+  }
+
+  return answers;
+}
+
+async function respondToPendingUserInput(
+  pendingUserInput: OrchestratorPendingUserInput,
+  cancelled = false
+) {
+  pendingUserInputActionRequestId = pendingUserInput.requestId;
+  renderOrchestratorDetail();
+
+  try {
+    const answers = cancelled ? undefined : collectPendingUserInputAnswers(pendingUserInput);
+    const acknowledged = await appWindow.tasksaw.respondOrchestratorUserInput({
+      requestId: pendingUserInput.requestId,
+      submitted: !cancelled,
+      answers
+    });
+
+    if (!acknowledged) {
+      throw new Error("user input request was no longer pending");
+    }
+
+    pendingUserInputDrafts.delete(pendingUserInput.requestId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logLocalized("errors.failedOrchestratorRun", { message });
+  } finally {
+    pendingUserInputActionRequestId = null;
+    renderOrchestratorDetail();
+  }
+}
+
 async function copyOrchestratorSection(
   titleElement: HTMLElement,
   contentElement: HTMLElement,
@@ -2814,6 +3536,8 @@ async function copyLogViewerContent() {
 function setOrchestratorTransientDetail(message: string) {
   orchestratorNodeLiveStatusEl.textContent = translate("ui.orchestratorCommandStatusIdle");
   orchestratorNodeLiveMetaEl.textContent = message;
+  renderNodeApprovalCard(null);
+  renderNodeUserInputCard(null);
   orchestratorNodeRequestDataEl.textContent = translate("ui.orchestratorNodeRequestEmpty");
   orchestratorNodeResponseDataEl.textContent = translate("ui.orchestratorNodeResponseEmpty");
   orchestratorNodePlanDataEl.textContent = translate("ui.orchestratorNodePlanEmpty");
@@ -3569,6 +4293,9 @@ async function updateManagedTools() {
 function resetLocalAppState() {
   clearAllLocalSessions();
   orchestratorRuns.splice(0, orchestratorRuns.length);
+  pendingUserInputDrafts.clear();
+  pendingApprovalActionRequestId = null;
+  pendingUserInputActionRequestId = null;
   selectedOrchestratorRunId = null;
   selectedOrchestratorRun = null;
   selectedOrchestratorNodeId = null;
@@ -3660,6 +4387,18 @@ appWindow.tasksaw.onTerminalData(({ sessionId, data }: TerminalDataPayload) => {
 });
 
 appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
+  if (event.type === "approval_resolved" && typeof event.payload.requestId === "string") {
+    if (pendingApprovalActionRequestId === event.payload.requestId) {
+      pendingApprovalActionRequestId = null;
+    }
+  }
+  if (event.type === "user_input_resolved" && typeof event.payload.requestId === "string") {
+    pendingUserInputDrafts.delete(event.payload.requestId);
+    if (pendingUserInputActionRequestId === event.payload.requestId) {
+      pendingUserInputActionRequestId = null;
+    }
+  }
+
   if (!liveOrchestratorRunId && isOrchestratorRunning) {
     liveOrchestratorRunId = event.runId;
   }
@@ -3833,6 +4572,12 @@ for (const button of languageButtons) {
 applyThemePreference(themePreference, false);
 applyLanguagePreference(languagePreference, false);
 initializeMainSplitter();
+window.setInterval(() => {
+  orchestratorElapsedClock += 1;
+  if (shouldTickSelectedNodeProgress(selectedOrchestratorRun)) {
+    scheduleOrchestratorRender({ list: false, detail: true });
+  }
+}, 1_000);
 
 appWindow.addEventListener("resize", () => {
   syncMainSplitterLayout();

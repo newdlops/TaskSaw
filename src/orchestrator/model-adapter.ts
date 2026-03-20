@@ -24,6 +24,77 @@ export type OrchestratorCapability =
   | "verify"
   | "rehydrate";
 
+export type OrchestratorApprovalOption = {
+  optionId: string;
+  kind?: string;
+  label?: string;
+};
+
+export type OrchestratorApprovalRequest = {
+  requestId: string;
+  runId: string;
+  nodeId: string;
+  capability: OrchestratorCapability;
+  provider: string;
+  model: string;
+  title?: string;
+  message: string;
+  details?: string;
+  kind?: string;
+  locations?: string[];
+  options: OrchestratorApprovalOption[];
+  createdAt: string;
+  abortSignal: AbortSignal;
+};
+
+export type OrchestratorApprovalDecision = {
+  outcome: "selected" | "cancelled";
+  optionId?: string;
+};
+
+export type OrchestratorApprovalRequestDraft = Omit<
+  OrchestratorApprovalRequest,
+  "requestId" | "runId" | "nodeId" | "capability" | "provider" | "model" | "createdAt"
+>;
+
+export type OrchestratorUserInputOption = {
+  label: string;
+  description?: string;
+};
+
+export type OrchestratorUserInputQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  options?: OrchestratorUserInputOption[];
+  isOther?: boolean;
+  isSecret?: boolean;
+};
+
+export type OrchestratorUserInputRequest = {
+  requestId: string;
+  runId: string;
+  nodeId: string;
+  capability: OrchestratorCapability;
+  provider: string;
+  model: string;
+  title?: string;
+  message: string;
+  questions: OrchestratorUserInputQuestion[];
+  createdAt: string;
+  abortSignal: AbortSignal;
+};
+
+export type OrchestratorUserInputResponse = {
+  outcome: "submitted" | "cancelled";
+  answers?: Record<string, string[]>;
+};
+
+export type OrchestratorUserInputRequestDraft = Omit<
+  OrchestratorUserInputRequest,
+  "requestId" | "runId" | "nodeId" | "capability" | "provider" | "model" | "createdAt"
+>;
+
 export type ModelInvocationContext = {
   run: Run;
   node: PlanNode;
@@ -36,6 +107,9 @@ export type ModelInvocationContext = {
   workingMemory: WorkingMemorySnapshot;
   projectStructure: ProjectStructureSnapshot;
   evidenceBundles: EvidenceBundle[];
+  requestUserApproval?: (request: OrchestratorApprovalRequestDraft) => Promise<OrchestratorApprovalDecision>;
+  requestUserInput?: (request: OrchestratorUserInputRequestDraft) => Promise<OrchestratorUserInputResponse>;
+  reportExecutionStatus?: (state: string, message: string, details?: Record<string, unknown>) => void;
 };
 
 export type AbstractPlanResult = {

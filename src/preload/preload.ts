@@ -7,6 +7,8 @@ import type {
   ManagedToolStatus,
   OrchestratorRunDetail,
   OrchestratorRunSummary,
+  RespondOrchestratorApprovalInput,
+  RespondOrchestratorUserInputInput,
   RunOrchestratorInput,
   SessionInfo
 } from "../main/types";
@@ -29,6 +31,12 @@ contextBridge.exposeInMainWorld("tasksaw", {
 
   cancelOrchestratorRun: (runId: string): Promise<boolean> =>
       ipcRenderer.invoke("orchestrator:cancel", runId),
+
+  respondOrchestratorApproval: (input: RespondOrchestratorApprovalInput): Promise<boolean> =>
+      ipcRenderer.invoke("orchestrator:respond-approval", input),
+
+  respondOrchestratorUserInput: (input: RespondOrchestratorUserInputInput): Promise<boolean> =>
+      ipcRenderer.invoke("orchestrator:respond-user-input", input),
 
   listOrchestratorRuns: (): Promise<OrchestratorRunSummary[]> =>
       ipcRenderer.invoke("orchestrator:list"),

@@ -3,7 +3,12 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
-import { ModelInvocationContext, OrchestratorCapability } from "./model-adapter";
+import {
+  ModelInvocationContext,
+  OrchestratorApprovalDecision,
+  OrchestratorApprovalOption,
+  OrchestratorCapability
+} from "./model-adapter";
 
 const dynamicImport = new Function("specifier", "return import(specifier);") as (specifier: string) => Promise<unknown>;
 
@@ -77,7 +82,33 @@ class TasksawGeminiAcpClient {
 
   constructor(
     private readonly agentMessageChunks: string[],
-    workspaceRoot: string
+    workspaceRoot: string,
+    private readonly requestPermissionHandler: (params: {
+      options?: Array<{
+        optionId?: string;
+        kind?: string;
+      }>;
+      toolCall?: {
+        title?: string;
+        kind?: string;
+        locations?: Array<{ path?: string; uri?: string; label?: string }>;
+        content?: Array<
+          | {
+            type?: string;
+            path?: string;
+            oldText?: string;
+            newText?: string;
+          }
+          | {
+            type?: string;
+            content?: {
+              type?: string;
+              text?: string;
+            };
+          }
+        >;
+      };
+    }) => Promise<OrchestratorApprovalDecision>
   ) {
     this.workspaceRoot = path.resolve(workspaceRoot);
   }
@@ -87,12 +118,29 @@ class TasksawGeminiAcpClient {
       optionId?: string;
       kind?: string;
     }>;
+    toolCall?: {
+      title?: string;
+      kind?: string;
+      locations?: Array<{ path?: string; uri?: string; label?: string }>;
+      content?: Array<
+        | {
+          type?: string;
+          path?: string;
+          oldText?: string;
+          newText?: string;
+        }
+        | {
+          type?: string;
+          content?: {
+            type?: string;
+            text?: string;
+          };
+        }
+      >;
+    };
   }) {
-    const allowOnceOption = params.options?.find((option) => option.kind === "allow_once")
-      ?? params.options?.find((option) => option.kind?.startsWith("allow"))
-      ?? params.options?.[0];
-
-    if (!allowOnceOption?.optionId) {
+    const decision = await this.requestPermissionHandler(params);
+    if (decision.outcome !== "selected" || !decision.optionId) {
       return {
         outcome: {
           outcome: "cancelled" as const
@@ -103,7 +151,7 @@ class TasksawGeminiAcpClient {
     return {
       outcome: {
         outcome: "selected" as const,
-        optionId: allowOnceOption.optionId
+        optionId: decision.optionId
       }
     };
   }
@@ -297,7 +345,43 @@ async function invokeGeminiAcpAttempt(params: {
     }
 
     const agentMessageChunks: string[] = [];
-    const client = new TasksawGeminiAcpClient(agentMessageChunks, options.cwd ?? process.cwd());
+    const client = new TasksawGeminiAcpClient(
+      agentMessageChunks,
+      options.cwd ?? process.cwd(),
+      async (permissionRequest) => {
+        const optionsForUi: OrchestratorApprovalOption[] = (permissionRequest.options ?? [])
+          .map((option) => ({
+            optionId: option.optionId?.trim() ?? "",
+            kind: option.kind?.trim(),
+            label: describePermissionOption(option.kind?.trim())
+          }))
+          .filter((option) => option.optionId.length > 0);
+        const allowOption = optionsForUi.find((option) => option.kind === "allow_once")
+          ?? optionsForUi.find((option) => option.kind?.startsWith("allow"))
+          ?? optionsForUi[0];
+
+        if (!context.requestUserApproval) {
+          return allowOption
+            ? {
+                outcome: "selected",
+                optionId: allowOption.optionId
+              }
+            : {
+                outcome: "cancelled"
+              };
+        }
+
+        return context.requestUserApproval({
+          abortSignal,
+          title: permissionRequest.toolCall?.title?.trim() || undefined,
+          message: buildPermissionRequestMessage(capability, modelId),
+          details: buildPermissionRequestDetails(permissionRequest.toolCall),
+          kind: permissionRequest.toolCall?.kind?.trim() || undefined,
+          locations: extractPermissionRequestLocations(permissionRequest.toolCall),
+          options: optionsForUi
+        });
+      }
+    );
     const stream = acpModule.ndJsonStream(
       Writable.toWeb(child.stdin as Writable) as unknown as WritableStream<Uint8Array>,
       Readable.toWeb(child.stdout as Readable) as unknown as ReadableStream<Uint8Array>
@@ -435,6 +519,102 @@ async function invokeGeminiAcpAttempt(params: {
   } finally {
     await stopChildProcess(child);
   }
+}
+
+function describePermissionOption(kind: string | undefined): string | undefined {
+  if (!kind) {
+    return undefined;
+  }
+
+  if (kind === "allow_once") {
+    return "Allow once";
+  }
+  if (kind === "allow_for_session") {
+    return "Allow for session";
+  }
+  if (kind === "reject_once") {
+    return "Reject";
+  }
+
+  return kind
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function buildPermissionRequestMessage(capability: OrchestratorCapability, modelId: string): string {
+  return `User approval is required before Gemini can continue ${capability} with ${modelId}.`;
+}
+
+function buildPermissionRequestDetails(toolCall: {
+  title?: string;
+  kind?: string;
+  locations?: Array<{ path?: string; uri?: string; label?: string }>;
+  content?: Array<
+    | {
+      type?: string;
+      path?: string;
+      oldText?: string;
+      newText?: string;
+    }
+    | {
+      type?: string;
+      content?: {
+        type?: string;
+        text?: string;
+      };
+    }
+  >;
+} | undefined): string | undefined {
+  if (!toolCall) {
+    return undefined;
+  }
+
+  const lines: string[] = [];
+  if (toolCall.title?.trim()) {
+    lines.push(toolCall.title.trim());
+  }
+  if (toolCall.kind?.trim()) {
+    lines.push(`kind: ${toolCall.kind.trim()}`);
+  }
+
+  const locations = extractPermissionRequestLocations(toolCall);
+  if (locations.length > 0) {
+    lines.push(`locations: ${locations.join(", ")}`);
+  }
+
+  for (const entry of toolCall.content ?? []) {
+    if (entry.type === "diff") {
+      const pathLabel = "path" in entry && typeof entry.path === "string" ? entry.path : "unknown file";
+      const oldText = "oldText" in entry && typeof entry.oldText === "string" ? entry.oldText : "";
+      const newText = "newText" in entry && typeof entry.newText === "string" ? entry.newText : "";
+      lines.push(`diff: ${pathLabel}`);
+      if (oldText.trim().length > 0) {
+        lines.push(`--- before ---\n${oldText.trim().slice(0, 600)}`);
+      }
+      if (newText.trim().length > 0) {
+        lines.push(`+++ after +++\n${newText.trim().slice(0, 600)}`);
+      }
+      continue;
+    }
+
+    const text = "content" in entry && entry.content?.type === "text" && typeof entry.content.text === "string"
+      ? entry.content.text.trim()
+      : "";
+    if (text.length > 0) {
+      lines.push(text.slice(0, 600));
+    }
+  }
+
+  return lines.length > 0 ? lines.join("\n\n") : undefined;
+}
+
+function extractPermissionRequestLocations(toolCall: {
+  locations?: Array<{ path?: string; uri?: string; label?: string }>;
+} | undefined): string[] {
+  return (toolCall?.locations ?? [])
+    .map((location) => location.path ?? location.label ?? location.uri ?? "")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
 }
 
 function buildGeminiAttemptModels(

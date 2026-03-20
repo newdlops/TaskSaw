@@ -1,8 +1,22 @@
 import { BrowserWindow, dialog, ipcMain } from "electron";
-import { OrchestratorRunCancelledError, type OrchestratorEvent } from "../orchestrator";
+import {
+  OrchestratorApprovalDecision,
+  OrchestratorApprovalRequest,
+  OrchestratorUserInputRequest,
+  OrchestratorUserInputResponse,
+  OrchestratorRunCancelledError,
+  type OrchestratorEvent
+} from "../orchestrator";
 import { OrchestratorService } from "./orchestrator-service";
 import { PtyManager } from "./pty-manager";
-import { CreateSessionInput, DirectoryDialogOptions, ManagedToolId, RunOrchestratorInput } from "./types";
+import {
+  CreateSessionInput,
+  DirectoryDialogOptions,
+  ManagedToolId,
+  RespondOrchestratorApprovalInput,
+  RespondOrchestratorUserInputInput,
+  RunOrchestratorInput
+} from "./types";
 import { ToolManager } from "./tool-manager";
 import { WorkspaceAccessManager } from "./workspace-access";
 
@@ -13,6 +27,23 @@ export function registerIpc(
   toolManager: ToolManager,
   orchestratorService: OrchestratorService
 ) {
+  const pendingApprovalRequests = new Map<
+    string,
+    {
+      resolve: (decision: OrchestratorApprovalDecision) => void;
+      reject: (error: Error) => void;
+      abortSignal: AbortSignal;
+    }
+  >();
+  const pendingUserInputRequests = new Map<
+    string,
+    {
+      resolve: (response: OrchestratorUserInputResponse) => void;
+      reject: (error: Error) => void;
+      abortSignal: AbortSignal;
+    }
+  >();
+
   const ensureLoginSession = async (toolId: ManagedToolId, workspacePath: string) => {
     const existingSession = ptyManager
       .listSessions()
@@ -77,6 +108,70 @@ export function registerIpc(
     mainWindow.webContents.send("orchestrator:event", event);
   };
 
+  const requestUserApproval = async (request: OrchestratorApprovalRequest): Promise<OrchestratorApprovalDecision> => {
+    if (request.abortSignal.aborted) {
+      throw request.abortSignal.reason instanceof Error
+        ? request.abortSignal.reason
+        : new Error("Approval request was aborted");
+    }
+
+    return new Promise<OrchestratorApprovalDecision>((resolve, reject) => {
+      const onAbort = () => {
+        pendingApprovalRequests.delete(request.requestId);
+        reject(
+          request.abortSignal.reason instanceof Error
+            ? request.abortSignal.reason
+            : new Error("Approval request was aborted")
+        );
+      };
+
+      pendingApprovalRequests.set(request.requestId, {
+        resolve: (decision) => {
+          request.abortSignal.removeEventListener("abort", onAbort);
+          resolve(decision);
+        },
+        reject: (error) => {
+          request.abortSignal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+        abortSignal: request.abortSignal
+      });
+      request.abortSignal.addEventListener("abort", onAbort, { once: true });
+    });
+  };
+
+  const requestUserInput = async (request: OrchestratorUserInputRequest): Promise<OrchestratorUserInputResponse> => {
+    if (request.abortSignal.aborted) {
+      throw request.abortSignal.reason instanceof Error
+        ? request.abortSignal.reason
+        : new Error("User input request was aborted");
+    }
+
+    return new Promise<OrchestratorUserInputResponse>((resolve, reject) => {
+      const onAbort = () => {
+        pendingUserInputRequests.delete(request.requestId);
+        reject(
+          request.abortSignal.reason instanceof Error
+            ? request.abortSignal.reason
+            : new Error("User input request was aborted")
+        );
+      };
+
+      pendingUserInputRequests.set(request.requestId, {
+        resolve: (response) => {
+          request.abortSignal.removeEventListener("abort", onAbort);
+          resolve(response);
+        },
+        reject: (error) => {
+          request.abortSignal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+        abortSignal: request.abortSignal
+      });
+      request.abortSignal.addEventListener("abort", onAbort, { once: true });
+    });
+  };
+
   ipcMain.handle("session:create", async (_event, input: CreateSessionInput) => {
     return ptyManager.createSession(input);
   });
@@ -130,10 +225,15 @@ export function registerIpc(
 
       return {
         status: "completed" as const,
-        detail: await orchestratorService.runOrchestrator({
-          ...input,
-          workspacePath: authorizedWorkspacePath
-        }, forwardOrchestratorEvent)
+        detail: await orchestratorService.runOrchestrator(
+          {
+            ...input,
+            workspacePath: authorizedWorkspacePath
+          },
+          forwardOrchestratorEvent,
+          requestUserApproval,
+          requestUserInput
+        )
       };
     } catch (error) {
       if (error instanceof OrchestratorRunCancelledError && error.snapshot) {
@@ -151,6 +251,46 @@ export function registerIpc(
 
   ipcMain.handle("orchestrator:cancel", async (_event, runId: string) => {
     return orchestratorService.cancelRun(runId);
+  });
+
+  ipcMain.handle("orchestrator:respond-approval", async (_event, input: RespondOrchestratorApprovalInput) => {
+    const pending = pendingApprovalRequests.get(input.requestId);
+    if (!pending) {
+      return false;
+    }
+
+    pendingApprovalRequests.delete(input.requestId);
+    pending.resolve(
+      input.approved
+        ? {
+            outcome: "selected",
+            optionId: input.optionId ?? undefined
+          }
+        : {
+            outcome: "cancelled"
+          }
+    );
+    return true;
+  });
+
+  ipcMain.handle("orchestrator:respond-user-input", async (_event, input: RespondOrchestratorUserInputInput) => {
+    const pending = pendingUserInputRequests.get(input.requestId);
+    if (!pending) {
+      return false;
+    }
+
+    pendingUserInputRequests.delete(input.requestId);
+    pending.resolve(
+      input.submitted
+        ? {
+            outcome: "submitted",
+            answers: input.answers ?? {}
+          }
+        : {
+            outcome: "cancelled"
+          }
+    );
+    return true;
   });
 
   ipcMain.handle("orchestrator:list", async () => {

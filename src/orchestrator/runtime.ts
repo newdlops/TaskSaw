@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { OrchestratorEngine, OrchestratorEventListener } from "./engine";
 import { EvidenceStore } from "./evidence-store";
 import {
@@ -5,6 +6,10 @@ import {
   ConcretePlanResult,
   ExecuteResult,
   GatherResult,
+  OrchestratorApprovalDecision,
+  OrchestratorApprovalRequest,
+  OrchestratorUserInputRequest,
+  OrchestratorUserInputResponse,
   ModelInvocationContext,
   OrchestratorCapability,
   OrchestratorModelAdapter,
@@ -34,6 +39,14 @@ import {
 import { WorkingMemoryStore } from "./working-memory";
 
 type AssignedModelRole = keyof ModelAssignment;
+const ALL_ASSIGNED_MODEL_ROLES: AssignedModelRole[] = [
+  "abstractPlanner",
+  "gatherer",
+  "concretePlanner",
+  "reviewer",
+  "executor",
+  "verifier"
+];
 
 type RootPhaseResults = {
   abstractPlan: AbstractPlanResult;
@@ -90,6 +103,8 @@ export type OrchestratorRuntimeOptions = {
   persistence?: OrchestratorPersistence;
   now?: () => string;
   onEvent?: OrchestratorEventListener;
+  requestUserApproval?: (request: OrchestratorApprovalRequest) => Promise<OrchestratorApprovalDecision>;
+  requestUserInput?: (request: OrchestratorUserInputRequest) => Promise<OrchestratorUserInputResponse>;
 };
 
 export class MissingModelAssignmentError extends Error {
@@ -138,6 +153,8 @@ export class OrchestratorRuntime {
   private readonly persistence: OrchestratorPersistence | undefined;
   private readonly now: () => string;
   private readonly onEvent: OrchestratorEventListener | undefined;
+  private readonly requestUserApprovalHandler: ((request: OrchestratorApprovalRequest) => Promise<OrchestratorApprovalDecision>) | undefined;
+  private readonly requestUserInputHandler: ((request: OrchestratorUserInputRequest) => Promise<OrchestratorUserInputResponse>) | undefined;
   private readonly scheduler = new OrderedDfsScheduler();
   private readonly workingMemoryByRun = new Map<string, WorkingMemoryStore>();
   private readonly projectStructureByRun = new Map<string, ProjectStructureMemoryStore>();
@@ -156,6 +173,8 @@ export class OrchestratorRuntime {
     this.persistence = options.persistence;
     this.now = options.now ?? (() => new Date().toISOString());
     this.onEvent = options.onEvent;
+    this.requestUserApprovalHandler = options.requestUserApproval;
+    this.requestUserInputHandler = options.requestUserInput;
     this.engine.subscribe((event) => {
       if (this.workingMemoryByRun.has(event.runId)) {
         try {
@@ -343,6 +362,9 @@ export class OrchestratorRuntime {
 
       const failedNode = this.engine.getNode(nodeId);
       if (failedNode) {
+        if (failedNode.kind === "execution") {
+          this.recordExecutionStatus(failedNode, "failed", this.formatRuntimeError(error));
+        }
         this.engine.appendEvent(failedNode.runId, failedNode.id, "node_failed", {
           phase: failedNode.phase,
           error: this.formatRuntimeError(error)
@@ -376,8 +398,9 @@ export class OrchestratorRuntime {
 
     for (const bundle of gatheredBundles) {
       this.evidenceStore.upsertBundle(bundle);
+      const storedBundle = this.evidenceStore.getBundle(bundle.id) ?? bundle;
       this.engine.attachEvidenceBundle(currentNode.id, bundle.id);
-      this.ingestEvidenceBundle(currentNode.id, bundle);
+      this.ingestEvidenceBundle(currentNode.id, storedBundle);
     }
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
@@ -571,9 +594,15 @@ export class OrchestratorRuntime {
     if (this.shouldRunReview(currentNode)) {
       this.throwIfCancelled(currentNode.runId, currentNode.id);
       currentNode = this.engine.transitionNode(nodeId, "review");
+      this.recordExecutionStatus(currentNode, "reviewing", "Reviewing execution readiness");
       review = await this.invokeCapability<ReviewResult>(currentNode, "reviewer", "review", executionEvidence);
       phaseResults.review = review;
       this.recordDecision(currentNode.runId, currentNode.id, "Review completed", review.summary);
+      this.recordExecutionStatus(
+        currentNode,
+        review.approved ? "review_approved" : "review_rejected",
+        review.summary
+      );
 
       if (!review.approved) {
         throw new ReviewRejectedError(currentNode.id, review.summary);
@@ -582,15 +611,19 @@ export class OrchestratorRuntime {
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "execute");
+    this.recordExecutionStatus(currentNode, "running", "Executing routed model command");
     const execute = await this.invokeCapability<ExecuteResult>(currentNode, "executor", "execute", executionEvidence);
     phaseResults.execute = execute;
     this.recordDecision(currentNode.runId, currentNode.id, "Execution completed", execute.summary);
+    this.recordExecutionStatus(currentNode, "executed", execute.summary);
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "verify");
+    this.recordExecutionStatus(currentNode, "verifying", "Verifying execution result");
     const verify = await this.invokeCapability<VerifyResult>(currentNode, "verifier", "verify", executionEvidence);
     phaseResults.verify = verify;
     this.recordDecision(currentNode.runId, currentNode.id, "Verification completed", verify.summary);
+    this.recordExecutionStatus(currentNode, verify.passed ? "completed" : "verification_failed", verify.summary);
 
     if (!verify.passed) {
       throw new VerificationFailedError(currentNode.id, verify.summary);
@@ -633,6 +666,7 @@ export class OrchestratorRuntime {
       message: "Executing dedicated execution node",
       parentNodeId: planNode.id
     });
+    this.recordExecutionStatus(childNode, "queued", "Execution node created and waiting to start");
 
     return this.executeNode(childNode.id, false);
   }
@@ -696,13 +730,39 @@ export class OrchestratorRuntime {
       requiredRoles.push("reviewer");
     }
 
+    const resolvedModels: ModelAssignment = {};
+    const repairedRoles: AssignedModelRole[] = [];
+
+    for (const role of ALL_ASSIGNED_MODEL_ROLES) {
+      const explicitModel = assignedModels?.[role];
+      if (this.isValidModelRef(explicitModel)) {
+        resolvedModels[role] = explicitModel;
+        continue;
+      }
+
+      const routedParentModel = parentNode.assignedModels[role];
+      if (this.isValidModelRef(routedParentModel)) {
+        resolvedModels[role] = routedParentModel;
+        repairedRoles.push(role);
+      }
+    }
+
     for (const role of requiredRoles) {
-      if (!this.isValidModelRef(assignedModels?.[role])) {
+      if (!this.isValidModelRef(resolvedModels[role])) {
         throw new MissingChildTaskModelAssignmentError(parentNode.id, childTask.title, role);
       }
     }
 
-    return assignedModels!;
+    if (repairedRoles.length > 0) {
+      this.engine.appendEvent(parentNode.runId, parentNode.id, "scheduler_progress", {
+        message: "Materialized missing child task routing from nodeModelRouting",
+        childTitle: childTask.title,
+        repairedRoles,
+        importance: childTask.importance ?? "medium"
+      });
+    }
+
+    return resolvedModels;
   }
 
   private isValidModelRef(value: ModelRef | undefined): value is ModelRef {
@@ -1216,8 +1276,192 @@ export class OrchestratorRuntime {
       executionBudget: node.executionBudget,
       workingMemory: this.getWorkingMemorySnapshot(node.runId),
       projectStructure: this.getProjectStructureSnapshot(node.runId),
-      evidenceBundles
+      evidenceBundles,
+      requestUserApproval: (request) => this.handleUserApprovalRequest(node, capability, assignedModel, request),
+      requestUserInput: (request) => this.handleUserInputRequest(node, capability, assignedModel, request),
+      reportExecutionStatus: (state, message, details) => this.recordExecutionStatus(node, state, message, details)
     };
+  }
+
+  private async handleUserApprovalRequest(
+    node: PlanNode,
+    capability: OrchestratorCapability,
+    assignedModel: ModelRef,
+    request: Omit<OrchestratorApprovalRequest, "requestId" | "runId" | "nodeId" | "capability" | "provider" | "model" | "createdAt">
+  ): Promise<OrchestratorApprovalDecision> {
+    const approvalRequest: OrchestratorApprovalRequest = {
+      ...request,
+      requestId: randomUUID(),
+      runId: node.runId,
+      nodeId: node.id,
+      capability,
+      provider: assignedModel.provider,
+      model: assignedModel.model,
+      createdAt: this.now()
+    };
+    const payloadOptions = approvalRequest.options.map((option) => ({
+      optionId: option.optionId,
+      kind: option.kind ?? null,
+      label: option.label ?? this.describeApprovalOption(option)
+    }));
+
+    this.engine.appendEvent(node.runId, node.id, "approval_requested", {
+      requestId: approvalRequest.requestId,
+      capability,
+      provider: assignedModel.provider,
+      model: assignedModel.model,
+      title: approvalRequest.title ?? null,
+      message: approvalRequest.message,
+      details: approvalRequest.details ?? null,
+      kind: approvalRequest.kind ?? null,
+      locations: approvalRequest.locations ?? [],
+      options: payloadOptions
+    });
+
+    if (node.kind === "execution") {
+      this.recordExecutionStatus(node, "awaiting_user_approval", approvalRequest.message);
+    }
+
+    let decision: OrchestratorApprovalDecision;
+    if (this.requestUserApprovalHandler) {
+      decision = await this.requestUserApprovalHandler(approvalRequest);
+    } else {
+      const allowOption = approvalRequest.options.find((option) => option.kind === "allow_once")
+        ?? approvalRequest.options.find((option) => option.kind?.startsWith("allow"))
+        ?? approvalRequest.options[0];
+      decision = allowOption
+        ? {
+            outcome: "selected",
+            optionId: allowOption.optionId
+          }
+        : {
+            outcome: "cancelled"
+          };
+    }
+
+    this.engine.appendEvent(node.runId, node.id, "approval_resolved", {
+      requestId: approvalRequest.requestId,
+      capability,
+      provider: assignedModel.provider,
+      model: assignedModel.model,
+      approved: decision.outcome === "selected",
+      optionId: decision.optionId ?? null
+    });
+
+    if (node.kind === "execution") {
+      this.recordExecutionStatus(
+        node,
+        decision.outcome === "selected" ? "approval_granted" : "approval_denied",
+        decision.outcome === "selected"
+          ? `Approved ${this.describeApprovalOption(payloadOptions.find((option) => option.optionId === decision.optionId))}`
+          : "User denied the requested action"
+      );
+    }
+
+    return decision;
+  }
+
+  private async handleUserInputRequest(
+    node: PlanNode,
+    capability: OrchestratorCapability,
+    assignedModel: ModelRef,
+    request: Omit<OrchestratorUserInputRequest, "requestId" | "runId" | "nodeId" | "capability" | "provider" | "model" | "createdAt">
+  ): Promise<OrchestratorUserInputResponse> {
+    const inputRequest: OrchestratorUserInputRequest = {
+      ...request,
+      requestId: randomUUID(),
+      runId: node.runId,
+      nodeId: node.id,
+      capability,
+      provider: assignedModel.provider,
+      model: assignedModel.model,
+      createdAt: this.now()
+    };
+
+    this.engine.appendEvent(node.runId, node.id, "user_input_requested", {
+      requestId: inputRequest.requestId,
+      capability,
+      provider: assignedModel.provider,
+      model: assignedModel.model,
+      title: inputRequest.title ?? null,
+      message: inputRequest.message,
+      questions: inputRequest.questions.map((question) => ({
+        id: question.id,
+        header: question.header,
+        question: question.question,
+        options: question.options ?? [],
+        isOther: question.isOther ?? false,
+        isSecret: question.isSecret ?? false
+      }))
+    });
+
+    if (node.kind === "execution") {
+      this.recordExecutionStatus(node, "awaiting_user_input", inputRequest.message);
+    }
+
+    let response: OrchestratorUserInputResponse;
+    if (this.requestUserInputHandler) {
+      response = await this.requestUserInputHandler(inputRequest);
+    } else {
+      response = {
+        outcome: "cancelled"
+      };
+    }
+
+    this.engine.appendEvent(node.runId, node.id, "user_input_resolved", {
+      requestId: inputRequest.requestId,
+      capability,
+      provider: assignedModel.provider,
+      model: assignedModel.model,
+      submitted: response.outcome === "submitted",
+      answers: response.answers ?? {}
+    });
+
+    if (node.kind === "execution") {
+      this.recordExecutionStatus(
+        node,
+        response.outcome === "submitted" ? "user_input_submitted" : "user_input_cancelled",
+        response.outcome === "submitted"
+          ? "User input submitted"
+          : "User input request was cancelled"
+      );
+    }
+
+    return response;
+  }
+
+  private describeApprovalOption(
+    option: { optionId: string; kind?: string | null; label?: string | null } | undefined
+  ): string {
+    if (option?.label && option.label.trim().length > 0) {
+      return option.label.trim();
+    }
+
+    const kind = option?.kind?.trim() ?? "";
+    if (kind === "allow_once") {
+      return "allow once";
+    }
+    if (kind === "allow_for_session") {
+      return "allow for session";
+    }
+    if (kind.startsWith("allow")) {
+      return kind.replaceAll("_", " ");
+    }
+
+    return option?.optionId?.trim() || "selected option";
+  }
+
+  private recordExecutionStatus(
+    node: PlanNode,
+    state: string,
+    message: string,
+    details?: Record<string, unknown>
+  ) {
+    this.engine.appendEvent(node.runId, node.id, "execution_status", {
+      state,
+      message,
+      ...(details ?? {})
+    });
   }
 
   private materializeEvidenceBundle(node: PlanNode, bundleDraft: EvidenceBundleDraft): EvidenceBundle {
@@ -1298,6 +1542,9 @@ export class OrchestratorRuntime {
     const workingMemory = this.requireWorkingMemory(bundle.runId);
 
     for (const fact of bundle.facts) {
+      if (typeof fact.statement !== "string" || fact.statement.trim().length === 0) {
+        continue;
+      }
       workingMemory.recordFact({
         statement: fact.statement,
         confidence: fact.confidence,
@@ -1307,6 +1554,9 @@ export class OrchestratorRuntime {
     }
 
     for (const unknown of bundle.unknowns) {
+      if (typeof unknown.question !== "string" || unknown.question.trim().length === 0) {
+        continue;
+      }
       workingMemory.recordUnknown({
         description: unknown.question,
         impact: unknown.impact,
