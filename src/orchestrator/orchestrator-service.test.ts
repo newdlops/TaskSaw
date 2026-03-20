@@ -245,3 +245,51 @@ test("orchestrator service assigns the strongest non-mini Codex model to plannin
     "gpt-5.4-mini"
   ]);
 });
+
+test("orchestrator service keeps higher reasoning for Codex planners and lighter reasoning for Codex workers", async () => {
+  const catalog = createCodexCatalog({
+    models: [
+      {
+        id: "gpt-5.4-mini",
+        model: "gpt-5.4-mini",
+        displayName: "GPT-5.4 Mini",
+        description: null,
+        hidden: false,
+        isDefault: true,
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh"]
+      },
+      {
+        id: "gpt-5.4",
+        model: "gpt-5.4",
+        displayName: "GPT-5.4",
+        description: null,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: "high",
+        supportedReasoningEfforts: ["medium", "high", "xhigh"]
+      }
+    ]
+  });
+  const toolManager = {
+    prepareWorkspaceContext: async () => undefined,
+    discoverModelCatalog: async () => catalog
+  };
+  const service = new OrchestratorService("/tmp/tasksaw-app", "/tmp/tasksaw-user-data", toolManager as never);
+
+  const modeConfig = await (service as unknown as { resolveModeConfig(mode: string, workspacePath: string): Promise<unknown> })
+    .resolveModeConfig("codex_only", "/tmp/tasksaw-workspace") as {
+      assignedModels: {
+        abstractPlanner: { model: string; reasoningEffort?: string };
+        gatherer: { model: string; reasoningEffort?: string };
+        executor: { model: string; reasoningEffort?: string };
+      };
+    };
+
+  assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gpt-5.4");
+  assert.equal(modeConfig.assignedModels.abstractPlanner.reasoningEffort, "xhigh");
+  assert.equal(modeConfig.assignedModels.gatherer.model, "gpt-5.4-mini");
+  assert.equal(modeConfig.assignedModels.gatherer.reasoningEffort, "low");
+  assert.equal(modeConfig.assignedModels.executor.model, "gpt-5.4-mini");
+  assert.equal(modeConfig.assignedModels.executor.reasoningEffort, "low");
+});

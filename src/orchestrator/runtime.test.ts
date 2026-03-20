@@ -317,11 +317,13 @@ test("runtime executes the minimal happy path and propagates evidence into plann
     "execute:execute-lower",
     "verify:verify-upper"
   ]);
+  assert.equal(capturedSnapshot?.run.status, "done");
   assert.equal(result.snapshot.run.status, "done");
   assert.equal(result.rootNode.phase, "done");
-  assert.equal(result.snapshot.nodes.length, 2);
-  assert.equal(result.snapshot.nodes[0]?.kind, "planning");
-  assert.equal(result.snapshot.nodes[1]?.kind, "execution");
+  assert.equal(result.snapshot.nodes.filter((node) => node.role === "task").length, 2);
+  assert.equal(result.snapshot.nodes.filter((node) => node.role === "stage").length, 6);
+  assert.equal(result.snapshot.nodes.find((node) => node.parentId === null)?.kind, "planning");
+  assert.equal(result.snapshot.nodes.find((node) => node.kind === "execution" && node.role === "task")?.kind, "execution");
   assert.equal(result.snapshot.evidenceBundles.length, 3);
   assert.equal(result.snapshot.workingMemory.facts.length, 2);
   assert.equal(result.snapshot.workingMemory.unknowns.length, 1);
@@ -1140,8 +1142,8 @@ test("runtime stops decomposing at maxDepth and executes the deepest node as a l
 
   assert.equal(result.snapshot.run.status, "done");
   assert.equal(Math.max(...result.snapshot.nodes.map((node) => node.depth)), 2);
-  assert.equal(result.snapshot.nodes.length, 4);
-  assert.equal(result.snapshot.nodes.at(-1)?.kind, "execution");
+  assert.equal(result.snapshot.nodes.filter((node) => node.role === "task").length, 4);
+  assert.equal(result.snapshot.nodes.filter((node) => node.kind === "execution" && node.role === "task").length, 1);
   assert.equal(
     result.snapshot.events.some((event) =>
       event.type === "scheduler_progress"
@@ -1729,9 +1731,9 @@ test("runtime skips decomposition for short test tree goals", async () => {
     }
   });
 
-  assert.equal(result.snapshot.nodes.length, 2);
+  assert.equal(result.snapshot.nodes.filter((node) => node.role === "task").length, 2);
   assert.equal(result.snapshot.run.status, "done");
-  assert.equal(result.snapshot.nodes[1]?.kind, "execution");
+  assert.equal(result.snapshot.nodes.filter((node) => node.kind === "execution" && node.role === "task").length, 1);
   assert.equal(
     result.snapshot.events.some((event) =>
       event.type === "scheduler_progress"

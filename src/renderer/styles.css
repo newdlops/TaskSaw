@@ -924,7 +924,7 @@ body[data-has-sessions="false"] #sidebar {
   font-size: 11px;
 }
 
-#orchestrator-node-command,
+#orchestrator-node-terminal,
 #orchestrator-node-log,
 #orchestrator-log {
   min-height: 0;
@@ -942,6 +942,18 @@ body[data-has-sessions="false"] #sidebar {
   word-break: break-word;
   font-size: 12px;
   line-height: 1.5;
+}
+
+#orchestrator-node-terminal {
+  background: #111827;
+  color: #d1fae5;
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  font-family: "SFMono-Regular", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+
+.orchestrator-tree-node.role-stage {
+  margin-left: 8px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
 }
 
 .orchestrator-progress-shell {

@@ -149,6 +149,7 @@
                         <button id="orchestrator-node-request-open" class="orchestrator-copy-button" type="button">Request JSON</button>
                         <button id="orchestrator-node-response-open" class="orchestrator-copy-button" type="button">Response JSON</button>
                         <button id="orchestrator-node-plan-open" class="orchestrator-copy-button" type="button">Execution Plan</button>
+                        <button id="orchestrator-node-log-open" class="orchestrator-copy-button" type="button">Node Log</button>
                       </div>
                       <span id="orchestrator-node-live-status" class="orchestrator-node-live-status">Queued</span>
                     </div>
@@ -176,29 +177,19 @@
                   <div class="orchestrator-node-live-grid">
                     <section class="orchestrator-node-live-section">
                       <div class="orchestrator-section-header">
-                        <div id="orchestrator-node-command-title" class="section-title section-title-small">Command</div>
+                        <div id="orchestrator-node-terminal-title" class="section-title section-title-small">Interaction Terminal</div>
                         <div class="orchestrator-card-actions">
-                          <button id="orchestrator-node-command-open" class="orchestrator-copy-button" type="button">Large View</button>
-                          <button id="orchestrator-node-command-copy" class="orchestrator-copy-button" type="button">Copy</button>
+                          <button id="orchestrator-node-terminal-open" class="orchestrator-copy-button" type="button">Large View</button>
+                          <button id="orchestrator-node-terminal-copy" class="orchestrator-copy-button" type="button">Copy</button>
                         </div>
                       </div>
-                      <pre id="orchestrator-node-command"></pre>
-                    </section>
-
-                    <section class="orchestrator-node-live-section">
-                      <div class="orchestrator-section-header">
-                        <div id="orchestrator-node-log-title" class="section-title section-title-small">Node Log</div>
-                        <div class="orchestrator-card-actions">
-                          <button id="orchestrator-node-log-open" class="orchestrator-copy-button" type="button">Large View</button>
-                          <button id="orchestrator-node-log-copy" class="orchestrator-copy-button" type="button">Copy</button>
-                        </div>
-                      </div>
-                      <pre id="orchestrator-node-log"></pre>
+                      <pre id="orchestrator-node-terminal"></pre>
                     </section>
                   </div>
                   <pre id="orchestrator-node-request-data" hidden></pre>
                   <pre id="orchestrator-node-response-data" hidden></pre>
                   <pre id="orchestrator-node-plan-data" hidden></pre>
+                  <pre id="orchestrator-node-log" hidden></pre>
                 </section>
 
                 <section id="orchestrator-detail-panel-memory" class="orchestrator-working-memory-card" hidden>

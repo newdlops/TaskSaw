@@ -4,6 +4,7 @@ type ThemePreference = "light" | "dark";
 type ResolvedTheme = "light" | "dark";
 type LanguageCode = "en" | "ko";
 type OrchestratorMode = "gemini_only" | "codex_only" | "cross_review";
+type OrchestratorNodeRole = "task" | "stage";
 type XtermTerminal = import("@xterm/xterm").Terminal;
 type XtermTheme = NonNullable<import("@xterm/xterm").ITerminalOptions["theme"]>;
 
@@ -64,6 +65,8 @@ type OrchestratorPlanNode = {
   objective: string;
   depth: number;
   kind: "planning" | "execution";
+  role: OrchestratorNodeRole;
+  stagePhase: string | null;
   phase: string;
   assignedModels?: OrchestratorModelAssignment;
   createdAt: string;
@@ -177,8 +180,9 @@ type OrchestratorNodeProgressView = {
 type SelectedNodeLiveView = {
   status: string;
   progress: OrchestratorNodeProgressView | null;
-  command: string;
+  terminal: string;
   log: string;
+  hasLog: boolean;
   requestJson: string;
   responseJson: string;
   executionPlan: string;
@@ -280,6 +284,7 @@ const TEXT = {
       orchestratorNodeRequestTitle: "Request JSON",
       orchestratorNodeResponseTitle: "Response JSON",
       orchestratorNodePlanTitle: "Execution Plan",
+      orchestratorNodeTerminalTitle: "Interaction Terminal",
       orchestratorNodeProgressCurrent: "Current Work",
       orchestratorNodeProgressObjective: "Objective",
       orchestratorNodeProgressModel: "Active Model",
@@ -321,6 +326,7 @@ const TEXT = {
       orchestratorNodeResponseEmpty: "No node response payloads yet.",
       orchestratorNodePlanEmpty: "No execution plan has been produced for this node yet.",
       orchestratorNodeCommandEmpty: "No command has been dispatched yet.",
+      orchestratorNodeTerminalEmpty: "Select a node to inspect its live interaction stream.",
       orchestratorNodeLogEmpty: "No node events yet.",
       orchestratorLogEmpty: "No orchestrator events yet.",
       orchestratorCommandStatusIdle: "Queued",
@@ -423,6 +429,7 @@ const TEXT = {
       orchestratorNodeRequestTitle: "요청 JSON",
       orchestratorNodeResponseTitle: "응답 JSON",
       orchestratorNodePlanTitle: "실행 계획",
+      orchestratorNodeTerminalTitle: "상호작용 터미널",
       orchestratorNodeProgressCurrent: "현재 작업",
       orchestratorNodeProgressObjective: "목표",
       orchestratorNodeProgressModel: "실행 모델",
@@ -464,6 +471,7 @@ const TEXT = {
       orchestratorNodeResponseEmpty: "아직 노드 응답 payload가 없습니다.",
       orchestratorNodePlanEmpty: "이 노드에는 아직 실행 계획이 만들어지지 않았습니다.",
       orchestratorNodeCommandEmpty: "아직 전달된 명령이 없습니다.",
+      orchestratorNodeTerminalEmpty: "노드를 선택하면 실시간 상호작용 흐름을 볼 수 있습니다.",
       orchestratorNodeLogEmpty: "아직 노드 이벤트가 없습니다.",
       orchestratorLogEmpty: "아직 오케스트레이터 이벤트가 없습니다.",
       orchestratorCommandStatusIdle: "대기 중",
@@ -572,13 +580,11 @@ const orchestratorNodeUserInputActionsEl = document.getElementById("orchestrator
 const orchestratorNodeRequestOpenButton = document.getElementById("orchestrator-node-request-open") as HTMLButtonElement;
 const orchestratorNodeResponseOpenButton = document.getElementById("orchestrator-node-response-open") as HTMLButtonElement;
 const orchestratorNodePlanOpenButton = document.getElementById("orchestrator-node-plan-open") as HTMLButtonElement;
-const orchestratorNodeCommandTitleEl = document.getElementById("orchestrator-node-command-title") as HTMLDivElement;
-const orchestratorNodeCommandOpenButton = document.getElementById("orchestrator-node-command-open") as HTMLButtonElement;
-const orchestratorNodeCommandCopyButton = document.getElementById("orchestrator-node-command-copy") as HTMLButtonElement;
-const orchestratorNodeCommandEl = document.getElementById("orchestrator-node-command") as HTMLPreElement;
-const orchestratorNodeLogTitleEl = document.getElementById("orchestrator-node-log-title") as HTMLDivElement;
+const orchestratorNodeTerminalTitleEl = document.getElementById("orchestrator-node-terminal-title") as HTMLDivElement;
+const orchestratorNodeTerminalOpenButton = document.getElementById("orchestrator-node-terminal-open") as HTMLButtonElement;
+const orchestratorNodeTerminalCopyButton = document.getElementById("orchestrator-node-terminal-copy") as HTMLButtonElement;
+const orchestratorNodeTerminalEl = document.getElementById("orchestrator-node-terminal") as HTMLPreElement;
 const orchestratorNodeLogOpenButton = document.getElementById("orchestrator-node-log-open") as HTMLButtonElement;
-const orchestratorNodeLogCopyButton = document.getElementById("orchestrator-node-log-copy") as HTMLButtonElement;
 const orchestratorNodeLogEl = document.getElementById("orchestrator-node-log") as HTMLPreElement;
 const orchestratorNodeRequestDataEl = document.getElementById("orchestrator-node-request-data") as HTMLPreElement;
 const orchestratorNodeResponseDataEl = document.getElementById("orchestrator-node-response-data") as HTMLPreElement;
@@ -932,6 +938,8 @@ function upsertLiveOrchestratorNode(detail: OrchestratorRunDetail, event: Orches
     const phase = typeof event.payload.phase === "string" ? event.payload.phase : "init";
     const depth = typeof event.payload.depth === "number" ? event.payload.depth : 0;
     const parentId = typeof event.payload.parentId === "string" ? event.payload.parentId : null;
+    const role = event.payload.role === "stage" ? "stage" : "task";
+    const stagePhase = typeof event.payload.stagePhase === "string" ? event.payload.stagePhase : null;
 
     const nextNode: OrchestratorPlanNode = {
       id: event.nodeId,
@@ -940,6 +948,8 @@ function upsertLiveOrchestratorNode(detail: OrchestratorRunDetail, event: Orches
       objective,
       depth,
       kind: typeof event.payload.kind === "string" && event.payload.kind === "execution" ? "execution" : "planning",
+      role,
+      stagePhase,
       phase,
       assignedModels: existingNodeIndex === -1 ? undefined : detail.nodes[existingNodeIndex]!.assignedModels,
       createdAt: existingNodeIndex === -1 ? event.createdAt : detail.nodes[existingNodeIndex]!.createdAt,
@@ -1161,7 +1171,7 @@ function summarizeEvent(event: OrchestratorEvent): string[] {
   if (event.type === "approval_resolved") {
     return [
       `[${formatTimestamp(event.createdAt)}] ${eventLabel("approval resolved")}`,
-      Boolean(payload.approved)
+      payload.approved === true
         ? (languagePreference === "ko" ? "사용자 승인" : "User approved")
         : (languagePreference === "ko" ? "사용자 거절" : "User denied")
     ];
@@ -1179,7 +1189,7 @@ function summarizeEvent(event: OrchestratorEvent): string[] {
   if (event.type === "user_input_resolved") {
     return [
       `[${formatTimestamp(event.createdAt)}] ${eventLabel("input resolved")}`,
-      Boolean(payload.submitted)
+      payload.submitted === true
         ? (languagePreference === "ko" ? "사용자 입력 제출" : "User input submitted")
         : (languagePreference === "ko" ? "사용자 입력 취소" : "User input cancelled")
     ];
@@ -1289,6 +1299,24 @@ function formatNodePhaseLabel(phase: string): string {
   return labels[phase as keyof typeof labels] ?? phase.replaceAll("_", " ");
 }
 
+function getDisplayedNodePhase(node: OrchestratorPlanNode): string {
+  return node.role === "stage" && typeof node.stagePhase === "string" && node.stagePhase.length > 0
+    ? node.stagePhase
+    : node.phase;
+}
+
+function formatNodeRoleLabel(node: OrchestratorPlanNode): string {
+  if (node.role === "stage") {
+    return formatNodePhaseLabel(getDisplayedNodePhase(node));
+  }
+
+  if (node.kind === "execution") {
+    return languagePreference === "ko" ? "실행 태스크" : "Execution Task";
+  }
+
+  return languagePreference === "ko" ? "태스크" : "Task";
+}
+
 function formatModelLabel(modelId: string | null | undefined, modelName?: string | null, provider?: string | null): string {
   const parts = [modelName, provider, modelId]
     .map((value) => value?.trim())
@@ -1386,6 +1414,19 @@ function formatCommand(command: string[]): string {
 
 function getNodeEvents(detail: OrchestratorRunDetail, nodeId: string): OrchestratorEvent[] {
   return detail.events.filter((event) => event.nodeId === nodeId);
+}
+
+function getTaskStageChildren(detail: OrchestratorRunDetail, node: OrchestratorPlanNode): OrchestratorPlanNode[] {
+  return detail.nodes.filter((candidate) => candidate.parentId === node.id && candidate.role === "stage");
+}
+
+function getDisplayNodeEvents(detail: OrchestratorRunDetail, node: OrchestratorPlanNode): OrchestratorEvent[] {
+  if (node.role === "stage") {
+    return getNodeEvents(detail, node.id);
+  }
+
+  const visibleNodeIds = new Set([node.id, ...getTaskStageChildren(detail, node).map((child) => child.id)]);
+  return detail.events.filter((event) => event.nodeId !== null && visibleNodeIds.has(event.nodeId));
 }
 
 function getLatestEventFromList(events: OrchestratorEvent[], type: string): OrchestratorEvent | null {
@@ -2100,6 +2141,7 @@ function buildNodeProgressView(
   node: OrchestratorPlanNode,
   nodeEvents: OrchestratorEvent[]
 ): OrchestratorNodeProgressView {
+  const displayedPhase = getDisplayedNodePhase(node);
   const selectedNodeModels = getNodeModelLabels(detail, node);
   const lastScheduler = getLatestEventFromList(nodeEvents, "scheduler_progress");
   const lastInvocation = getLatestEventFromList(nodeEvents, "model_invocation");
@@ -2124,7 +2166,7 @@ function buildNodeProgressView(
   );
 
   let tone: OrchestratorProgressTone = "idle";
-  let summary = formatNodePhaseLabel(node.phase);
+  let summary = formatNodeRoleLabel(node);
   let detailLine = defaultDetail;
 
   if (lastFailure) {
@@ -2164,9 +2206,9 @@ function buildNodeProgressView(
     );
     summary = `${formatNodePhaseLabel(currentCapabilityPhase ?? node.phase)} · ${activeModelLabel}`;
     detailLine = schedulerMessage || (languagePreference === "ko" ? "모델 응답 대기 중" : "Waiting for model response");
-  } else if (node.phase !== "init") {
+  } else if (displayedPhase !== "init") {
     tone = "active";
-    summary = formatNodePhaseLabel(node.phase);
+    summary = formatNodeRoleLabel(node);
     detailLine = responseSummary || defaultDetail;
   }
 
@@ -2192,8 +2234,8 @@ function buildNodeProgressView(
     observedPhases.add(currentCapabilityPhase);
   }
 
-  if (ORCHESTRATOR_PHASE_TRACK.includes(node.phase as (typeof ORCHESTRATOR_PHASE_TRACK)[number])) {
-    observedPhases.add(node.phase);
+  if (ORCHESTRATOR_PHASE_TRACK.includes(displayedPhase as (typeof ORCHESTRATOR_PHASE_TRACK)[number])) {
+    observedPhases.add(displayedPhase);
   }
 
   const maxObservedIndex = Math.max(
@@ -2203,8 +2245,8 @@ function buildNodeProgressView(
   const visiblePhases = (node.phase === "done" || node.phase === "escalated")
     ? ORCHESTRATOR_PHASE_TRACK.slice(0, maxObservedIndex + 1)
     : ORCHESTRATOR_PHASE_TRACK;
-  const activePhase = ORCHESTRATOR_PHASE_TRACK.includes(node.phase as (typeof ORCHESTRATOR_PHASE_TRACK)[number])
-    ? node.phase
+  const activePhase = ORCHESTRATOR_PHASE_TRACK.includes(displayedPhase as (typeof ORCHESTRATOR_PHASE_TRACK)[number])
+    ? displayedPhase
     : currentCapabilityPhase;
   const failureMessage = lastFailure
     ? formatDisplayValue(lastFailure.payload.error ?? "unknown error", 140)
@@ -2264,8 +2306,9 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
     return {
       status: translate("ui.orchestratorCommandStatusIdle"),
       progress: null,
-      command: translate("ui.orchestratorNodeCommandEmpty"),
+      terminal: translate("ui.orchestratorNodeTerminalEmpty"),
       log: translate("ui.orchestratorNodeLogEmpty"),
+      hasLog: false,
       requestJson: translate("ui.orchestratorNodeRequestEmpty"),
       responseJson: translate("ui.orchestratorNodeResponseEmpty"),
       executionPlan: translate("ui.orchestratorNodePlanEmpty"),
@@ -2280,8 +2323,9 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
     return {
       status: translate("ui.orchestratorCommandStatusIdle"),
       progress: null,
-      command: translate("ui.orchestratorNodeCommandEmpty"),
+      terminal: translate("ui.orchestratorNodeTerminalEmpty"),
       log: translate("ui.orchestratorNodeLogEmpty"),
+      hasLog: false,
       requestJson: translate("ui.orchestratorNodeRequestEmpty"),
       responseJson: translate("ui.orchestratorNodeResponseEmpty"),
       executionPlan: translate("ui.orchestratorNodePlanEmpty"),
@@ -2291,7 +2335,7 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
     };
   }
 
-  const nodeEvents = getNodeEvents(detail, selectedNode.id);
+  const nodeEvents = getDisplayNodeEvents(detail, selectedNode);
   const progress = buildNodeProgressView(detail, selectedNode, nodeEvents);
   const pendingApproval = getPendingApproval(nodeEvents);
   const pendingUserInput = getPendingUserInput(nodeEvents);
@@ -2335,12 +2379,26 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
   }
 
   const executionPlanView = buildNodeExecutionPlanView(nodeEvents);
+  const terminalSections: string[] = [];
+  if (command.length > 0) {
+    terminalSections.push(`$ ${formatCommand(command)}`);
+  }
+  if (pendingApproval) {
+    terminalSections.push(`[approval] ${pendingApproval.title || pendingApproval.message}`);
+  }
+  if (pendingUserInput) {
+    terminalSections.push(`[input] ${pendingUserInput.title || pendingUserInput.message}`);
+  }
+  if (logLines.length > 0) {
+    terminalSections.push(logLines.join("\n").trim());
+  }
 
   return {
     status,
     progress,
-    command: command.length > 0 ? formatCommand(command) : translate("ui.orchestratorNodeCommandEmpty"),
+    terminal: terminalSections.join("\n\n").trim() || translate("ui.orchestratorNodeTerminalEmpty"),
     log: logLines.join("\n").trim() || translate("ui.orchestratorNodeLogEmpty"),
+    hasLog: nodeLogEvents.length > 0,
     requestJson: buildNodeRequestJsonView(nodeEvents),
     responseJson: buildNodeResponseJsonView(nodeEvents),
     executionPlan: executionPlanView.text,
@@ -2711,6 +2769,24 @@ function getNodeActivityPreview(detail: OrchestratorRunDetail, node: Orchestrato
   tone: OrchestratorProgressTone;
   summary: string;
 } {
+  if (node.role === "task") {
+    const stageChildren = getTaskStageChildren(detail, node);
+    const activeStage = [...stageChildren]
+      .reverse()
+      .find((child) => child.phase !== "done" && child.phase !== "escalated")
+      ?? stageChildren.at(-1);
+
+    if (activeStage) {
+      const progress = buildNodeProgressView(detail, activeStage, getNodeEvents(detail, activeStage.id));
+      return {
+        tone: progress.tone,
+        summary: progress.detail.length > 0
+          ? `${formatNodeRoleLabel(node)} · ${progress.summary} · ${truncateText(progress.detail, 72)}`
+          : `${formatNodeRoleLabel(node)} · ${progress.summary}`
+      };
+    }
+  }
+
   const progress = buildNodeProgressView(detail, node, getNodeEvents(detail, node.id));
   return {
     tone: progress.tone,
@@ -2733,7 +2809,13 @@ function resolveSelectedOrchestratorNode(detail: OrchestratorRunDetail | null): 
     return existingNode;
   }
 
-  const defaultNode = detail.nodes.find((node) => node.parentId === null) ?? detail.nodes[0] ?? null;
+  const defaultNode = [...detail.nodes]
+    .reverse()
+    .find((node) => node.role === "stage" && node.phase !== "done" && node.phase !== "escalated")
+    ?? [...detail.nodes].reverse().find((node) => node.role === "stage")
+    ?? detail.nodes.find((node) => node.parentId === null)
+    ?? detail.nodes[0]
+    ?? null;
   selectedOrchestratorNodeId = defaultNode?.id ?? null;
   return defaultNode;
 }
@@ -2828,7 +2910,8 @@ function renderOrchestratorDetail() {
   orchestratorNodeRequestOpenButton.disabled = liveView.progress === null;
   orchestratorNodeResponseOpenButton.disabled = liveView.progress === null;
   orchestratorNodePlanOpenButton.disabled = !liveView.hasExecutionPlan;
-  orchestratorNodeCommandEl.textContent = liveView.command;
+  orchestratorNodeLogOpenButton.disabled = !liveView.hasLog;
+  orchestratorNodeTerminalEl.textContent = liveView.terminal;
   orchestratorNodeLogEl.textContent = liveView.log;
   orchestratorWorkingMemoryEl.textContent = buildWorkingMemoryText(selectedOrchestratorRun);
   orchestratorWorkingMemoryOpenButton.disabled = selectedOrchestratorRun === null;
@@ -2847,7 +2930,7 @@ function renderOrchestratorTree() {
       selectedOrchestratorRun.run.updatedAt,
       selectedNode?.id ?? "",
       selectedOrchestratorRun.nodes
-        .map((node) => `${node.id}:${node.parentId ?? "root"}:${node.phase}:${node.depth}:${node.title}`)
+        .map((node) => `${node.id}:${node.parentId ?? "root"}:${node.role}:${node.stagePhase ?? "-"}:${node.phase}:${node.depth}:${node.title}`)
         .join("|")
     ].join("|")
     : `__empty__:${languagePreference}`;
@@ -2897,7 +2980,7 @@ function renderOrchestratorTree() {
 
       const card = document.createElement("button");
       card.type = "button";
-      card.className = `orchestrator-tree-node phase-${node.phase}`;
+      card.className = `orchestrator-tree-node role-${node.role} phase-${getDisplayedNodePhase(node)}`;
       if (selectedNode?.id === node.id) {
         card.classList.add("active");
       }
@@ -2917,13 +3000,15 @@ function renderOrchestratorTree() {
 
       const phase = document.createElement("span");
       phase.className = "orchestrator-tree-node-phase";
-      phase.textContent = formatNodePhaseLabel(node.phase);
+      phase.textContent = formatNodeRoleLabel(node);
 
       head.append(title, phase);
 
       const depth = document.createElement("div");
       depth.className = "orchestrator-tree-node-depth";
-      depth.textContent = `depth ${node.depth}`;
+      depth.textContent = node.role === "stage"
+        ? (languagePreference === "ko" ? `단계 · depth ${node.depth}` : `stage · depth ${node.depth}`)
+        : (languagePreference === "ko" ? `태스크 · depth ${node.depth}` : `task · depth ${node.depth}`);
 
       const objective = document.createElement("div");
       objective.className = "orchestrator-tree-node-objective";
@@ -3330,12 +3415,10 @@ function refreshLocalizedContent() {
   orchestratorNodeRequestOpenButton.textContent = translate("ui.orchestratorNodeRequestTitle");
   orchestratorNodeResponseOpenButton.textContent = translate("ui.orchestratorNodeResponseTitle");
   orchestratorNodePlanOpenButton.textContent = translate("ui.orchestratorNodePlanTitle");
-  orchestratorNodeCommandTitleEl.textContent = translate("ui.orchestratorNodeCommandTitle");
-  orchestratorNodeCommandOpenButton.textContent = translate("ui.orchestratorOpenViewer");
-  orchestratorNodeCommandCopyButton.textContent = translate("ui.orchestratorDetailCopy");
-  orchestratorNodeLogTitleEl.textContent = translate("ui.orchestratorNodeLogTitle");
-  orchestratorNodeLogOpenButton.textContent = translate("ui.orchestratorOpenViewer");
-  orchestratorNodeLogCopyButton.textContent = translate("ui.orchestratorDetailCopy");
+  orchestratorNodeTerminalTitleEl.textContent = translate("ui.orchestratorNodeTerminalTitle");
+  orchestratorNodeTerminalOpenButton.textContent = translate("ui.orchestratorOpenViewer");
+  orchestratorNodeTerminalCopyButton.textContent = translate("ui.orchestratorDetailCopy");
+  orchestratorNodeLogOpenButton.textContent = translate("ui.orchestratorNodeLogTitle");
   orchestratorWorkingMemoryTitleEl.textContent = translate("ui.orchestratorWorkingMemoryTitle");
   orchestratorWorkingMemoryOpenButton.textContent = translate("ui.orchestratorOpenViewer");
   orchestratorWorkingMemoryCopyButton.textContent = translate("ui.orchestratorDetailCopy");
@@ -3544,7 +3627,8 @@ function setOrchestratorTransientDetail(message: string) {
   orchestratorNodeRequestOpenButton.disabled = true;
   orchestratorNodeResponseOpenButton.disabled = true;
   orchestratorNodePlanOpenButton.disabled = true;
-  orchestratorNodeCommandEl.textContent = translate("ui.orchestratorNodeCommandEmpty");
+  orchestratorNodeLogOpenButton.disabled = true;
+  orchestratorNodeTerminalEl.textContent = translate("ui.orchestratorNodeTerminalEmpty");
   orchestratorNodeLogEl.textContent = message;
   orchestratorWorkingMemoryEl.textContent = message;
   orchestratorWorkingMemoryOpenButton.disabled = true;
@@ -4471,30 +4555,23 @@ orchestratorNodePlanOpenButton.addEventListener("click", () => {
     translate("ui.orchestratorNodePlanEmpty")
   );
 });
-orchestratorNodeCommandCopyButton.addEventListener("click", () => {
+orchestratorNodeTerminalCopyButton.addEventListener("click", () => {
   void copyOrchestratorSection(
-    orchestratorNodeCommandTitleEl,
-    orchestratorNodeCommandEl,
-    translate("ui.orchestratorNodeCommandEmpty")
+    orchestratorNodeTerminalTitleEl,
+    orchestratorNodeTerminalEl,
+    translate("ui.orchestratorNodeTerminalEmpty")
   );
 });
-orchestratorNodeCommandOpenButton.addEventListener("click", () => {
+orchestratorNodeTerminalOpenButton.addEventListener("click", () => {
   openLogViewer(
-    orchestratorNodeCommandTitleEl,
-    orchestratorNodeCommandEl,
-    translate("ui.orchestratorNodeCommandEmpty")
-  );
-});
-orchestratorNodeLogCopyButton.addEventListener("click", () => {
-  void copyOrchestratorSection(
-    orchestratorNodeLogTitleEl,
-    orchestratorNodeLogEl,
-    translate("ui.orchestratorNodeLogEmpty")
+    orchestratorNodeTerminalTitleEl,
+    orchestratorNodeTerminalEl,
+    translate("ui.orchestratorNodeTerminalEmpty")
   );
 });
 orchestratorNodeLogOpenButton.addEventListener("click", () => {
   openLogViewer(
-    orchestratorNodeLogTitleEl,
+    orchestratorNodeLogOpenButton,
     orchestratorNodeLogEl,
     translate("ui.orchestratorNodeLogEmpty")
   );

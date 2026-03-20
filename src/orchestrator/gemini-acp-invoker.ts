@@ -77,41 +77,53 @@ type GeminiPromptResponse = {
   stopReason?: string;
 };
 
-class TasksawGeminiAcpClient {
-  private readonly workspaceRoot: string;
+type GeminiPromptRuntime = {
+  agentMessageChunks: string[];
+  workspaceRoot: string;
+  requestPermissionHandler: (params: {
+    options?: Array<{
+      optionId?: string;
+      kind?: string;
+    }>;
+    toolCall?: {
+      title?: string;
+      kind?: string;
+      locations?: Array<{ path?: string; uri?: string; label?: string }>;
+      content?: Array<
+        | {
+          type?: string;
+          path?: string;
+          oldText?: string;
+          newText?: string;
+        }
+        | {
+          type?: string;
+          content?: {
+            type?: string;
+            text?: string;
+          };
+        }
+      >;
+    };
+  }) => Promise<OrchestratorApprovalDecision>;
+};
 
+type GeminiLiveSession = {
+  child: SpawnedProcess;
+  connection: {
+    setSessionMode?(params: Record<string, unknown>): Promise<unknown>;
+    unstable_setSessionModel?(params: Record<string, unknown>): Promise<unknown>;
+    prompt(params: Record<string, unknown>): Promise<GeminiPromptResponse>;
+  };
+  sessionId: string;
+  currentModelId: string | null;
+  stderrBuffer: () => string;
+};
+
+class TasksawGeminiAcpClient {
   constructor(
-    private readonly agentMessageChunks: string[],
-    workspaceRoot: string,
-    private readonly requestPermissionHandler: (params: {
-      options?: Array<{
-        optionId?: string;
-        kind?: string;
-      }>;
-      toolCall?: {
-        title?: string;
-        kind?: string;
-        locations?: Array<{ path?: string; uri?: string; label?: string }>;
-        content?: Array<
-          | {
-            type?: string;
-            path?: string;
-            oldText?: string;
-            newText?: string;
-          }
-          | {
-            type?: string;
-            content?: {
-              type?: string;
-              text?: string;
-            };
-          }
-        >;
-      };
-    }) => Promise<OrchestratorApprovalDecision>
-  ) {
-    this.workspaceRoot = path.resolve(workspaceRoot);
-  }
+    private readonly runtimeProvider: () => GeminiPromptRuntime | null
+  ) {}
 
   async requestPermission(params: {
     options?: Array<{
@@ -139,7 +151,16 @@ class TasksawGeminiAcpClient {
       >;
     };
   }) {
-    const decision = await this.requestPermissionHandler(params);
+    const runtime = this.runtimeProvider();
+    if (!runtime) {
+      return {
+        outcome: {
+          outcome: "cancelled" as const
+        }
+      };
+    }
+
+    const decision = await runtime.requestPermissionHandler(params);
     if (decision.outcome !== "selected" || !decision.optionId) {
       return {
         outcome: {
@@ -166,12 +187,14 @@ class TasksawGeminiAcpClient {
     };
   }) {
     const update = params.update;
+    const runtime = this.runtimeProvider();
     if (
+      runtime &&
       update?.sessionUpdate === "agent_message_chunk"
       && update.content?.type === "text"
       && typeof update.content.text === "string"
     ) {
-      this.agentMessageChunks.push(update.content.text);
+      runtime.agentMessageChunks.push(update.content.text);
     }
 
     return undefined;
@@ -193,14 +216,20 @@ class TasksawGeminiAcpClient {
   }
 
   private resolveWorkspacePath(requestedPath: string | undefined): string {
+    const runtime = this.runtimeProvider();
+    if (!runtime) {
+      throw new Error("Gemini ACP file operation was requested without an active prompt runtime");
+    }
+
     if (!requestedPath || requestedPath.trim().length === 0) {
       throw new Error("Gemini ACP file operation did not specify a path");
     }
 
+    const workspaceRoot = path.resolve(runtime.workspaceRoot);
     const candidatePath = path.isAbsolute(requestedPath)
       ? path.resolve(requestedPath)
-      : path.resolve(this.workspaceRoot, requestedPath);
-    const normalizedRoot = this.resolveExistingPath(this.workspaceRoot);
+      : path.resolve(workspaceRoot, requestedPath);
+    const normalizedRoot = this.resolveExistingPath(workspaceRoot);
     const normalizedCandidate = this.resolveCandidatePath(candidatePath);
 
     if (normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}${path.sep}`)) {
@@ -232,292 +261,308 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const command = [options.executablePath, ...options.executableArgs, "--acp"];
   const fallbackModelIds = options.fallbackModelIds ?? [];
   const invalidStreamRetryCount = Math.max(0, options.invalidStreamRetryCount ?? 1);
+  const workspaceRoot = options.cwd ?? process.cwd();
+  let activeRuntime: GeminiPromptRuntime | null = null;
+  let activeSession: GeminiLiveSession | null = null;
+  let invocationQueue: Promise<void> = Promise.resolve();
 
   return async (
     capability: OrchestratorCapability,
     prompt: string,
     context: ModelInvocationContext
   ): Promise<{ stdout: string; stderr: string; command: string[] }> => {
-    const attemptModels = buildGeminiAttemptModels(
-      context.assignedModel.model,
-      fallbackModelIds,
-      invalidStreamRetryCount
-    );
-    const retryNotes: string[] = [];
-    let lastError: unknown;
-
-    for (let attemptIndex = 0; attemptIndex < attemptModels.length; attemptIndex += 1) {
-      const modelId = attemptModels[attemptIndex];
-
-      try {
-        return await invokeGeminiAcpAttempt({
-          capability,
-          prompt,
-          context,
-          modelId,
-          command,
-          loadAcpModule,
-          spawnProcess,
-          desiredModeId,
-          options
-        });
-      } catch (error) {
-        lastError = error;
-        const message = formatGeminiAcpError(error);
-        const shouldRetry = !context.abortSignal.aborted
-          && attemptIndex < attemptModels.length - 1
-          && isRetryableGeminiInvalidStreamMessage(message);
-
-        if (!shouldRetry) {
-          break;
-        }
-
-        retryNotes.push(`attempt ${attemptIndex + 1} failed for model=${modelId}: ${message}`);
-      }
-    }
-
-    if (lastError instanceof Error && retryNotes.length > 0) {
-      throw new Error(
-        [
-          lastError.message,
-          "retry attempts:",
-          ...retryNotes
-        ].join("\n\n")
+    const runInvocation = invocationQueue.then(async () => {
+      const attemptModels = buildGeminiAttemptModels(
+        context.assignedModel.model,
+        fallbackModelIds,
+        invalidStreamRetryCount
       );
-    }
+      const retryNotes: string[] = [];
+      let lastError: unknown;
 
-    throw lastError instanceof Error ? lastError : new Error(formatGeminiAcpError(lastError));
-  };
-}
+      for (let attemptIndex = 0; attemptIndex < attemptModels.length; attemptIndex += 1) {
+        const modelId = attemptModels[attemptIndex]!;
 
-async function invokeGeminiAcpAttempt(params: {
-  capability: OrchestratorCapability;
-  prompt: string;
-  context: ModelInvocationContext;
-  modelId: string;
-  command: string[];
-  loadAcpModule: (modulePath: string) => Promise<GeminiAcpModule>;
-  spawnProcess: (
-    command: string,
-    args: string[],
-    options: {
-      cwd?: string;
-      env?: NodeJS.ProcessEnv;
-      stdio: ["pipe", "pipe", "pipe"];
-    }
-  ) => SpawnedProcess;
-  desiredModeId: string;
-  options: GeminiAcpInvokerOptions;
-}): Promise<{ stdout: string; stderr: string; command: string[] }> {
-  const {
-    capability,
-    prompt,
-    context,
-    modelId,
-    command,
-    loadAcpModule,
-    spawnProcess,
-    desiredModeId,
-    options
-  } = params;
-  const abortSignal = context.abortSignal;
-  const acpModule = await loadAcpModule(options.acpModulePath);
-  const child = spawnProcess(options.executablePath, [...options.executableArgs, "--acp"], {
-    cwd: options.cwd,
-    env: {
-      ...process.env,
-      ...options.env
-    },
-    stdio: ["pipe", "pipe", "pipe"]
-  });
+        try {
+          const session = await ensureSession(context.abortSignal);
+          const stderrStartIndex = session.stderrBuffer().length;
 
-  let stderrBuffer = "";
-  child.stderr?.on("data", (chunk: Buffer | string) => {
-    stderrBuffer += chunk.toString();
-    if (stderrBuffer.length > 8_000) {
-      stderrBuffer = stderrBuffer.slice(-8_000);
-    }
-  });
-
-  try {
-    if (!child.stdin || !child.stdout) {
-      throw new Error("gemini --acp did not expose stdio handles");
-    }
-
-    const agentMessageChunks: string[] = [];
-    const client = new TasksawGeminiAcpClient(
-      agentMessageChunks,
-      options.cwd ?? process.cwd(),
-      async (permissionRequest) => {
-        const optionsForUi: OrchestratorApprovalOption[] = (permissionRequest.options ?? [])
-          .map((option) => ({
-            optionId: option.optionId?.trim() ?? "",
-            kind: option.kind?.trim(),
-            label: describePermissionOption(option.kind?.trim())
-          }))
-          .filter((option) => option.optionId.length > 0);
-        const allowOption = optionsForUi.find((option) => option.kind === "allow_once")
-          ?? optionsForUi.find((option) => option.kind?.startsWith("allow"))
-          ?? optionsForUi[0];
-
-        if (!context.requestUserApproval) {
-          return allowOption
-            ? {
-                outcome: "selected",
-                optionId: allowOption.optionId
-              }
-            : {
-                outcome: "cancelled"
-              };
-        }
-
-        return context.requestUserApproval({
-          abortSignal,
-          title: permissionRequest.toolCall?.title?.trim() || undefined,
-          message: buildPermissionRequestMessage(capability, modelId),
-          details: buildPermissionRequestDetails(permissionRequest.toolCall),
-          kind: permissionRequest.toolCall?.kind?.trim() || undefined,
-          locations: extractPermissionRequestLocations(permissionRequest.toolCall),
-          options: optionsForUi
-        });
-      }
-    );
-    const stream = acpModule.ndJsonStream(
-      Writable.toWeb(child.stdin as Writable) as unknown as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout as Readable) as unknown as ReadableStream<Uint8Array>
-    );
-    const connection = new acpModule.ClientSideConnection(() => client, stream);
-    const onAbort = async () => {
-      await stopChildProcess(child);
-    };
-
-    await withAbort(
-      withTimeout(
-        connection.initialize({
-          protocolVersion: acpModule.PROTOCOL_VERSION,
-          clientCapabilities: {
-            fs: {
-              readTextFile: true,
-              writeTextFile: true
-            }
+          if (!session.connection.unstable_setSessionModel) {
+            throw new Error("The installed Gemini ACP client does not support session model switching");
           }
-        }),
-        10_000,
-        "Timed out while initializing Gemini ACP"
-      ),
-      abortSignal,
-      onAbort,
-      "Gemini ACP initialization was aborted"
-    );
 
-    const session = await withAbort(
-      withTimeout<GeminiNewSessionResponse>(
-        connection.newSession({
-          cwd: options.cwd ?? process.cwd(),
-          mcpServers: []
-        }) as Promise<GeminiNewSessionResponse>,
-        15_000,
-        "Timed out while creating a Gemini ACP session"
-      ),
-      abortSignal,
-      onAbort,
-      "Gemini ACP session creation was aborted"
-    );
+          if (session.currentModelId !== modelId) {
+            await withAbort(
+              withTimeout(
+                session.connection.unstable_setSessionModel({
+                  sessionId: session.sessionId,
+                  modelId
+                }),
+                5_000,
+                `Timed out while switching the Gemini ACP session model to ${modelId}`
+              ),
+              context.abortSignal,
+              async () => {
+                await invalidateSession(session);
+              },
+              [
+                "Gemini ACP model switching was aborted",
+                `capability=${capability}`,
+                `workflowStage=${context.workflowStage}`,
+                `model=${modelId}`
+              ].join(" · ")
+            );
+            session.currentModelId = modelId;
+          }
 
-    const sessionId = session.sessionId?.trim();
-    if (!sessionId) {
-      throw new Error("Gemini ACP did not return a session id");
+          const agentMessageChunks: string[] = [];
+          activeRuntime = {
+            agentMessageChunks,
+            workspaceRoot,
+            requestPermissionHandler: async (permissionRequest) => {
+              const optionsForUi: OrchestratorApprovalOption[] = (permissionRequest.options ?? [])
+                .map((option) => ({
+                  optionId: option.optionId?.trim() ?? "",
+                  kind: option.kind?.trim(),
+                  label: describePermissionOption(option.kind?.trim())
+                }))
+                .filter((option) => option.optionId.length > 0);
+              const allowOption = optionsForUi.find((option) => option.kind === "allow_once")
+                ?? optionsForUi.find((option) => option.kind?.startsWith("allow"))
+                ?? optionsForUi[0];
+
+              if (!context.requestUserApproval) {
+                return allowOption
+                  ? {
+                      outcome: "selected",
+                      optionId: allowOption.optionId
+                    }
+                  : {
+                      outcome: "cancelled"
+                    };
+              }
+
+              return context.requestUserApproval({
+                abortSignal: context.abortSignal,
+                title: permissionRequest.toolCall?.title?.trim() || undefined,
+                message: buildPermissionRequestMessage(capability, modelId),
+                details: buildPermissionRequestDetails(permissionRequest.toolCall),
+                kind: permissionRequest.toolCall?.kind?.trim() || undefined,
+                locations: extractPermissionRequestLocations(permissionRequest.toolCall),
+                options: optionsForUi
+              });
+            }
+          };
+
+          try {
+            const promptResult = await withAbort(
+              session.connection.prompt({
+                sessionId: session.sessionId,
+                prompt: [
+                  {
+                    type: "text",
+                    text: prompt
+                  }
+                ]
+              }) as Promise<GeminiPromptResponse>,
+              context.abortSignal,
+              async () => {
+                await invalidateSession(session);
+              },
+              [
+                "Gemini ACP prompt was aborted",
+                `capability=${capability}`,
+                `workflowStage=${context.workflowStage}`,
+                `model=${modelId}`
+              ].join(" · ")
+            );
+
+            const stdout = agentMessageChunks.join("");
+            if (stdout.trim().length === 0) {
+              throw new Error(
+                `Gemini ACP prompt completed with stopReason=${promptResult.stopReason ?? "unknown"} without any text output`
+              );
+            }
+
+            return {
+              stdout,
+              stderr: session.stderrBuffer().slice(stderrStartIndex),
+              command
+            };
+          } finally {
+            activeRuntime = null;
+          }
+        } catch (error) {
+          lastError = error;
+          await invalidateSession();
+          const message = formatGeminiAcpError(error);
+          const shouldRetry = !context.abortSignal.aborted
+            && attemptIndex < attemptModels.length - 1
+            && isRetryableGeminiInvalidStreamMessage(message);
+
+          if (!shouldRetry) {
+            break;
+          }
+
+          retryNotes.push(`attempt ${attemptIndex + 1} failed for model=${modelId}: ${message}`);
+        }
+      }
+
+      if (lastError instanceof Error && retryNotes.length > 0) {
+        throw new Error(
+          [
+            lastError.message,
+            "retry attempts:",
+            ...retryNotes
+          ].join("\n\n")
+        );
+      }
+
+      throw lastError instanceof Error ? lastError : new Error(formatGeminiAcpError(lastError));
+    });
+
+    invocationQueue = runInvocation.then(() => undefined, () => undefined);
+    return runInvocation;
+  };
+
+  async function ensureSession(abortSignal: AbortSignal): Promise<GeminiLiveSession> {
+    if (activeSession && activeSession.child.exitCode === null && activeSession.child.signalCode === null) {
+      return activeSession;
     }
 
-    const availableModeIds = session.modes?.availableModes
-      ?.map((mode) => mode.id?.trim())
-      .filter((modeId): modeId is string => Boolean(modeId))
-      ?? [];
-    if (availableModeIds.includes(desiredModeId) && connection.setSessionMode) {
+    const acpModule = await loadAcpModule(options.acpModulePath);
+    const child = spawnProcess(options.executablePath, [...options.executableArgs, "--acp"], {
+      cwd: options.cwd,
+      env: {
+        ...process.env,
+        ...options.env
+      },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    let stderrBuffer = "";
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      stderrBuffer += chunk.toString();
+      if (stderrBuffer.length > 8_000) {
+        stderrBuffer = stderrBuffer.slice(-8_000);
+      }
+    });
+
+    try {
+      if (!child.stdin || !child.stdout) {
+        throw new Error("gemini --acp did not expose stdio handles");
+      }
+
+      const client = new TasksawGeminiAcpClient(() => activeRuntime);
+      const stream = acpModule.ndJsonStream(
+        Writable.toWeb(child.stdin as Writable) as unknown as WritableStream<Uint8Array>,
+        Readable.toWeb(child.stdout as Readable) as unknown as ReadableStream<Uint8Array>
+      );
+      const connection = new acpModule.ClientSideConnection(() => client, stream);
+      const onAbort = async () => {
+        await stopChildProcess(child);
+      };
+
       await withAbort(
         withTimeout(
-          connection.setSessionMode({
-            sessionId,
-            modeId: desiredModeId
+          connection.initialize({
+            protocolVersion: acpModule.PROTOCOL_VERSION,
+            clientCapabilities: {
+              fs: {
+                readTextFile: true,
+                writeTextFile: true
+              }
+            }
           }),
-          5_000,
-          `Timed out while switching the Gemini ACP session to ${desiredModeId} mode`
+          10_000,
+          "Timed out while initializing Gemini ACP"
         ),
         abortSignal,
         onAbort,
-        `Gemini ACP mode switching to ${desiredModeId} was aborted`
+        "Gemini ACP initialization was aborted"
       );
-    }
 
-    if (!connection.unstable_setSessionModel) {
-      throw new Error("The installed Gemini ACP client does not support session model switching");
-    }
+      const session = await withAbort(
+        withTimeout<GeminiNewSessionResponse>(
+          connection.newSession({
+            cwd: workspaceRoot,
+            mcpServers: []
+          }) as Promise<GeminiNewSessionResponse>,
+          15_000,
+          "Timed out while creating a Gemini ACP session"
+        ),
+        abortSignal,
+        onAbort,
+        "Gemini ACP session creation was aborted"
+      );
 
-    await withAbort(
-      withTimeout(
-        connection.unstable_setSessionModel({
-          sessionId,
-          modelId
-        }),
-        5_000,
-        `Timed out while switching the Gemini ACP session model to ${modelId}`
-      ),
-      abortSignal,
-      onAbort,
-      [
-        "Gemini ACP model switching was aborted",
-        `capability=${capability}`,
-        `workflowStage=${context.workflowStage}`,
-        `model=${modelId}`
-      ].join(" · ")
-    );
+      const sessionId = session.sessionId?.trim();
+      if (!sessionId) {
+        throw new Error("Gemini ACP did not return a session id");
+      }
 
-    const promptResult = await withAbort(
-      connection.prompt({
+      const availableModeIds = session.modes?.availableModes
+        ?.map((mode) => mode.id?.trim())
+        .filter((modeId): modeId is string => Boolean(modeId))
+        ?? [];
+      if (availableModeIds.includes(desiredModeId) && connection.setSessionMode) {
+        await withAbort(
+          withTimeout(
+            connection.setSessionMode({
+              sessionId,
+              modeId: desiredModeId
+            }),
+            5_000,
+            `Timed out while switching the Gemini ACP session to ${desiredModeId} mode`
+          ),
+          abortSignal,
+          onAbort,
+          `Gemini ACP mode switching to ${desiredModeId} was aborted`
+        );
+      }
+
+      const nextSession: GeminiLiveSession = {
+        child,
+        connection: {
+          setSessionMode: connection.setSessionMode?.bind(connection),
+          unstable_setSessionModel: connection.unstable_setSessionModel?.bind(connection),
+          prompt: (params) => connection.prompt(params) as Promise<GeminiPromptResponse>
+        },
         sessionId,
-        prompt: [
-          {
-            type: "text",
-            text: prompt
-          }
-        ]
-      }) as Promise<GeminiPromptResponse>,
-      abortSignal,
-      onAbort,
-      [
-        "Gemini ACP prompt was aborted",
-        `capability=${capability}`,
-        `workflowStage=${context.workflowStage}`,
-        `model=${modelId}`
-      ].join(" · ")
-    );
+        currentModelId: null,
+        stderrBuffer: () => stderrBuffer
+      };
+      activeSession = nextSession;
 
-    const stdout = agentMessageChunks.join("");
-    if (stdout.trim().length === 0) {
+      return nextSession;
+    } catch (error) {
+      await stopChildProcess(child);
+      const message = formatGeminiAcpError(error);
+      const stderrPreview = stderrBuffer.trim();
       throw new Error(
-        `Gemini ACP prompt completed with stopReason=${promptResult.stopReason ?? "unknown"} without any text output`
+        [
+          `Gemini ACP invocation failed: ${message}`,
+          `command:\n${command.join(" ")}`,
+          stderrPreview.length > 0 ? `stderr preview:\n${stderrPreview.slice(-4_000)}` : null
+        ]
+          .filter(Boolean)
+          .join("\n\n")
       );
     }
+  }
 
-    return {
-      stdout,
-      stderr: stderrBuffer,
-      command
-    };
-  } catch (error) {
-    const message = formatGeminiAcpError(error);
-    const stderrPreview = stderrBuffer.trim();
-    throw new Error(
-      [
-        `Gemini ACP invocation failed: ${message}`,
-        `command:\n${command.join(" ")}`,
-        stderrPreview.length > 0 ? `stderr preview:\n${stderrPreview.slice(-4_000)}` : null
-      ]
-        .filter(Boolean)
-        .join("\n\n")
-    );
-  } finally {
-    await stopChildProcess(child);
+  async function invalidateSession(targetSession?: GeminiLiveSession | null): Promise<void> {
+    const session = targetSession ?? activeSession;
+    if (!session) {
+      return;
+    }
+
+    if (activeSession === session) {
+      activeSession = null;
+    }
+
+    activeRuntime = null;
+    await stopChildProcess(session.child);
   }
 }
 

@@ -308,7 +308,7 @@ export class OrchestratorService {
       throw new Error("Codex CLI did not report any available models");
     }
 
-    return this.toModelRef("OpenAI", selectedModel, "upper");
+    return this.toModelRef("OpenAI", selectedModel, "upper", "planner");
   }
 
   private selectCodexWorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef | undefined): ModelRef | undefined {
@@ -321,7 +321,7 @@ export class OrchestratorService {
       return planningModel;
     }
 
-    return this.toModelRef("OpenAI", selectedModel, "lower");
+    return this.toModelRef("OpenAI", selectedModel, "lower", "worker");
   }
 
   private selectGeminiPlanningModel(catalog: ManagedToolModelCatalog): ModelRef {
@@ -330,7 +330,7 @@ export class OrchestratorService {
       throw new Error("Gemini CLI did not report any available models");
     }
 
-    return this.toModelRef("Google", selectedModel, "upper");
+    return this.toModelRef("Google", selectedModel, "upper", "planner");
   }
 
   private selectGeminiWorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef | undefined): ModelRef | undefined {
@@ -343,7 +343,7 @@ export class OrchestratorService {
       return planningModel;
     }
 
-    return this.toModelRef("Google", selectedModel, "lower");
+    return this.toModelRef("Google", selectedModel, "lower", "worker");
   }
 
   private isConcreteGeminiModel(model: string): boolean {
@@ -405,6 +405,16 @@ export class OrchestratorService {
       const geminiCommand = await this.toolManager.resolveLaunchCommand("gemini");
       const geminiEnv = this.toolManager.buildManagedExecutionEnvironment("gemini");
       const geminiAcpModulePath = this.toolManager.getGeminiAcpModulePath();
+      const sharedGeminiInvoke = createGeminiAcpInvoker({
+        executablePath: geminiCommand.command,
+        executableArgs: [cliRunnerPath, ...geminiCommand.args],
+        acpModulePath: geminiAcpModulePath,
+        cwd: workspacePath,
+        env: {
+          ...geminiEnv,
+          ...geminiCommand.env
+        }
+      });
 
       for (const geminiModel of this.uniqueModels(geminiModels)) {
         registry.register(
@@ -417,16 +427,7 @@ export class OrchestratorService {
               ...geminiEnv,
               ...geminiCommand.env
             },
-            customInvoke: createGeminiAcpInvoker({
-              executablePath: geminiCommand.command,
-              executableArgs: [cliRunnerPath, ...geminiCommand.args],
-              acpModulePath: geminiAcpModulePath,
-              cwd: workspacePath,
-              env: {
-                ...geminiEnv,
-                ...geminiCommand.env
-              }
-            }),
+            customInvoke: sharedGeminiInvoke,
             supportedCapabilities: ORCHESTRATOR_CAPABILITIES
           })
         );
@@ -586,19 +587,42 @@ export class OrchestratorService {
   private toModelRef(
     provider: string,
     selectedModel: ManagedToolModelCatalog["models"][number],
-    tier: ModelRef["tier"]
+    tier: ModelRef["tier"],
+    usage: "planner" | "worker"
   ): ModelRef {
     return {
       id: selectedModel.id,
       provider,
       model: selectedModel.model,
       tier,
-      reasoningEffort: selectedModel.supportedReasoningEfforts.includes("xhigh")
-        ? "xhigh"
-        : selectedModel.supportedReasoningEfforts.includes("high")
-          ? "high"
-          : this.normalizeReasoningEffort(selectedModel.defaultReasoningEffort)
+      reasoningEffort: usage === "planner"
+        ? this.selectPlannerReasoningEffort(selectedModel)
+        : this.selectWorkerReasoningEffort(selectedModel)
     };
+  }
+
+  private selectPlannerReasoningEffort(
+    model: ManagedToolModelCatalog["models"][number]
+  ): ModelRef["reasoningEffort"] {
+    if (model.supportedReasoningEfforts.includes("xhigh")) return "xhigh";
+    if (model.supportedReasoningEfforts.includes("high")) return "high";
+    return this.normalizeReasoningEffort(model.defaultReasoningEffort);
+  }
+
+  private selectWorkerReasoningEffort(
+    model: ManagedToolModelCatalog["models"][number]
+  ): ModelRef["reasoningEffort"] {
+    if (model.supportedReasoningEfforts.includes("low")) return "low";
+    if (model.supportedReasoningEfforts.includes("medium")) return "medium";
+
+    const normalizedDefaultReasoning = this.normalizeReasoningEffort(model.defaultReasoningEffort);
+    if (normalizedDefaultReasoning === "low" || normalizedDefaultReasoning === "medium") {
+      return normalizedDefaultReasoning;
+    }
+
+    if (model.supportedReasoningEfforts.includes("high")) return "high";
+    if (model.supportedReasoningEfforts.includes("xhigh")) return "high";
+    return normalizedDefaultReasoning;
   }
 
   private uniqueModels(models: Array<ModelRef | undefined>): ModelRef[] {

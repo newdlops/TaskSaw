@@ -17,6 +17,9 @@ export type NodePhase = (typeof NODE_PHASES)[number];
 export const NODE_KINDS = ["planning", "execution"] as const;
 export type NodeKind = (typeof NODE_KINDS)[number];
 
+export const NODE_ROLES = ["task", "stage"] as const;
+export type NodeRole = (typeof NODE_ROLES)[number];
+
 export const RUN_STATUSES = ["pending", "running", "done", "failed", "paused", "escalated"] as const;
 export type RunStatus = (typeof RUN_STATUSES)[number];
 
@@ -349,6 +352,8 @@ export type PlanNode = {
   parentId: string | null;
   childIds: string[];
   kind: NodeKind;
+  role: NodeRole;
+  stagePhase: NodePhase | null;
   title: string;
   objective: string;
   depth: number;
@@ -440,6 +445,8 @@ export type CreateRunInput = {
   title?: string;
   objective?: string;
   kind?: NodeKind;
+  role?: NodeRole;
+  stagePhase?: NodePhase | null;
   config?: Partial<OrchestratorConfig>;
   assignedModels?: ModelAssignment;
   reviewPolicy?: ReviewPolicy;
@@ -452,6 +459,8 @@ export type CreateChildNodeInput = {
   title: string;
   objective: string;
   kind?: NodeKind;
+  role?: NodeRole;
+  stagePhase?: NodePhase | null;
   assignedModels?: ModelAssignment;
   reviewPolicy?: ReviewPolicy;
   acceptanceCriteria?: AcceptanceCriteria;

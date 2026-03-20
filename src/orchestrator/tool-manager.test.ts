@@ -5,6 +5,20 @@ import path from "node:path";
 import test from "node:test";
 import { ToolManager } from "../main/tool-manager";
 
+type ToolManagerTestDouble = {
+  ensureInstalled: () => Promise<{
+    id: "gemini";
+    displayName: string;
+    installed: boolean;
+    version: string;
+  }>;
+  probeGeminiAuthenticationStatus: () => Promise<{
+    toolId: "gemini";
+    authenticated: boolean;
+    message: string | null;
+  }>;
+};
+
 function createTempDirectory(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
@@ -117,16 +131,16 @@ test("tool manager treats Gemini as logged out when no managed auth type is conf
 
   try {
     const manager = new ToolManager(userData);
-    const managerAny = manager as any;
+    const managerStub = manager as unknown as ToolManagerTestDouble;
     let probeCalled = false;
 
-    managerAny.ensureInstalled = async () => ({
+    managerStub.ensureInstalled = async () => ({
       id: "gemini",
       displayName: "Gemini",
       installed: true,
       version: "test"
     });
-    managerAny.probeGeminiAuthenticationStatus = async () => {
+    managerStub.probeGeminiAuthenticationStatus = async () => {
       probeCalled = true;
       return {
         toolId: "gemini",
@@ -181,7 +195,7 @@ test("tool manager treats Gemini oauth login as logged out when managed credenti
 
   try {
     const manager = new ToolManager(userData);
-    const managerAny = manager as any;
+    const managerStub = manager as unknown as ToolManagerTestDouble;
     let probeCalled = false;
     const managedSettingsPath = path.join(userData, "managed-tools", "home", ".gemini", "settings.json");
 
@@ -191,13 +205,13 @@ test("tool manager treats Gemini oauth login as logged out when managed credenti
       JSON.stringify({ security: { auth: { selectedType: "oauth-personal" } } }, null, 2)
     );
 
-    managerAny.ensureInstalled = async () => ({
+    managerStub.ensureInstalled = async () => ({
       id: "gemini",
       displayName: "Gemini",
       installed: true,
       version: "test"
     });
-    managerAny.probeGeminiAuthenticationStatus = async () => {
+    managerStub.probeGeminiAuthenticationStatus = async () => {
       probeCalled = true;
       return {
         toolId: "gemini",

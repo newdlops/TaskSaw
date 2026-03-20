@@ -69,6 +69,7 @@ export class ToolManager {
   private readonly runtimeDirectory: string;
   private readonly installPromises = new Map<ManagedToolId, Promise<ManagedToolStatus>>();
   private readonly modelCatalogPromises = new Map<string, Promise<ManagedToolModelCatalog>>();
+  private readonly resolvedModelCatalogs = new Map<string, ManagedToolModelCatalog>();
 
   constructor(private userDataDirectory: string) {
     this.toolingRoot = path.join(userDataDirectory, "managed-tools");
@@ -183,22 +184,36 @@ export class ToolManager {
       return this.getCodexAuthenticationStatus(workspacePath);
     }
 
-    return this.getGeminiAuthenticationStatus(workspacePath);
+    return this.getGeminiAuthenticationStatus();
   }
 
   async discoverModelCatalog(toolId: ManagedToolId, workspacePath?: string | null): Promise<ManagedToolModelCatalog> {
     const cacheKey = this.createModelCatalogCacheKey(toolId, workspacePath);
+    const resolvedCatalog = this.resolvedModelCatalogs.get(cacheKey);
+    if (resolvedCatalog) {
+      return resolvedCatalog;
+    }
     const inFlight = this.modelCatalogPromises.get(cacheKey);
     if (inFlight) {
       return inFlight;
     }
 
     const discoveryPromise = this.prepareWorkspaceContext(toolId, workspacePath)
-      .then(() => this.discoverModelCatalogInternal(toolId, workspacePath));
+      .then(() => this.discoverModelCatalogInternal(toolId, workspacePath))
+      .catch((error) => {
+        const cachedCatalog = this.resolvedModelCatalogs.get(cacheKey);
+        if (cachedCatalog) {
+          return cachedCatalog;
+        }
+
+        throw error;
+      });
     this.modelCatalogPromises.set(cacheKey, discoveryPromise);
 
     try {
-      return await discoveryPromise;
+      const catalog = await discoveryPromise;
+      this.resolvedModelCatalogs.set(cacheKey, catalog);
+      return catalog;
     } finally {
       this.modelCatalogPromises.delete(cacheKey);
     }
@@ -216,6 +231,7 @@ export class ToolManager {
 
   async updateAll(): Promise<ManagedToolStatus[]> {
     this.modelCatalogPromises.clear();
+    this.resolvedModelCatalogs.clear();
     const statuses: ManagedToolStatus[] = [];
 
     for (const toolId of Object.keys(TOOL_DEFINITIONS) as ManagedToolId[]) {
@@ -228,6 +244,7 @@ export class ToolManager {
   resetPersistentState() {
     this.installPromises.clear();
     this.modelCatalogPromises.clear();
+    this.resolvedModelCatalogs.clear();
     fs.rmSync(this.homeDirectory, { recursive: true, force: true });
     fs.rmSync(this.runtimeDirectory, { recursive: true, force: true });
     fs.rmSync(path.join(this.userDataDirectory, "sandbox-runtime"), { recursive: true, force: true });
@@ -572,7 +589,7 @@ export class ToolManager {
     });
   }
 
-  private async getGeminiAuthenticationStatus(workspacePath?: string | null): Promise<ManagedToolAuthState> {
+  private async getGeminiAuthenticationStatus(): Promise<ManagedToolAuthState> {
     const preflight = this.getManagedGeminiAuthenticationPreflight();
     if (!preflight.authenticated) {
       return {
@@ -582,7 +599,11 @@ export class ToolManager {
       };
     }
 
-    return this.probeGeminiAuthenticationStatus(workspacePath);
+    return {
+      toolId: "gemini",
+      authenticated: true,
+      message: null
+    };
   }
 
   private async probeGeminiAuthenticationStatus(workspacePath?: string | null): Promise<ManagedToolAuthState> {
@@ -906,121 +927,56 @@ export class ToolManager {
   }
 
   private async discoverGeminiModelCatalog(workspacePath?: string | null): Promise<ManagedToolModelCatalog> {
-    const launchCommand = await this.resolveLaunchCommand("gemini");
-    const cwd = workspacePath?.trim() || process.cwd();
-    const env = this.buildManagedCommandEnv("gemini", launchCommand.env);
-    const acpModule = await this.importManagedGeminiAcpModule();
+    void workspacePath;
 
-    type GeminiModelInfo = {
-      modelId: string;
-      name: string;
-      description?: string | null;
-    };
-
-    type GeminiNewSessionResult = {
-      models?: {
-        availableModels?: GeminiModelInfo[];
-        currentModelId?: string;
-      };
-    };
-
-    class GeminiDiscoveryClient {
-      async requestPermission() {
-        return {
-          outcome: {
-            outcome: "cancelled"
-          }
-        };
-      }
-
-      async sessionUpdate() {
-        return undefined;
-      }
-
-      async writeTextFile() {
-        return {};
-      }
-
-      async readTextFile() {
-        return { content: "" };
-      }
-    }
-
-    const child = spawn(launchCommand.command, [...launchCommand.args, "--acp"], {
-      cwd,
-      env,
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-
-    let stderrBuffer = "";
-    child.stderr.on("data", (chunk) => {
-      stderrBuffer += chunk.toString("utf8");
-      if (stderrBuffer.length > 8_000) {
-        stderrBuffer = stderrBuffer.slice(-8_000);
-      }
-    });
-
-    try {
-      const stdin = child.stdin;
-      const stdout = child.stdout;
-      if (!stdin || !stdout) {
-        throw new Error("gemini --acp did not expose stdio handles");
-      }
-
-      const stream = acpModule.ndJsonStream(
-        Writable.toWeb(stdin) as unknown as WritableStream<Uint8Array>,
-        Readable.toWeb(stdout) as unknown as ReadableStream<Uint8Array>
-      );
-
-      const connection = new acpModule.ClientSideConnection(
-        () => new GeminiDiscoveryClient(),
-        stream
-      );
-
-      await this.withTimeout(
-        connection.initialize({
-          protocolVersion: acpModule.PROTOCOL_VERSION,
-          clientCapabilities: {}
-        }),
-        10_000,
-        "Timed out while initializing Gemini ACP"
-      );
-
-      const session = await this.withTimeout<GeminiNewSessionResult>(
-        connection.newSession({
-          cwd,
-          mcpServers: []
-        }) as Promise<GeminiNewSessionResult>,
-        15_000,
-        "Timed out while discovering Gemini models via gemini --acp"
-      );
-
-      const availableModels = session.models?.availableModels ?? [];
-      return {
-        toolId: "gemini",
-        provider: "Google",
-        currentModelId: session.models?.currentModelId ?? null,
-        discoveredAt: new Date().toISOString(),
-        models: availableModels.map((model) => ({
-          id: model.modelId,
-          model: model.modelId,
-          displayName: model.name,
-          description: model.description ?? null,
+    return {
+      toolId: "gemini",
+      provider: "Google",
+      currentModelId: "auto-gemini-3",
+      discoveredAt: new Date().toISOString(),
+      models: [
+        {
+          id: "gemini-2.5-flash",
+          model: "gemini-2.5-flash",
+          displayName: "Gemini 2.5 Flash",
+          description: "Lightweight Gemini worker model",
           hidden: false,
-          isDefault: model.modelId === session.models?.currentModelId,
+          isDefault: false,
           defaultReasoningEffort: null,
           supportedReasoningEfforts: []
-        }))
-      };
-    } catch (error) {
-      throw this.decorateDiscoveryError(
-        "Gemini",
-        error instanceof Error ? error : new Error(String(error)),
-        stderrBuffer
-      );
-    } finally {
-      await this.stopChildProcess(child);
-    }
+        },
+        {
+          id: "gemini-2.5-pro",
+          model: "gemini-2.5-pro",
+          displayName: "Gemini 2.5 Pro",
+          description: "Concrete Gemini planning model",
+          hidden: false,
+          isDefault: false,
+          defaultReasoningEffort: null,
+          supportedReasoningEfforts: []
+        },
+        {
+          id: "gemini-3.1-pro-preview",
+          model: "gemini-3.1-pro-preview",
+          displayName: "Gemini 3.1 Pro Preview",
+          description: "Preferred frontier Gemini planning model",
+          hidden: false,
+          isDefault: false,
+          defaultReasoningEffort: null,
+          supportedReasoningEfforts: []
+        },
+        {
+          id: "auto-gemini-3",
+          model: "auto-gemini-3",
+          displayName: "Auto Gemini 3",
+          description: "Gemini CLI automatic routing alias",
+          hidden: false,
+          isDefault: true,
+          defaultReasoningEffort: null,
+          supportedReasoningEfforts: []
+        }
+      ]
+    };
   }
 
   private async importManagedGeminiAcpModule(): Promise<{

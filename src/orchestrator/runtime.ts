@@ -28,6 +28,7 @@ import {
   ModelAssignment,
   ModelExecutionDebugInfo,
   ModelRef,
+  NodePhase,
   OrchestratorFinalReport,
   OrchestratorWorkflowStage,
   PlanNode,
@@ -380,27 +381,40 @@ export class OrchestratorRuntime {
     const isProjectStructureInspection = this.isProjectStructureInspectionNode(startingNode);
     const seededEvidence = this.getNodeEvidenceBundles(startingNode);
     let currentNode = this.engine.transitionNode(nodeId, "abstract_plan");
-    const abstractPlan = await this.invokeCapability<AbstractPlanResult>(
-      currentNode,
-      "abstractPlanner",
-      "abstractPlan",
-      seededEvidence
-    );
-    this.recordAbstractPlanning(currentNode, abstractPlan);
+    const abstractPlanStage = await this.executeStageCapability<AbstractPlanResult>(currentNode, {
+      phase: "abstract_plan",
+      title: "Abstract Plan",
+      objective: `Define the search scope, evidence requirements, and inspection targets for:\n${currentNode.objective}`,
+      kind: "planning",
+      role: "abstractPlanner",
+      capability: "abstractPlan",
+      evidenceBundles: seededEvidence
+    });
+    const abstractPlan = abstractPlanStage.result;
+    this.recordAbstractPlanning(abstractPlanStage.stageNode, abstractPlan);
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "gather");
-    const gather = await this.invokeCapability<GatherResult>(currentNode, "gatherer", "gather", seededEvidence);
-    this.mergeProjectStructureReport(currentNode, gather.projectStructure);
+    const gatherStage = await this.executeStageCapability<GatherResult>(currentNode, {
+      phase: "gather",
+      title: "Gather",
+      objective: `Gather file, symbol, and evidence findings for:\n${currentNode.objective}`,
+      kind: "planning",
+      role: "gatherer",
+      capability: "gather",
+      evidenceBundles: seededEvidence
+    });
+    const gather = gatherStage.result;
+    this.mergeProjectStructureReport(gatherStage.stageNode, gather.projectStructure);
     const gatheredBundles = gather.evidenceBundles.map((bundleDraft) =>
-      this.materializeEvidenceBundle(currentNode, bundleDraft)
+      this.materializeEvidenceBundle(gatherStage.stageNode, bundleDraft)
     );
 
     for (const bundle of gatheredBundles) {
       this.evidenceStore.upsertBundle(bundle);
       const storedBundle = this.evidenceStore.getBundle(bundle.id) ?? bundle;
-      this.engine.attachEvidenceBundle(currentNode.id, bundle.id);
-      this.ingestEvidenceBundle(currentNode.id, storedBundle);
+      this.engine.attachEvidenceBundle(gatherStage.stageNode.id, bundle.id);
+      this.ingestEvidenceBundle(gatherStage.stageNode.id, storedBundle);
     }
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
@@ -416,17 +430,27 @@ export class OrchestratorRuntime {
       summary: gather.summary
     });
     this.evidenceStore.upsertBundle(consolidatedEvidence);
-    this.engine.attachEvidenceBundle(currentNode.id, consolidatedEvidence.id);
+    const consolidationStage = this.createCompletedStageNode(currentNode, {
+      phase: "evidence_consolidation",
+      title: "Evidence Consolidation",
+      objective: `Consolidate the gathered evidence into a compact bundle for:\n${currentNode.objective}`,
+      kind: "planning"
+    });
+    this.engine.attachEvidenceBundle(consolidationStage.id, consolidatedEvidence.id);
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "concrete_plan");
-    let concretePlan = await this.invokeCapability<ConcretePlanResult>(
-      currentNode,
-      "concretePlanner",
-      "concretePlan",
-      [consolidatedEvidence]
-    );
-    this.recordDecision(currentNode.runId, currentNode.id, "Concrete plan created", concretePlan.summary);
+    let concretePlanStage = await this.executeStageCapability<ConcretePlanResult>(currentNode, {
+      phase: "concrete_plan",
+      title: "Concrete Plan",
+      objective: `Turn the gathered evidence into an execution plan for:\n${currentNode.objective}`,
+      kind: "planning",
+      role: "concretePlanner",
+      capability: "concretePlan",
+      evidenceBundles: [consolidatedEvidence]
+    });
+    let concretePlan = concretePlanStage.result;
+    this.recordDecision(currentNode.runId, concretePlanStage.stageNode.id, "Concrete plan created", concretePlan.summary);
     if (!isProjectStructureInspection && currentNode.depth === 0) {
       const inspectedPlan = await this.resolveProjectStructureInspectionLoop(
         currentNode,
@@ -595,9 +619,18 @@ export class OrchestratorRuntime {
       this.throwIfCancelled(currentNode.runId, currentNode.id);
       currentNode = this.engine.transitionNode(nodeId, "review");
       this.recordExecutionStatus(currentNode, "reviewing", "Reviewing execution readiness");
-      review = await this.invokeCapability<ReviewResult>(currentNode, "reviewer", "review", executionEvidence);
+      const reviewStage = await this.executeStageCapability<ReviewResult>(currentNode, {
+        phase: "review",
+        title: "Review",
+        objective: `Review the execution readiness for:\n${currentNode.objective}`,
+        kind: "execution",
+        role: "reviewer",
+        capability: "review",
+        evidenceBundles: executionEvidence
+      });
+      review = reviewStage.result;
       phaseResults.review = review;
-      this.recordDecision(currentNode.runId, currentNode.id, "Review completed", review.summary);
+      this.recordDecision(currentNode.runId, reviewStage.stageNode.id, "Review completed", review.summary);
       this.recordExecutionStatus(
         currentNode,
         review.approved ? "review_approved" : "review_rejected",
@@ -612,17 +645,35 @@ export class OrchestratorRuntime {
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "execute");
     this.recordExecutionStatus(currentNode, "running", "Executing routed model command");
-    const execute = await this.invokeCapability<ExecuteResult>(currentNode, "executor", "execute", executionEvidence);
+    const executeStage = await this.executeStageCapability<ExecuteResult>(currentNode, {
+      phase: "execute",
+      title: "Execute",
+      objective: `Execute the planned work for:\n${currentNode.objective}`,
+      kind: "execution",
+      role: "executor",
+      capability: "execute",
+      evidenceBundles: executionEvidence
+    });
+    const execute = executeStage.result;
     phaseResults.execute = execute;
-    this.recordDecision(currentNode.runId, currentNode.id, "Execution completed", execute.summary);
+    this.recordDecision(currentNode.runId, executeStage.stageNode.id, "Execution completed", execute.summary);
     this.recordExecutionStatus(currentNode, "executed", execute.summary);
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "verify");
     this.recordExecutionStatus(currentNode, "verifying", "Verifying execution result");
-    const verify = await this.invokeCapability<VerifyResult>(currentNode, "verifier", "verify", executionEvidence);
+    const verifyStage = await this.executeStageCapability<VerifyResult>(currentNode, {
+      phase: "verify",
+      title: "Verify",
+      objective: `Verify the execution result for:\n${currentNode.objective}`,
+      kind: "execution",
+      role: "verifier",
+      capability: "verify",
+      evidenceBundles: executionEvidence
+    });
+    const verify = verifyStage.result;
     phaseResults.verify = verify;
-    this.recordDecision(currentNode.runId, currentNode.id, "Verification completed", verify.summary);
+    this.recordDecision(currentNode.runId, verifyStage.stageNode.id, "Verification completed", verify.summary);
     this.recordExecutionStatus(currentNode, verify.passed ? "completed" : "verification_failed", verify.summary);
 
     if (!verify.passed) {
@@ -795,6 +846,120 @@ export class OrchestratorRuntime {
 
   private shouldRunReview(node: PlanNode): boolean {
     return node.reviewPolicy !== "none" && Boolean(node.assignedModels.reviewer);
+  }
+
+  private createStageNode(
+    parentNode: PlanNode,
+    input: {
+      phase: NodePhase;
+      title: string;
+      objective: string;
+      kind: PlanNode["kind"];
+      assignedModels?: ModelAssignment;
+    }
+  ): PlanNode {
+    const { childNode } = this.engine.createChildNode(parentNode.id, {
+      title: input.title,
+      objective: input.objective,
+      kind: input.kind,
+      role: "stage",
+      stagePhase: input.phase,
+      assignedModels: input.assignedModels,
+      reviewPolicy: "none"
+    });
+
+    this.engine.appendEvent(parentNode.runId, childNode.id, "scheduler_progress", {
+      message: "Executing stage node",
+      parentNodeId: parentNode.id,
+      stagePhase: input.phase
+    });
+
+    return childNode;
+  }
+
+  private createCompletedStageNode(
+    parentNode: PlanNode,
+    input: {
+      phase: NodePhase;
+      title: string;
+      objective: string;
+      kind: PlanNode["kind"];
+      assignedModels?: ModelAssignment;
+    }
+  ): PlanNode {
+    const stageNode = this.createStageNode(parentNode, input);
+    this.engine.transitionNode(stageNode.id, input.phase);
+    return this.engine.transitionNode(stageNode.id, "done");
+  }
+
+  private buildStageAssignedModels(parentNode: PlanNode, roles: AssignedModelRole[]): ModelAssignment {
+    const assignment: ModelAssignment = {};
+
+    for (const role of roles) {
+      const model = parentNode.assignedModels[role];
+      if (!this.isValidModelRef(model)) {
+        throw new MissingModelAssignmentError(parentNode.id, role);
+      }
+
+      assignment[role] = model;
+    }
+
+    return assignment;
+  }
+
+  private async executeStageCapability<TResult extends { debug?: ModelExecutionDebugInfo }>(
+    parentNode: PlanNode,
+    input: {
+      phase: NodePhase;
+      title: string;
+      objective: string;
+      kind: PlanNode["kind"];
+      role: AssignedModelRole;
+      capability: OrchestratorCapability;
+      evidenceBundles: EvidenceBundle[];
+    }
+  ): Promise<{ stageNode: PlanNode; result: TResult }> {
+    const stageNode = this.createStageNode(parentNode, {
+      phase: input.phase,
+      title: input.title,
+      objective: input.objective,
+      kind: input.kind,
+      assignedModels: this.buildStageAssignedModels(parentNode, [input.role])
+    });
+
+    try {
+      let activeStageNode = this.engine.transitionNode(stageNode.id, input.phase);
+      const result = await this.invokeCapability<TResult>(
+        activeStageNode,
+        input.role,
+        input.capability,
+        input.evidenceBundles
+      );
+      this.throwIfCancelled(activeStageNode.runId, activeStageNode.id);
+      activeStageNode = this.engine.transitionNode(stageNode.id, "done");
+
+      return {
+        stageNode: activeStageNode,
+        result
+      };
+    } catch (error) {
+      if (this.isCancellationError(error)) {
+        throw this.toCancellationError(error, stageNode.runId, stageNode.id);
+      }
+
+      const failedStageNode = this.engine.getNode(stageNode.id);
+      if (failedStageNode) {
+        if (failedStageNode.kind === "execution") {
+          this.recordExecutionStatus(failedStageNode, "failed", this.formatRuntimeError(error));
+        }
+        this.engine.appendEvent(failedStageNode.runId, failedStageNode.id, "node_failed", {
+          phase: failedStageNode.phase,
+          error: this.formatRuntimeError(error)
+        });
+      }
+      this.escalateRunIfPossible(stageNode.id);
+      throw error;
+    }
   }
 
   private shouldSkipDecompositionForShortTestGoal(node: PlanNode): boolean {
@@ -981,15 +1146,19 @@ export class OrchestratorRuntime {
       await this.executeProjectStructureInspectionNodes(currentNode, request, attempt);
       const projectStructureFingerprintAfterInspection = this.getProjectStructureInspectionFingerprint(currentNode.runId);
       currentNode = this.engine.transitionNode(currentNode.id, "concrete_plan");
-      concretePlan = await this.invokeCapability<ConcretePlanResult>(
-        currentNode,
-        "concretePlanner",
-        "concretePlan",
-        [consolidatedEvidence]
-      );
+      const concretePlanStage = await this.executeStageCapability<ConcretePlanResult>(currentNode, {
+        phase: "concrete_plan",
+        title: "Concrete Plan",
+        objective: `Turn the refreshed structure evidence into an execution plan for:\n${currentNode.objective}`,
+        kind: "planning",
+        role: "concretePlanner",
+        capability: "concretePlan",
+        evidenceBundles: [consolidatedEvidence]
+      });
+      concretePlan = concretePlanStage.result;
       this.recordDecision(
         currentNode.runId,
-        currentNode.id,
+        concretePlanStage.stageNode.id,
         "Concrete plan updated after project structure inspection",
         concretePlan.summary
       );
@@ -1086,11 +1255,12 @@ export class OrchestratorRuntime {
     const resolution = this.dedupeTextEntries(inspectionSummaries).join(" | ") || "Project structure inspection completed";
     const projectStructure = this.requireProjectStructureMemory(parentNode.runId);
     const snapshot = projectStructure.getSnapshot();
+    const relatedNodeIds = this.collectNodeResolutionScope(parentNode);
     const parentOpenQuestions = snapshot.openQuestions
-      .filter((question) => question.status === "open" && question.relatedNodeIds.includes(parentNode.id))
+      .filter((question) => question.status === "open" && question.relatedNodeIds.some((nodeId) => relatedNodeIds.has(nodeId)))
       .map((question) => question.question);
     const parentContradictions = snapshot.contradictions
-      .filter((contradiction) => contradiction.status === "open" && contradiction.relatedNodeIds.includes(parentNode.id))
+      .filter((contradiction) => contradiction.status === "open" && contradiction.relatedNodeIds.some((nodeId) => relatedNodeIds.has(nodeId)))
       .map((contradiction) => contradiction.summary);
     projectStructure.resolveQuestions(this.dedupeTextEntries([...request.objectives, ...parentOpenQuestions]), resolution);
     projectStructure.resolveContradictions(
@@ -1274,8 +1444,12 @@ export class OrchestratorRuntime {
       workflowStage: this.getWorkflowStage(node, capability),
       reviewPolicy: node.reviewPolicy,
       executionBudget: node.executionBudget,
-      workingMemory: this.getWorkingMemorySnapshot(node.runId),
-      projectStructure: this.getProjectStructureSnapshot(node.runId),
+      workingMemory: node.role === "stage"
+        ? this.rebaseWorkingMemorySnapshot(this.getWorkingMemorySnapshot(node.runId), node.id)
+        : this.getWorkingMemorySnapshot(node.runId),
+      projectStructure: node.role === "stage"
+        ? this.rebaseProjectStructureSnapshot(this.getProjectStructureSnapshot(node.runId), node.id)
+        : this.getProjectStructureSnapshot(node.runId),
       evidenceBundles,
       requestUserApproval: (request) => this.handleUserApprovalRequest(node, capability, assignedModel, request),
       requestUserInput: (request) => this.handleUserInputRequest(node, capability, assignedModel, request),
@@ -1582,16 +1756,37 @@ export class OrchestratorRuntime {
     const workingMemory = this.requireWorkingMemory(node.runId);
     const snapshot = workingMemory.getSnapshot();
     const candidateSources = this.collectResolutionSources(node, input);
+    const relatedNodeIds = this.collectNodeResolutionScope(node);
 
     for (const question of snapshot.openQuestions) {
       if (question.status !== "open") continue;
-      if (question.relatedNodeIds.length > 0 && !question.relatedNodeIds.includes(node.id)) continue;
+      if (
+        question.relatedNodeIds.length > 0
+        && !question.relatedNodeIds.some((relatedNodeId) => relatedNodeIds.has(relatedNodeId))
+      ) {
+        continue;
+      }
 
       const matchingSource = candidateSources.find((source) => this.questionIsCoveredBySource(question.question, source));
       if (!matchingSource) continue;
 
       workingMemory.resolveQuestion(question.id, `Confirmed by: ${truncateResolutionSource(matchingSource)}`);
     }
+  }
+
+  private collectNodeResolutionScope(node: PlanNode): Set<string> {
+    const relatedNodeIds = new Set<string>([node.id]);
+
+    for (const childNodeId of node.childIds) {
+      const childNode = this.engine.getNode(childNodeId);
+      if (!childNode || childNode.role !== "stage") {
+        continue;
+      }
+
+      relatedNodeIds.add(childNode.id);
+    }
+
+    return relatedNodeIds;
   }
 
   private markPendingAcceptanceCriteriaMet(nodeId: string) {
@@ -1714,7 +1909,17 @@ export class OrchestratorRuntime {
   }
 
   private isProjectStructureInspectionNode(node: PlanNode): boolean {
-    return this.projectStructureInspectionNodeIdsByRun.get(node.runId)?.has(node.id) ?? false;
+    let currentNode: PlanNode | undefined = node;
+
+    while (currentNode) {
+      if (this.projectStructureInspectionNodeIdsByRun.get(currentNode.runId)?.has(currentNode.id)) {
+        return true;
+      }
+
+      currentNode = currentNode.parentId ? this.engine.getNode(currentNode.parentId) : undefined;
+    }
+
+    return false;
   }
 
   private escalateRunIfPossible(nodeId: string) {

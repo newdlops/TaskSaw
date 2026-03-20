@@ -46,7 +46,7 @@ test("rejects invalid phase transitions", () => {
   });
 
   assert.throws(
-    () => engine.transitionNode(rootNode.id, "verify"),
+    () => engine.transitionNode(rootNode.id, "replan"),
     (error: unknown) => error instanceof InvalidNodePhaseTransitionError
   );
 });

@@ -29,13 +29,13 @@ export const DEFAULT_ORCHESTRATOR_CONFIG: OrchestratorConfig = {
 };
 
 export const NODE_PHASE_TRANSITIONS: Record<NodePhase, readonly NodePhase[]> = {
-  init: ["abstract_plan", "review", "execute", "escalated"],
-  abstract_plan: ["gather", "concrete_plan", "replan", "escalated"],
-  gather: ["evidence_consolidation", "replan", "escalated"],
-  evidence_consolidation: ["gather", "concrete_plan", "replan", "escalated"],
+  init: ["abstract_plan", "gather", "evidence_consolidation", "concrete_plan", "review", "execute", "verify", "done", "escalated"],
+  abstract_plan: ["gather", "concrete_plan", "done", "replan", "escalated"],
+  gather: ["evidence_consolidation", "done", "replan", "escalated"],
+  evidence_consolidation: ["gather", "concrete_plan", "done", "replan", "escalated"],
   concrete_plan: ["review", "execute", "done", "replan", "escalated"],
   review: ["execute", "done", "replan", "escalated"],
-  execute: ["verify", "replan", "escalated"],
+  execute: ["verify", "done", "replan", "escalated"],
   verify: ["done", "replan", "escalated"],
   done: [],
   replan: ["abstract_plan", "gather", "concrete_plan", "escalated"],
@@ -90,6 +90,8 @@ export class OrchestratorEngine {
       parentId: null,
       childIds: [],
       kind: input.kind ?? "planning",
+      role: input.role ?? "task",
+      stagePhase: input.stagePhase ?? null,
       title: input.title ?? "Root Task",
       objective: input.objective ?? input.goal,
       depth: 0,
@@ -114,9 +116,12 @@ export class OrchestratorEngine {
     this.recordEvent(runId, rootNodeId, "node_created", {
       parentId: null,
       kind: rootNode.kind,
+      role: rootNode.role,
+      stagePhase: rootNode.stagePhase,
       phase: rootNode.phase,
       depth: rootNode.depth,
-      title: rootNode.title
+      title: rootNode.title,
+      objective: rootNode.objective
     });
 
     return { run, rootNode };
@@ -127,7 +132,12 @@ export class OrchestratorEngine {
     const run = this.getRequiredRun(parentNode.runId);
     const timestamp = this.now();
     const childKind = input.kind ?? "planning";
-    const childDepth = childKind === "execution" ? parentNode.depth : parentNode.depth + 1;
+    const childRole = input.role ?? "task";
+    const childDepth = childRole === "stage"
+      ? parentNode.depth
+      : childKind === "execution"
+        ? parentNode.depth
+        : parentNode.depth + 1;
 
     if (childDepth > run.config.maxDepth) {
       throw new Error(`Child node depth ${childDepth} exceeds configured maxDepth ${run.config.maxDepth}`);
@@ -139,6 +149,8 @@ export class OrchestratorEngine {
       parentId: parentNodeId,
       childIds: [],
       kind: childKind,
+      role: childRole,
+      stagePhase: input.stagePhase ?? null,
       title: input.title,
       objective: input.objective,
       depth: childDepth,
@@ -164,9 +176,12 @@ export class OrchestratorEngine {
     this.recordEvent(parentNode.runId, childNode.id, "node_created", {
       parentId: parentNodeId,
       kind: childNode.kind,
+      role: childNode.role,
+      stagePhase: childNode.stagePhase,
       phase: childNode.phase,
       depth: childNode.depth,
-      title: childNode.title
+      title: childNode.title,
+      objective: childNode.objective
     });
 
     return { parentNode: updatedParentNode, childNode };
