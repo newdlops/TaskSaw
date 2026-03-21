@@ -198,6 +198,39 @@ test("gemini adapter retries once with a JSON-only repair prompt after prose out
   assert.match(prompts[1] ?? "", /Do not call tools or edit files\./);
 });
 
+test("default CLI invocation streams stdout and stderr into terminal events", async () => {
+  const payload = {
+    summary: "streamed gather",
+    evidenceBundles: []
+  };
+  const script = [
+    "process.stderr.write('booting...\\n');",
+    `process.stdout.write(${JSON.stringify(JSON.stringify(payload))});`
+  ].join(" ");
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    buildInvocationArgs: () => ["-e", script],
+    supportedCapabilities: ["gather"]
+  });
+  const terminalEvents: Array<{ stream?: string; text: string }> = [];
+  const context = createContext(TEST_MODEL);
+  context.reportTerminalEvent = (event) => {
+    terminalEvents.push({
+      stream: event.stream,
+      text: event.text
+    });
+  };
+
+  const result = await adapter.gather!(context);
+
+  assert.equal(result.summary, payload.summary);
+  assert(terminalEvents.some((event) => event.stream === "system" && event.text.includes(process.execPath)));
+  assert(terminalEvents.some((event) => event.stream === "stderr" && event.text.includes("booting...")));
+  assert(terminalEvents.some((event) => event.stream === "stdout" && event.text.includes("\"summary\":\"streamed gather\"")));
+});
+
 test("codex adapter parses fenced JSON inside assistant message output", async () => {
   const payload = {
     summary: "concrete plan ready",

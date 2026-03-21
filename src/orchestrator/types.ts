@@ -406,6 +406,8 @@ export type ModelExecutionDebugInfo = {
   prompt: string;
   rawStdout: string;
   rawStderr: string;
+  terminalSessionId?: string;
+  terminalSessionTitle?: string;
 };
 
 export type OrchestratorEvent = {
@@ -421,10 +423,13 @@ export type OrchestratorEvent = {
     | "node_decomposed"
     | "model_invocation"
     | "model_response"
+    | "terminal_output"
     | "approval_requested"
     | "approval_resolved"
     | "user_input_requested"
     | "user_input_resolved"
+    | "interactive_session_requested"
+    | "interactive_session_resolved"
     | "execution_status"
     | "scheduler_progress"
     | "node_failed"

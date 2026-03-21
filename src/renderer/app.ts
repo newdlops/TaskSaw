@@ -14,6 +14,7 @@ type SessionInfo = {
   kind: SessionKind;
   title: string;
   cwd: string;
+  hidden?: boolean;
 };
 
 type TerminalDataPayload = { sessionId: string; data: string };
@@ -144,6 +145,23 @@ type OrchestratorPendingUserInput = {
   message: string;
   questions: OrchestratorUserInputQuestion[];
 };
+type OrchestratorPendingInteractiveSession = {
+  requestId: string;
+  runId: string;
+  nodeId: string;
+  title: string;
+  message: string;
+  commandText: string;
+  cwd: string;
+  createdAt: string;
+  sessionId: string | null;
+  transcript: string;
+  exitCode: number | null;
+  signal: number | null;
+  exited: boolean;
+  responseSubmitted: boolean;
+  terminateRequested: boolean;
+};
 type OrchestratorWorkingMemory = {
   facts: Array<{ statement: string }>;
   openQuestions: Array<{ question: string; status: string }>;
@@ -243,6 +261,9 @@ type TasksawApi = {
   createSession(input: {
     kind: SessionKind;
     cwd: string;
+    title?: string;
+    commandText?: string;
+    hidden?: boolean;
     workspaceAccessDialog?: DirectoryDialogOptions;
   }): Promise<SessionInfo | null>;
   listSessions(): Promise<SessionInfo[]>;
@@ -270,6 +291,14 @@ type TasksawApi = {
     requestId: string;
     submitted: boolean;
     answers?: Record<string, string[]>;
+  }): Promise<boolean>;
+  respondOrchestratorInteractiveSession(input: {
+    requestId: string;
+    outcome: "completed" | "terminated" | "cancelled";
+    sessionId?: string | null;
+    exitCode?: number | null;
+    signal?: number | null;
+    transcript?: string | null;
   }): Promise<boolean>;
   listOrchestratorRuns(): Promise<OrchestratorRunSummary[]>;
   getOrchestratorRun(runId: string): Promise<OrchestratorRunDetail>;
@@ -368,6 +397,14 @@ const TEXT = {
       orchestratorUserInputSubmit: "Submit",
       orchestratorUserInputCancel: "Cancel",
       orchestratorUserInputEmpty: "No pending input request.",
+      interactiveSessionTitle: "Interactive Session",
+      interactiveSessionStarting: "Starting",
+      interactiveSessionRunning: "Running",
+      interactiveSessionTerminated: "Terminated",
+      interactiveSessionCompleted: "Completed",
+      interactiveSessionTerminate: "Terminate",
+      interactiveSessionClose: "Close",
+      interactiveSessionCommandEmpty: "No interactive command recorded.",
       orchestratorUserInputPlaceholder: "Type your response",
       orchestratorUserInputOtherLabel: "Other",
       orchestratorWorkingMemoryTitle: "Working Memory",
@@ -528,6 +565,14 @@ const TEXT = {
       orchestratorUserInputSubmit: "제출",
       orchestratorUserInputCancel: "취소",
       orchestratorUserInputEmpty: "대기 중인 입력 요청이 없습니다.",
+      interactiveSessionTitle: "대화형 세션",
+      interactiveSessionStarting: "시작 중",
+      interactiveSessionRunning: "실행 중",
+      interactiveSessionTerminated: "종료됨",
+      interactiveSessionCompleted: "완료됨",
+      interactiveSessionTerminate: "강제 종료",
+      interactiveSessionClose: "닫기",
+      interactiveSessionCommandEmpty: "기록된 대화형 명령이 없습니다.",
       orchestratorUserInputPlaceholder: "응답을 입력하세요",
       orchestratorUserInputOtherLabel: "직접 입력",
       orchestratorWorkingMemoryTitle: "워킹 메모리",
@@ -682,7 +727,7 @@ const orchestratorNodePlanOpenButton = document.getElementById("orchestrator-nod
 const orchestratorNodeTerminalTitleEl = document.getElementById("orchestrator-node-terminal-title") as HTMLDivElement;
 const orchestratorNodeTerminalOpenButton = document.getElementById("orchestrator-node-terminal-open") as HTMLButtonElement;
 const orchestratorNodeTerminalCopyButton = document.getElementById("orchestrator-node-terminal-copy") as HTMLButtonElement;
-const orchestratorNodeTerminalEl = document.getElementById("orchestrator-node-terminal") as HTMLPreElement;
+const orchestratorNodeTerminalEl = document.getElementById("orchestrator-node-terminal") as HTMLDivElement;
 const orchestratorNodeLogOpenButton = document.getElementById("orchestrator-node-log-open") as HTMLButtonElement;
 const orchestratorNodeLogEl = document.getElementById("orchestrator-node-log") as HTMLPreElement;
 const orchestratorNodeRequestDataEl = document.getElementById("orchestrator-node-request-data") as HTMLPreElement;
@@ -719,6 +764,14 @@ const approvalDialogListEl = document.getElementById("approval-dialog-list") as 
 const approvalDialogMessageEl = document.getElementById("approval-dialog-message") as HTMLDivElement;
 const approvalDialogDetailsEl = document.getElementById("approval-dialog-details") as HTMLPreElement;
 const approvalDialogActionsEl = document.getElementById("approval-dialog-actions") as HTMLDivElement;
+const interactiveSessionDialogEl = document.getElementById("interactive-session-dialog") as HTMLDivElement;
+const interactiveSessionDialogTitleEl = document.getElementById("interactive-session-dialog-title") as HTMLDivElement;
+const interactiveSessionDialogStatusEl = document.getElementById("interactive-session-dialog-status") as HTMLSpanElement;
+const interactiveSessionDialogTerminateButton = document.getElementById("interactive-session-dialog-terminate") as HTMLButtonElement;
+const interactiveSessionDialogCloseButton = document.getElementById("interactive-session-dialog-close") as HTMLButtonElement;
+const interactiveSessionDialogMessageEl = document.getElementById("interactive-session-dialog-message") as HTMLDivElement;
+const interactiveSessionDialogCommandEl = document.getElementById("interactive-session-dialog-command") as HTMLPreElement;
+const interactiveSessionDialogTerminalEl = document.getElementById("interactive-session-dialog-terminal") as HTMLDivElement;
 const approvalToastContainerEl = document.getElementById("approval-toast-container") as HTMLDivElement;
 const mainSplitterEl = document.getElementById("main-splitter") as HTMLDivElement;
 const terminalRoot = document.getElementById("terminal-root") as HTMLDivElement;
@@ -735,6 +788,7 @@ const sessionStatusBadges = new Map<string, HTMLSpanElement>();
 const sessionKindBadges = new Map<string, HTMLSpanElement>();
 const sessionCloseButtons = new Map<string, HTMLButtonElement>();
 const terminalDimensions = new Map<string, { cols: number; rows: number }>();
+const pendingInteractiveSessions = new Map<string, OrchestratorPendingInteractiveSession>();
 const sessions: SessionInfo[] = [];
 const orchestratorRuns: OrchestratorRunSummary[] = [];
 const selectedNextActionIndexByRun = new Map<string, number>();
@@ -829,6 +883,7 @@ let lastOrchestratorRunListSignature = "";
 let lastOrchestratorDetailSignature = "";
 let lastOrchestratorTreeSignature = "";
 let fitAllSessionsHandle: number | null = null;
+let fitOrchestratorNodeTerminalHandle: number | null = null;
 let activeWorkspaceTabId: string | null = "orchestrator";
 let isOrchestratorTabOpen = true;
 let selectedOrchestratorNodeId: string | null = null;
@@ -836,11 +891,17 @@ let activeOrchestratorDetailTab: OrchestratorDetailTab = "node";
 let pendingApprovalActionRequestId: string | null = null;
 let pendingUserInputActionRequestId: string | null = null;
 let orchestratorElapsedClock = 0;
+let orchestratorNodeTerminal: XtermTerminal | null = null;
+let orchestratorNodeTerminalText = "";
+let orchestratorNodeTerminalRenderKey = "";
 let activeLogViewerSource: {
   titleElement: HTMLElement;
   contentElement: HTMLElement;
   emptyMessage: string;
 } | null = null;
+let activeInteractiveSessionRequestId: string | null = null;
+let interactiveSessionTerminal: XtermTerminal | null = null;
+let interactiveSessionFitHandle: number | null = null;
 let activeApprovalDialogRequestId: string | null = null;
 const approvalToasts = new Map<string, ApprovalToast>();
 const pendingUserInputDrafts = new Map<string, Record<string, string>>();
@@ -901,7 +962,7 @@ function refreshLogbar() {
 function syncDialogBodyState() {
   document.body.classList.toggle(
     "dialog-open",
-    !logViewerDialogEl.hidden || !approvalDialogEl.hidden
+    !logViewerDialogEl.hidden || !approvalDialogEl.hidden || !interactiveSessionDialogEl.hidden
   );
 }
 
@@ -1672,8 +1733,53 @@ function isNodeDetailEvent(event: OrchestratorEvent): boolean {
     || event.type === "approval_resolved"
     || event.type === "user_input_requested"
     || event.type === "user_input_resolved"
+    || event.type === "interactive_session_requested"
+    || event.type === "interactive_session_resolved"
     || event.type === "execution_status"
     || event.type === "node_failed";
+}
+
+function isNodeTerminalEvent(event: OrchestratorEvent): boolean {
+  return event.type === "terminal_output";
+}
+
+function buildNodeTerminalTranscript(
+  nodeEvents: OrchestratorEvent[],
+  fallbackTranscript: string
+): string {
+  const terminalEvents = nodeEvents.filter(isNodeTerminalEvent);
+  if (terminalEvents.length === 0) {
+    return fallbackTranscript;
+  }
+
+  let transcript = "";
+  let lastSessionId: string | null = null;
+
+  for (const event of terminalEvents) {
+    const sessionId = typeof event.payload.sessionId === "string" && event.payload.sessionId.trim().length > 0
+      ? event.payload.sessionId.trim()
+      : null;
+    const title = typeof event.payload.title === "string" && event.payload.title.trim().length > 0
+      ? event.payload.title.trim()
+      : sessionId;
+    const text = typeof event.payload.text === "string" ? event.payload.text : "";
+    if (!text) {
+      continue;
+    }
+
+    if (sessionId && sessionId !== lastSessionId) {
+      const header = title ?? sessionId;
+      if (transcript.length > 0 && !transcript.endsWith("\n")) {
+        transcript += "\n";
+      }
+      transcript += `\n=== ${header} ===\n`;
+      lastSessionId = sessionId;
+    }
+
+    transcript += text;
+  }
+
+  return transcript.trim().length > 0 ? transcript : fallbackTranscript;
 }
 
 function humanizePayloadKey(key: string): string {
@@ -1750,6 +1856,8 @@ function translateOrchestratorEventLabel(label: string): string {
       "approval resolved": "승인 처리",
       "input requested": "입력 요청",
       "input resolved": "입력 처리",
+      "interactive session requested": "대화형 세션 요청",
+      "interactive session resolved": "대화형 세션 종료",
       "execution status": "실행 상태",
       "node failed": "노드 실패",
       "run failed": "실행 실패",
@@ -2121,10 +2229,14 @@ function formatExecutionStatusLabel(state: string | undefined): string {
       verification_failed: "검증 실패",
       awaiting_user_approval: "승인 대기",
       awaiting_user_input: "추가 입력 대기",
+      awaiting_interactive_session: "대화형 세션 대기",
       approval_granted: "사용자 승인됨",
       approval_denied: "사용자 거절",
       user_input_submitted: "입력 제출됨",
       user_input_cancelled: "입력 취소됨",
+      interactive_session_completed: "대화형 세션 완료",
+      interactive_session_terminated: "대화형 세션 종료됨",
+      interactive_session_cancelled: "대화형 세션 취소됨",
       planning_update: "계획 갱신 중",
       tool_progress: "도구 진행 중",
       running_command: "명령 실행 중",
@@ -2152,10 +2264,14 @@ function formatExecutionStatusLabel(state: string | undefined): string {
     verification_failed: "Verification failed",
     awaiting_user_approval: "Waiting for approval",
     awaiting_user_input: "Waiting for additional input",
+    awaiting_interactive_session: "Waiting for interactive session",
     approval_granted: "Approved",
     approval_denied: "Denied",
     user_input_submitted: "Input submitted",
     user_input_cancelled: "Input cancelled",
+    interactive_session_completed: "Interactive session completed",
+    interactive_session_terminated: "Interactive session terminated",
+    interactive_session_cancelled: "Interactive session cancelled",
     planning_update: "Planning update",
     tool_progress: "Tool in progress",
     running_command: "Running command",
@@ -2376,6 +2492,259 @@ function closeApprovalDialog() {
   syncDialogBodyState();
 }
 
+function getInteractiveSessionStatusLabel(request: OrchestratorPendingInteractiveSession): string {
+  if (!request.sessionId) {
+    return translate("ui.interactiveSessionStarting");
+  }
+
+  if (!request.exited) {
+    return translate("ui.interactiveSessionRunning");
+  }
+
+  return request.terminateRequested
+    ? translate("ui.interactiveSessionTerminated")
+    : translate("ui.interactiveSessionCompleted");
+}
+
+function getActiveInteractiveSession(): OrchestratorPendingInteractiveSession | null {
+  if (!activeInteractiveSessionRequestId) {
+    return null;
+  }
+
+  return pendingInteractiveSessions.get(activeInteractiveSessionRequestId) ?? null;
+}
+
+function getNextPendingInteractiveSession(): OrchestratorPendingInteractiveSession | null {
+  for (const request of pendingInteractiveSessions.values()) {
+    if (!request.responseSubmitted) {
+      return request;
+    }
+  }
+
+  return null;
+}
+
+function ensureInteractiveSessionTerminal() {
+  if (interactiveSessionTerminal || typeof appWindow.Terminal !== "function") {
+    return;
+  }
+
+  interactiveSessionTerminal = new appWindow.Terminal({
+    cursorBlink: true,
+    fontSize: 14,
+    theme: XTERM_THEMES[resolveTheme(themePreference)]
+  });
+  interactiveSessionTerminal.open(interactiveSessionDialogTerminalEl);
+  interactiveSessionTerminal.onData((data: string) => {
+    const request = getActiveInteractiveSession();
+    if (!request?.sessionId || request.exited) {
+      return;
+    }
+
+    appWindow.tasksaw.writeTerminal(request.sessionId, data);
+  });
+}
+
+function fitInteractiveSessionTerminal() {
+  const request = getActiveInteractiveSession();
+  if (!request?.sessionId || !interactiveSessionTerminal) {
+    return;
+  }
+
+  const rect = interactiveSessionDialogTerminalEl.getBoundingClientRect();
+  const cols = Math.max(40, Math.floor(Math.max(rect.width, 360) / 9));
+  const rows = Math.max(10, Math.floor(Math.max(rect.height, 200) / 18));
+  interactiveSessionTerminal.resize(cols, rows);
+  appWindow.tasksaw.resizeTerminal(request.sessionId, cols, rows);
+}
+
+function scheduleFitInteractiveSessionTerminal() {
+  if (interactiveSessionFitHandle !== null) {
+    return;
+  }
+
+  interactiveSessionFitHandle = appWindow.requestAnimationFrame(() => {
+    interactiveSessionFitHandle = null;
+    fitInteractiveSessionTerminal();
+  });
+}
+
+function hideInteractiveSessionDialog() {
+  activeInteractiveSessionRequestId = null;
+  interactiveSessionDialogEl.hidden = true;
+  interactiveSessionDialogCloseButton.hidden = true;
+  interactiveSessionDialogTerminateButton.hidden = false;
+  syncDialogBodyState();
+}
+
+function trimInteractiveTranscript(transcript: string): string {
+  return transcript.length > 32_000 ? transcript.slice(-32_000) : transcript;
+}
+
+function renderInteractiveSessionDialog() {
+  const request = getActiveInteractiveSession();
+  if (!request) {
+    hideInteractiveSessionDialog();
+    return;
+  }
+
+  ensureInteractiveSessionTerminal();
+  interactiveSessionDialogTitleEl.textContent = request.title || translate("ui.interactiveSessionTitle");
+  interactiveSessionDialogStatusEl.textContent = getInteractiveSessionStatusLabel(request);
+  interactiveSessionDialogMessageEl.textContent = request.message;
+  interactiveSessionDialogCommandEl.textContent = request.commandText || translate("ui.interactiveSessionCommandEmpty");
+  interactiveSessionDialogTerminateButton.hidden = request.exited;
+  interactiveSessionDialogTerminateButton.disabled = request.exited;
+  interactiveSessionDialogCloseButton.hidden = !request.exited;
+  interactiveSessionDialogEl.hidden = false;
+  syncDialogBodyState();
+
+  if (interactiveSessionTerminal) {
+    interactiveSessionTerminal.reset();
+    if (request.transcript.length > 0) {
+      interactiveSessionTerminal.write(request.transcript);
+    }
+    scheduleFitInteractiveSessionTerminal();
+  }
+}
+
+async function respondInteractiveSession(request: OrchestratorPendingInteractiveSession) {
+  if (request.responseSubmitted) {
+    return;
+  }
+
+  request.responseSubmitted = true;
+  await appWindow.tasksaw.respondOrchestratorInteractiveSession({
+    requestId: request.requestId,
+    outcome: request.terminateRequested
+      ? "terminated"
+      : request.exited
+        ? "completed"
+        : "cancelled",
+    sessionId: request.sessionId,
+    exitCode: request.exitCode,
+    signal: request.signal,
+    transcript: request.transcript
+  }).catch(() => false);
+}
+
+async function finalizeInteractiveSession(requestId: string) {
+  const request = pendingInteractiveSessions.get(requestId);
+  if (!request) {
+    return;
+  }
+
+  await respondInteractiveSession(request);
+  pendingInteractiveSessions.delete(requestId);
+  if (activeInteractiveSessionRequestId === requestId) {
+    hideInteractiveSessionDialog();
+  }
+
+  const nextRequest = getNextPendingInteractiveSession();
+  if (nextRequest) {
+    activeInteractiveSessionRequestId = nextRequest.requestId;
+    renderInteractiveSessionDialog();
+    if (!nextRequest.sessionId) {
+      void ensureInteractiveSessionModalSession(nextRequest);
+    }
+  }
+}
+
+async function ensureInteractiveSessionModalSession(request: OrchestratorPendingInteractiveSession) {
+  if (request.sessionId || request.responseSubmitted) {
+    return;
+  }
+
+  renderInteractiveSessionDialog();
+  try {
+    const session = await appWindow.tasksaw.createSession({
+      kind: "shell",
+      cwd: request.cwd,
+      title: request.title || translate("ui.interactiveSessionTitle"),
+      commandText: request.commandText,
+      hidden: true
+    });
+    if (!session) {
+      request.exited = true;
+      request.terminateRequested = true;
+      await finalizeInteractiveSession(request.requestId);
+      return;
+    }
+
+    request.sessionId = session.id;
+    renderInteractiveSessionDialog();
+  } catch (error: unknown) {
+    request.exited = true;
+    request.terminateRequested = true;
+    request.transcript = trimInteractiveTranscript(
+      `${request.transcript}${error instanceof Error ? error.message : String(error)}\n`
+    );
+    await finalizeInteractiveSession(request.requestId);
+  }
+}
+
+async function openQueuedInteractiveSession(request: OrchestratorPendingInteractiveSession) {
+  if (activeInteractiveSessionRequestId && activeInteractiveSessionRequestId !== request.requestId) {
+    return;
+  }
+
+  activeInteractiveSessionRequestId = request.requestId;
+  renderInteractiveSessionDialog();
+  await ensureInteractiveSessionModalSession(request);
+}
+
+async function terminateActiveInteractiveSession() {
+  const request = getActiveInteractiveSession();
+  if (!request) {
+    return;
+  }
+
+  request.terminateRequested = true;
+  renderInteractiveSessionDialog();
+
+  if (request.sessionId && !request.exited) {
+    appWindow.tasksaw.killSession(request.sessionId);
+    return;
+  }
+
+  request.exited = true;
+  await finalizeInteractiveSession(request.requestId);
+}
+
+function queueInteractiveSessionRequest(event: OrchestratorEvent) {
+  const requestId = typeof event.payload.requestId === "string" ? event.payload.requestId.trim() : "";
+  if (!requestId || pendingInteractiveSessions.has(requestId)) {
+    return;
+  }
+
+  const request: OrchestratorPendingInteractiveSession = {
+    requestId,
+    runId: event.runId,
+    nodeId: event.nodeId ?? "",
+    title: typeof event.payload.title === "string" && event.payload.title.trim().length > 0
+      ? event.payload.title.trim()
+      : translate("ui.interactiveSessionTitle"),
+    message: typeof event.payload.message === "string" && event.payload.message.trim().length > 0
+      ? event.payload.message.trim()
+      : translate("ui.interactiveSessionStarting"),
+    commandText: typeof event.payload.commandText === "string" ? event.payload.commandText.trim() : "",
+    cwd: typeof event.payload.cwd === "string" ? event.payload.cwd.trim() : currentWorkspacePath ?? "",
+    createdAt: event.createdAt,
+    sessionId: null,
+    transcript: "",
+    exitCode: null,
+    signal: null,
+    exited: false,
+    responseSubmitted: false,
+    terminateRequested: false
+  };
+
+  pendingInteractiveSessions.set(requestId, request);
+  if (!activeInteractiveSessionRequestId) {
+    void openQueuedInteractiveSession(request);
+  }
+}
+
 function showApprovalToast(pendingApproval: OrchestratorPendingApproval) {
   approvalToasts.set(pendingApproval.requestId, {
     requestId: pendingApproval.requestId,
@@ -2462,7 +2831,11 @@ function getEventLogLevel(event: OrchestratorEvent): "DEBUG" | "INFO" | "WARN" |
     return "DEBUG";
   }
 
-  if (event.type === "approval_requested" || event.type === "user_input_requested") {
+  if (
+    event.type === "approval_requested"
+    || event.type === "user_input_requested"
+    || event.type === "interactive_session_requested"
+  ) {
     return "WARN";
   }
 
@@ -2486,7 +2859,7 @@ function withLogLevel(lines: string[], level: ReturnType<typeof getEventLogLevel
 }
 
 function isOrchestratorOverviewEvent(event: OrchestratorEvent): boolean {
-  return event.type !== "";
+  return event.type !== "" && event.type !== "terminal_output";
 }
 
 function formatOrchestratorLogEntry(detail: OrchestratorRunDetail, event: OrchestratorEvent): string {
@@ -2512,6 +2885,22 @@ function formatOrchestratorLogEntry(detail: OrchestratorRunDetail, event: Orches
     detailLines.push(...formatPayloadDetails(event.payload, ["title", "message", "questions"], 600));
     if (Array.isArray(event.payload.questions) && event.payload.questions.length > 0) {
       detailLines.push(`questions: ${formatDisplayValue(event.payload.questions, 600)}`);
+    }
+  } else if (event.type === "interactive_session_requested") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["title", "message", "commandText", "cwd"], 600));
+    const commandText = typeof event.payload.commandText === "string" ? event.payload.commandText.trim() : "";
+    if (commandText.length > 0) {
+      detailLines.push(`command: ${commandText}`);
+    }
+    const cwd = typeof event.payload.cwd === "string" ? event.payload.cwd.trim() : "";
+    if (cwd.length > 0) {
+      detailLines.push(`cwd: ${cwd}`);
+    }
+  } else if (event.type === "interactive_session_resolved") {
+    detailLines.push(...formatPayloadDetails(event.payload, ["transcriptPreview"], 600));
+    const transcriptPreview = typeof event.payload.transcriptPreview === "string" ? event.payload.transcriptPreview.trim() : "";
+    if (transcriptPreview.length > 0) {
+      detailLines.push(`transcript preview: ${formatDisplayString(transcriptPreview, 600)}`);
     }
   } else if (event.type === "approval_resolved" || event.type === "user_input_resolved" || event.type === "execution_status") {
     detailLines.push(...formatPayloadDetails(event.payload, ["message"], 480));
@@ -2820,10 +3209,12 @@ function buildSelectedNodeLiveView(detail: OrchestratorRunDetail | null): Select
     terminalSections.push(logLines.join("\n").trim());
   }
 
+  const fallbackTerminal = terminalSections.join("\n\n").trim() || translate("ui.orchestratorNodeTerminalEmpty");
+
   return {
     status,
     progress,
-    terminal: terminalSections.join("\n\n").trim() || translate("ui.orchestratorNodeTerminalEmpty"),
+    terminal: buildNodeTerminalTranscript(nodeEvents, fallbackTerminal),
     log: logLines.join("\n").trim() || translate("ui.orchestratorNodeLogEmpty"),
     hasLog: nodeLogEvents.length > 0,
     requestJson: buildNodeRequestJsonView(nodeEvents),
@@ -3205,6 +3596,9 @@ function renderOrchestratorDetailTabs() {
   orchestratorDetailTabMemoryButton.setAttribute("aria-selected", String(!isNodeTab));
   orchestratorDetailPanelNodeEl.hidden = !isNodeTab;
   orchestratorDetailPanelMemoryEl.hidden = isNodeTab;
+  if (isNodeTab) {
+    scheduleFitOrchestratorNodeTerminal();
+  }
 }
 
 function setActiveOrchestratorDetailTab(tab: OrchestratorDetailTab) {
@@ -3503,6 +3897,9 @@ function renderOrchestratorDetail() {
 
   lastOrchestratorDetailSignature = signature;
   const liveView = buildSelectedNodeLiveView(selectedOrchestratorRun);
+  const selectedNodeRenderKey = selectedOrchestratorRun && selectedNode
+    ? `${selectedOrchestratorRun.run.id}:${selectedNode.id}`
+    : "__empty__";
   const pendingApprovals = listPendingApprovals(selectedOrchestratorRun);
   renderReviewNextActionsCard(selectedOrchestratorRun);
   orchestratorNodeLiveStatusEl.textContent = liveView.status;
@@ -3517,7 +3914,7 @@ function renderOrchestratorDetail() {
   orchestratorNodeResponseOpenButton.disabled = liveView.progress === null;
   orchestratorNodePlanOpenButton.disabled = !liveView.hasExecutionPlan;
   orchestratorNodeLogOpenButton.disabled = !liveView.hasLog;
-  orchestratorNodeTerminalEl.textContent = liveView.terminal;
+  renderOrchestratorNodeTerminalTranscript(liveView.terminal, selectedNodeRenderKey);
   orchestratorNodeLogEl.textContent = liveView.log;
   orchestratorWorkingMemoryEl.textContent = buildWorkingMemoryText(selectedOrchestratorRun);
   orchestratorWorkingMemoryOpenButton.disabled = selectedOrchestratorRun === null;
@@ -3944,6 +4341,92 @@ function syncTerminalThemes(theme: ResolvedTheme) {
   for (const terminal of terminals.values()) {
     terminal.options.theme = XTERM_THEMES[theme];
   }
+  if (orchestratorNodeTerminal) {
+    orchestratorNodeTerminal.options.theme = XTERM_THEMES[theme];
+  }
+  if (interactiveSessionTerminal) {
+    interactiveSessionTerminal.options.theme = XTERM_THEMES[theme];
+  }
+}
+
+function normalizeTerminalTextForXterm(value: string): string {
+  return value.replace(/\r?\n/g, "\r\n");
+}
+
+function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal) {
+  const viewportRect = container.getBoundingClientRect();
+  const availableWidth = Math.max(viewportRect.width, 360);
+  const availableHeight = Math.max(viewportRect.height, 220);
+  const cols = Math.max(40, Math.floor(availableWidth / 9));
+  const rows = Math.max(12, Math.floor(availableHeight / 18));
+  terminal.resize(cols, rows);
+}
+
+function ensureOrchestratorNodeTerminal() {
+  if (orchestratorNodeTerminal || typeof appWindow.Terminal !== "function") {
+    return;
+  }
+
+  const terminal = new appWindow.Terminal({
+    cursorBlink: false,
+    disableStdin: true,
+    fontSize: 13,
+    theme: XTERM_THEMES[resolveTheme(themePreference)]
+  });
+  terminal.open(orchestratorNodeTerminalEl);
+  orchestratorNodeTerminal = terminal;
+  fitReadOnlyTerminal(orchestratorNodeTerminalEl, terminal);
+}
+
+function fitOrchestratorNodeTerminal() {
+  if (!orchestratorNodeTerminal) {
+    return;
+  }
+
+  fitReadOnlyTerminal(orchestratorNodeTerminalEl, orchestratorNodeTerminal);
+}
+
+function scheduleFitOrchestratorNodeTerminal() {
+  if (fitOrchestratorNodeTerminalHandle !== null) {
+    return;
+  }
+
+  fitOrchestratorNodeTerminalHandle = appWindow.requestAnimationFrame(() => {
+    fitOrchestratorNodeTerminalHandle = null;
+    fitOrchestratorNodeTerminal();
+  });
+}
+
+function renderOrchestratorNodeTerminalTranscript(content: string, renderKey: string) {
+  const previousText = orchestratorNodeTerminalText;
+  ensureOrchestratorNodeTerminal();
+
+  if (!orchestratorNodeTerminal) {
+    orchestratorNodeTerminalText = content;
+    orchestratorNodeTerminalEl.textContent = content;
+    return;
+  }
+
+  const normalizedContent = normalizeTerminalTextForXterm(content);
+  const normalizedPrevious = normalizeTerminalTextForXterm(previousText);
+  const shouldAppendOnly = renderKey === orchestratorNodeTerminalRenderKey
+    && normalizedContent.startsWith(normalizedPrevious);
+
+  if (!shouldAppendOnly) {
+    orchestratorNodeTerminal.reset();
+    if (normalizedContent.length > 0) {
+      orchestratorNodeTerminal.write(normalizedContent);
+    }
+  } else {
+    const delta = normalizedContent.slice(normalizedPrevious.length);
+    if (delta.length > 0) {
+      orchestratorNodeTerminal.write(delta);
+    }
+  }
+
+  orchestratorNodeTerminalText = content;
+  orchestratorNodeTerminalRenderKey = renderKey;
+  scheduleFitOrchestratorNodeTerminal();
 }
 
 function updateWorkspaceSummary() {
@@ -4196,6 +4679,23 @@ async function copyOrchestratorSection(
   }
 }
 
+async function copyOrchestratorTextSection(
+  titleElement: HTMLElement,
+  content: string,
+  emptyMessage: string
+) {
+  const title = titleElement.textContent?.trim() || "Clipboard";
+  const textToCopy = content.trim().length > 0 ? content : emptyMessage;
+
+  try {
+    await copyTextToClipboard(textToCopy);
+    logLocalized("logs.clipboardCopied", { title });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logLocalized("errors.failedCopyClipboard", { title, message });
+  }
+}
+
 function openLogViewer(
   titleElement: HTMLElement,
   contentElement: HTMLElement,
@@ -4208,6 +4708,18 @@ function openLogViewer(
   };
   logViewerTitleEl.textContent = titleElement.textContent?.trim() || translate("ui.logViewerTitle");
   logViewerContentEl.textContent = contentElement.textContent?.trim() || emptyMessage;
+  logViewerDialogEl.hidden = false;
+  syncDialogBodyState();
+}
+
+function openTextLogViewer(
+  titleElement: HTMLElement,
+  content: string,
+  emptyMessage: string
+) {
+  logViewerTitleEl.textContent = titleElement.textContent?.trim() || translate("ui.logViewerTitle");
+  logViewerContentEl.textContent = content.trim().length > 0 ? content : emptyMessage;
+  activeLogViewerSource = null;
   logViewerDialogEl.hidden = false;
   syncDialogBodyState();
 }
@@ -4247,7 +4759,7 @@ function setOrchestratorTransientDetail(message: string) {
   orchestratorNodeResponseOpenButton.disabled = true;
   orchestratorNodePlanOpenButton.disabled = true;
   orchestratorNodeLogOpenButton.disabled = true;
-  orchestratorNodeTerminalEl.textContent = translate("ui.orchestratorNodeTerminalEmpty");
+  renderOrchestratorNodeTerminalTranscript(translate("ui.orchestratorNodeTerminalEmpty"), "__empty__");
   orchestratorNodeLogEl.textContent = message;
   orchestratorWorkingMemoryEl.textContent = message;
   orchestratorWorkingMemoryOpenButton.disabled = true;
@@ -4265,6 +4777,7 @@ function applyThemePreference(preference: ThemePreference, persist = true) {
   document.documentElement.dataset.theme = resolvedTheme;
   updateThemeControls(preference);
   syncTerminalThemes(resolvedTheme);
+  scheduleFitOrchestratorNodeTerminal();
 
   if (persist) persistThemePreference(preference);
 }
@@ -4681,6 +5194,10 @@ function renderWorkspacePanels(focusTerminal = false) {
         terminal.focus();
       }
     }
+  }
+
+  if (showOrchestrator) {
+    scheduleFitOrchestratorNodeTerminal();
   }
 }
 
@@ -5214,6 +5731,12 @@ async function restoreSessions() {
 appWindow.tasksaw.onTerminalData(({ sessionId, data }: TerminalDataPayload) => {
   const terminal = terminals.get(sessionId);
   if (terminal) terminal.write(data);
+
+  const request = getActiveInteractiveSession();
+  if (request?.sessionId === sessionId) {
+    request.transcript = trimInteractiveTranscript(`${request.transcript}${data}`);
+    interactiveSessionTerminal?.write(data);
+  }
 });
 
 appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
@@ -5232,6 +5755,26 @@ appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
     if (pendingUserInputActionRequestId === event.payload.requestId) {
       pendingUserInputActionRequestId = null;
     }
+  }
+  if (event.type === "interactive_session_requested") {
+    queueInteractiveSessionRequest(event);
+  }
+  if (event.type === "interactive_session_resolved" && typeof event.payload.requestId === "string") {
+    pendingInteractiveSessions.delete(event.payload.requestId);
+    if (activeInteractiveSessionRequestId === event.payload.requestId) {
+      hideInteractiveSessionDialog();
+    }
+  }
+  if (
+    (event.type === "run_paused" || event.type === "run_failed" || event.type === "run_completed")
+    && getActiveInteractiveSession()?.runId === event.runId
+  ) {
+    const activeRequest = getActiveInteractiveSession();
+    if (activeRequest?.sessionId && !activeRequest.exited) {
+      appWindow.tasksaw.killSession(activeRequest.sessionId);
+    }
+    pendingInteractiveSessions.delete(activeRequest?.requestId ?? "");
+    hideInteractiveSessionDialog();
   }
 
   if (!liveOrchestratorRunId && isOrchestratorRunning) {
@@ -5273,13 +5816,23 @@ appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
 });
 
 appWindow.tasksaw.onTerminalExit(({ sessionId, exitCode, signal }: TerminalExitPayload) => {
-  if (!terminalPanes.has(sessionId)) return;
-  markSessionExited(sessionId);
-  logLocalized("logs.exited", {
-    sessionId,
-    exitCode: String(exitCode),
-    signal: String(signal)
-  });
+  const activeRequest = getActiveInteractiveSession();
+  if (activeRequest?.sessionId === sessionId) {
+    activeRequest.exited = true;
+    activeRequest.exitCode = exitCode;
+    activeRequest.signal = signal;
+    renderInteractiveSessionDialog();
+    void finalizeInteractiveSession(activeRequest.requestId);
+  }
+
+  if (terminalPanes.has(sessionId)) {
+    markSessionExited(sessionId);
+    logLocalized("logs.exited", {
+      sessionId,
+      exitCode: String(exitCode),
+      signal: String(signal)
+    });
+  }
 });
 
 workspaceOpenButton.addEventListener("click", () => void browseWorkspace());
@@ -5326,16 +5879,16 @@ orchestratorNodePlanOpenButton.addEventListener("click", () => {
   );
 });
 orchestratorNodeTerminalCopyButton.addEventListener("click", () => {
-  void copyOrchestratorSection(
+  void copyOrchestratorTextSection(
     orchestratorNodeTerminalTitleEl,
-    orchestratorNodeTerminalEl,
+    orchestratorNodeTerminalText,
     translate("ui.orchestratorNodeTerminalEmpty")
   );
 });
 orchestratorNodeTerminalOpenButton.addEventListener("click", () => {
-  openLogViewer(
+  openTextLogViewer(
     orchestratorNodeTerminalTitleEl,
-    orchestratorNodeTerminalEl,
+    orchestratorNodeTerminalText,
     translate("ui.orchestratorNodeTerminalEmpty")
   );
 });
@@ -5451,9 +6004,21 @@ appWindow.addEventListener("resize", () => {
   syncMainSplitterLayout();
   updateMainSplitterAria();
   scheduleFitAllSessions();
+  scheduleFitOrchestratorNodeTerminal();
+  scheduleFitInteractiveSessionTerminal();
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !interactiveSessionDialogEl.hidden) {
+    event.preventDefault();
+    if (!interactiveSessionDialogTerminateButton.hidden) {
+      void terminateActiveInteractiveSession();
+    } else {
+      hideInteractiveSessionDialog();
+    }
+    return;
+  }
+
   if (event.key === "Escape" && !approvalDialogEl.hidden) {
     event.preventDefault();
     closeApprovalDialog();
@@ -5464,6 +6029,14 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     closeLogViewer();
   }
+});
+
+interactiveSessionDialogTerminateButton.addEventListener("click", () => {
+  void terminateActiveInteractiveSession();
+});
+
+interactiveSessionDialogCloseButton.addEventListener("click", () => {
+  hideInteractiveSessionDialog();
 });
 
 restoreSessions().catch((error: unknown) => {

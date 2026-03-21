@@ -2,6 +2,8 @@ import { BrowserWindow, dialog, ipcMain } from "electron";
 import {
   OrchestratorApprovalDecision,
   OrchestratorApprovalRequest,
+  OrchestratorInteractiveSessionRequest,
+  OrchestratorInteractiveSessionResponse,
   OrchestratorUserInputRequest,
   OrchestratorUserInputResponse,
   OrchestratorRunCancelledError,
@@ -14,6 +16,7 @@ import {
   DirectoryDialogOptions,
   ManagedToolId,
   RespondOrchestratorApprovalInput,
+  RespondOrchestratorInteractiveSessionInput,
   RespondOrchestratorUserInputInput,
   RunOrchestratorInput
 } from "./types";
@@ -39,6 +42,14 @@ export function registerIpc(
     string,
     {
       resolve: (response: OrchestratorUserInputResponse) => void;
+      reject: (error: Error) => void;
+      abortSignal: AbortSignal;
+    }
+  >();
+  const pendingInteractiveSessionRequests = new Map<
+    string,
+    {
+      resolve: (response: OrchestratorInteractiveSessionResponse) => void;
       reject: (error: Error) => void;
       abortSignal: AbortSignal;
     }
@@ -173,6 +184,40 @@ export function registerIpc(
     });
   };
 
+  const requestInteractiveSession = async (
+    request: OrchestratorInteractiveSessionRequest
+  ): Promise<OrchestratorInteractiveSessionResponse> => {
+    if (request.abortSignal.aborted) {
+      throw request.abortSignal.reason instanceof Error
+        ? request.abortSignal.reason
+        : new Error("Interactive session request was aborted");
+    }
+
+    return new Promise<OrchestratorInteractiveSessionResponse>((resolve, reject) => {
+      const onAbort = () => {
+        pendingInteractiveSessionRequests.delete(request.requestId);
+        reject(
+          request.abortSignal.reason instanceof Error
+            ? request.abortSignal.reason
+            : new Error("Interactive session request was aborted")
+        );
+      };
+
+      pendingInteractiveSessionRequests.set(request.requestId, {
+        resolve: (response) => {
+          request.abortSignal.removeEventListener("abort", onAbort);
+          resolve(response);
+        },
+        reject: (error) => {
+          request.abortSignal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+        abortSignal: request.abortSignal
+      });
+      request.abortSignal.addEventListener("abort", onAbort, { once: true });
+    });
+  };
+
   ipcMain.handle("session:create", async (_event, input: CreateSessionInput) => {
     return ptyManager.createSession(input);
   });
@@ -237,7 +282,8 @@ export function registerIpc(
           },
           forwardOrchestratorEvent,
           requestUserApproval,
-          requestUserInput
+          requestUserInput,
+          requestInteractiveSession
         )
       };
     } catch (error) {
@@ -297,6 +343,26 @@ export function registerIpc(
     );
     return true;
   });
+
+  ipcMain.handle(
+    "orchestrator:respond-interactive-session",
+    async (_event, input: RespondOrchestratorInteractiveSessionInput) => {
+      const pending = pendingInteractiveSessionRequests.get(input.requestId);
+      if (!pending) {
+        return false;
+      }
+
+      pendingInteractiveSessionRequests.delete(input.requestId);
+      pending.resolve({
+        outcome: input.outcome,
+        sessionId: input.sessionId ?? null,
+        exitCode: input.exitCode ?? null,
+        signal: input.signal ?? null,
+        transcript: input.transcript ?? undefined
+      });
+      return true;
+    }
+  );
 
   ipcMain.handle("orchestrator:list", async () => {
     return orchestratorService.listRuns();

@@ -1154,6 +1154,139 @@ test("gemini ACP invoker cuts off repeated managed CLI variants earlier within t
   );
 });
 
+test("gemini ACP invoker hands interactive managed CLI commands off to a modal session instead of approving them", async () => {
+  const fakeChild = new FakeChildProcess();
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+  let approvalRequestCount = 0;
+  let interactiveSessionCount = 0;
+  let outcome = "";
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const decision = await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "./managed-tools/bin/gemini /stats model --json || ./managed-tools/bin/gemini -p \"/stats model\" -o json",
+                  kind: "execute"
+                }
+              });
+              outcome = decision.outcome.outcome;
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Interactive CLI was handed off",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    requestInteractiveSession: async (request) => {
+      interactiveSessionCount += 1;
+      assert.match(request.commandText, /\/stats model/);
+      return {
+        outcome: "terminated",
+        sessionId: "interactive-session-1",
+        exitCode: 130,
+        signal: 15,
+        transcript: "interactive gemini session\n"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Interactive CLI was handed off");
+  assert.equal(outcome, "cancelled");
+  assert.equal(approvalRequestCount, 0);
+  assert.equal(interactiveSessionCount, 1);
+  assert.equal(
+    progressMessages.some((entry) => entry.message === "Opening modal interactive session for CLI tool call"),
+    true
+  );
+});
+
 test("gemini ACP invoker waits for prompt completion instead of timing out", async () => {
   const fakeChild = new FakeChildProcess();
 

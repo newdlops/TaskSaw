@@ -65,12 +65,13 @@ export class PtyManager {
       const info: SessionInfo = {
         id,
         kind: input.kind,
-        title: this.makeTitle(input.kind),
-        cwd: workspaceDirectory
+        title: input.title?.trim() || this.makeTitle(input.kind),
+        cwd: workspaceDirectory,
+        hidden: input.hidden === true
       };
 
       const sessionEnv = this.buildSessionEnv(sessionPaths);
-      const { command, args, env: launchEnv } = await this.resolveCommand(input.kind, sessionEnv, sessionPaths);
+      const { command, args, env: launchEnv } = await this.resolveCommand(input, sessionEnv, sessionPaths);
       const ptyProcess = pty.spawn(command, args, {
         name: "xterm-256color",
         cols: 120,
@@ -125,7 +126,9 @@ export class PtyManager {
   }
 
   listSessions(): SessionInfo[] {
-    return [...this.sessions.values()].map((session) => session.info);
+    return [...this.sessions.values()]
+      .map((session) => session.info)
+      .filter((session) => session.hidden !== true);
   }
 
   write(sessionId: string, data: string) {
@@ -326,10 +329,16 @@ export class PtyManager {
   }
 
   private resolveCommand(
-    kind: SessionKind,
+    input: CreateSessionInput,
     env: Record<string, string>,
     sessionPaths: SessionPaths
   ): Promise<{ command: string; args: string[]; env: Record<string, string> }> | { command: string; args: string[]; env: Record<string, string> } {
+    const commandText = input.commandText?.trim();
+    if (commandText) {
+      return this.resolveCustomShellCommand(commandText, env, sessionPaths);
+    }
+
+    const kind = input.kind;
     if (kind === "codex" || kind === "gemini") {
       return this.resolveManagedToolCommand(kind, env, sessionPaths);
     }
@@ -339,6 +348,36 @@ export class PtyManager {
 
     if (os.platform() !== "darwin") {
       return { command: shell, args: shellArgs, env };
+    }
+
+    const sandboxCommand = this.resolveExecutable("/usr/bin/sandbox-exec", env)
+      ?? this.resolveExecutable("sandbox-exec", env);
+
+    if (!sandboxCommand) {
+      throw new Error("macOS workspace sandbox is unavailable on this system");
+    }
+
+    return {
+      command: sandboxCommand,
+      args: ["-f", sessionPaths.sandboxProfilePath, shell, ...shellArgs],
+      env
+    };
+  }
+
+  private resolveCustomShellCommand(
+    commandText: string,
+    env: Record<string, string>,
+    sessionPaths: SessionPaths
+  ): { command: string; args: string[]; env: Record<string, string> } {
+    const shell = this.resolveShellCommand(env);
+    const shellArgs = ["-lc", commandText];
+
+    if (os.platform() !== "darwin") {
+      return {
+        command: shell,
+        args: shellArgs,
+        env
+      };
     }
 
     const sandboxCommand = this.resolveExecutable("/usr/bin/sandbox-exec", env)

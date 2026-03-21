@@ -217,7 +217,7 @@
                             <button id="orchestrator-node-terminal-copy" class="orchestrator-copy-button" type="button">Copy</button>
                           </div>
                         </div>
-                        <pre id="orchestrator-node-terminal"></pre>
+                        <div id="orchestrator-node-terminal" class="terminal-viewport orchestrator-node-terminal-viewport"></div>
                       </section>
                     </div>
                   </div>
@@ -299,6 +299,22 @@
     <div id="approval-dialog-message" class="orchestrator-node-approval-message"></div>
     <pre id="approval-dialog-details" class="orchestrator-node-approval-details"></pre>
     <div id="approval-dialog-actions" class="orchestrator-card-actions orchestrator-node-approval-actions"></div>
+  </div>
+</div>
+
+<div id="interactive-session-dialog" class="session-dialog" hidden>
+  <div class="session-dialog-card interactive-session-dialog-card">
+    <div class="orchestrator-detail-header">
+      <div id="interactive-session-dialog-title" class="section-title">Interactive Session</div>
+      <div class="orchestrator-card-actions">
+        <span id="interactive-session-dialog-status" class="orchestrator-node-approval-status">Starting</span>
+        <button id="interactive-session-dialog-terminate" class="orchestrator-copy-button" type="button">Terminate</button>
+        <button id="interactive-session-dialog-close" class="orchestrator-copy-button" type="button" hidden>Close</button>
+      </div>
+    </div>
+    <div id="interactive-session-dialog-message" class="session-dialog-copy"></div>
+    <pre id="interactive-session-dialog-command" class="orchestrator-node-approval-details interactive-session-dialog-command"></pre>
+    <div id="interactive-session-dialog-terminal" class="terminal-viewport interactive-session-dialog-terminal"></div>
   </div>
 </div>
 

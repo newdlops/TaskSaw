@@ -83,6 +83,7 @@ type GeminiPromptRuntime = {
   capability: OrchestratorCapability;
   agentMessageChunks: string[];
   workspaceRoot: string;
+  reportTerminalChunk?: (stream: "system" | "stdout" | "stderr", text: string) => void;
   touchActivity: () => void;
   pauseActivity: () => void;
   resumeActivity: () => void;
@@ -213,6 +214,7 @@ class TasksawGeminiAcpClient {
     ) {
       runtime.touchActivity();
       runtime.agentMessageChunks.push(update.content.text);
+      runtime.reportTerminalChunk?.("stdout", update.content.text);
     }
 
     return undefined;
@@ -326,6 +328,10 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
         const desiredModeId = resolveDesiredModeId(capability);
 
         try {
+          context.reportTerminalEvent?.({
+            stream: "system",
+            text: `$ ${formatTerminalCommand(command)}\n`
+          });
           const session = await ensureSession(context.abortSignal);
           await ensureSessionMode(session, desiredModeId, context.abortSignal, capability, context.workflowStage);
           const stderrStartIndex = session.stderrBuffer().length;
@@ -367,6 +373,12 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
             capability,
             agentMessageChunks,
             workspaceRoot,
+            reportTerminalChunk: (stream, text) => {
+              context.reportTerminalEvent?.({
+                stream,
+                text
+              });
+            },
             touchActivity: () => promptActivity.touch(),
             pauseActivity: () => promptActivity.pause(),
             resumeActivity: () => promptActivity.resume(),
@@ -444,6 +456,49 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 );
                 promptActivity.touch();
                 return decision;
+              }
+
+              const interactiveSessionCommand = getInteractiveSessionHandoffCommand(permissionRequest.toolCall);
+              if (interactiveSessionCommand && context.requestInteractiveSession) {
+                context.reportProgress?.(
+                  "Opening modal interactive session for CLI tool call",
+                  {
+                    capability,
+                    model: modelId,
+                    toolCall: toolCallSummary ?? null
+                  }
+                );
+                promptActivity.pause();
+                try {
+                  const response = await context.requestInteractiveSession({
+                    abortSignal: context.abortSignal,
+                    title: permissionRequest.toolCall?.title?.trim() || undefined,
+                    message: buildInteractiveSessionRequestMessage(context.outputLanguage),
+                    commandText: interactiveSessionCommand,
+                    cwd: workspaceRoot
+                  });
+                  context.reportProgress?.(
+                    response.outcome === "completed"
+                      ? "Interactive CLI session completed; original Gemini tool call was cancelled to avoid hanging the ACP run"
+                      : response.outcome === "terminated"
+                        ? "Interactive CLI session was terminated; original Gemini tool call was cancelled"
+                        : "Interactive CLI session was cancelled; original Gemini tool call was cancelled",
+                    {
+                      capability,
+                      model: modelId,
+                      toolCall: toolCallSummary ?? null,
+                      sessionId: response.sessionId ?? null,
+                      exitCode: response.exitCode ?? null,
+                      signal: response.signal ?? null
+                    }
+                  );
+                  return {
+                    outcome: "cancelled"
+                  };
+                } finally {
+                  promptActivity.resume();
+                  promptActivity.touch();
+                }
               }
 
               if (!context.requestUserApproval) {
@@ -638,10 +693,12 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
 
     let stderrBuffer = "";
     child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderrBuffer += chunk.toString();
+      const text = chunk.toString();
+      stderrBuffer += text;
       if (stderrBuffer.length > 8_000) {
         stderrBuffer = stderrBuffer.slice(-8_000);
       }
+      activeRuntime?.reportTerminalChunk?.("stderr", text);
     });
 
     try {
@@ -767,6 +824,12 @@ function describePermissionOption(kind: string | undefined): string | undefined 
   return kind
     .replaceAll("_", " ")
     .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function formatTerminalCommand(command: string[]): string {
+  return command
+    .map((part) => (/^[a-zA-Z0-9._/:=@-]+$/.test(part) ? part : JSON.stringify(part)))
+    .join(" ");
 }
 
 function buildPermissionRequestMessage(capability: OrchestratorCapability, modelId: string): string {
@@ -1311,6 +1374,72 @@ function buildCommandFamilyKey(commandText: string): string | null {
   }
 
   return normalizeShellLikeText([commandName, ...argumentTerms].join(" "));
+}
+
+function getInteractiveSessionHandoffCommand(toolCall: {
+  title?: string;
+  kind?: string;
+  content?: Array<
+    | {
+      type?: string;
+      path?: string;
+      oldText?: string;
+      newText?: string;
+    }
+    | {
+      type?: string;
+      content?: {
+        type?: string;
+        text?: string;
+      };
+    }
+  >;
+} | undefined): string | null {
+  if (toolCall?.kind?.trim() !== "execute") {
+    return null;
+  }
+
+  const commandText = buildExecuteToolCallFingerprint(toolCall);
+  if (!commandText) {
+    return null;
+  }
+
+  return looksLikeInteractiveCliCommand(commandText) ? commandText : null;
+}
+
+function looksLikeInteractiveCliCommand(commandText: string): boolean {
+  const normalizedCommandText = normalizeShellLikeText(commandText).toLowerCase();
+  const commandName = extractPrimaryCommandName(normalizedCommandText);
+  if (!commandName) {
+    return false;
+  }
+
+  if (!EXTERNAL_TOOL_SURFACE_COMMANDS.has(path.basename(commandName).toLowerCase())) {
+    return false;
+  }
+
+  if (/(?:^|\s)\/[a-z][\w-]*/i.test(normalizedCommandText)) {
+    return true;
+  }
+
+  if (/\b(?:-p|--prompt)\b/i.test(normalizedCommandText)) {
+    return true;
+  }
+
+  if (
+    tokenizeCommandText(normalizedCommandText).some((token) => isShellOperatorToken(token))
+    && /\b(?:-p|--prompt)\b|(?:^|\s)\/[a-z][\w-]*/i.test(normalizedCommandText)
+  ) {
+    return true;
+  }
+
+  return /\b(?:login|auth)\b(?!\s+(?:status|--help|-h)\b)/i.test(normalizedCommandText);
+}
+
+function buildInteractiveSessionRequestMessage(outputLanguage: ModelInvocationContext["outputLanguage"]): string {
+  return outputLanguage === "ko"
+    ? "이 CLI 명령은 대화형 입력을 요구할 수 있습니다. TaskSaw가 모달 세션을 열었으니 입력을 완료하거나 세션을 종료하면 오케스트레이터가 이어집니다."
+    : "This CLI command may require interactive input. TaskSaw opened a modal session; complete the interaction or terminate the session to resume orchestration.";
 }
 
 function extractPrimaryCommandName(commandText: string): string | null {

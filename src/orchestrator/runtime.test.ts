@@ -27,8 +27,8 @@ class MockAdapter implements OrchestratorModelAdapter {
       gather: (context: ModelInvocationContext) => GatherResult;
       concretePlan: (evidenceCount: number, factCount: number, context: ModelInvocationContext) => ConcretePlanResult;
       review: () => ReviewResult;
-      execute: () => ExecuteResult;
-      verify: () => VerifyResult;
+      execute: (context: ModelInvocationContext) => ExecuteResult | Promise<ExecuteResult>;
+      verify: (context: ModelInvocationContext) => VerifyResult | Promise<VerifyResult>;
     }>,
     private readonly trace: string[]
   ) {}
@@ -73,17 +73,17 @@ class MockAdapter implements OrchestratorModelAdapter {
     };
   }
 
-  async execute() {
+  async execute(context: Parameters<NonNullable<OrchestratorModelAdapter["execute"]>>[0]) {
     this.trace.push(`execute:${this.model.id}`);
-    return this.handlers.execute?.() ?? {
+    return await this.handlers.execute?.(context) ?? {
       summary: "Execute complete",
       outputs: ["output"]
     };
   }
 
-  async verify() {
+  async verify(context: Parameters<NonNullable<OrchestratorModelAdapter["verify"]>>[0]) {
     this.trace.push(`verify:${this.model.id}`);
-    return this.handlers.verify?.() ?? {
+    return await this.handlers.verify?.(context) ?? {
       summary: "Verification passed",
       passed: true,
       findings: []
@@ -338,6 +338,231 @@ test("runtime executes the minimal happy path and propagates evidence into plann
     "Confirm evidence bundle schema",
     "How should real adapters stream partial output?"
   ]);
+});
+
+test("runtime persists terminal output events emitted by adapters", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const abstractPlanner: ModelRef = {
+    id: "terminal-planner",
+    provider: "mock",
+    model: "terminal-planner",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "terminal-gatherer",
+    provider: "mock",
+    model: "terminal-gatherer",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const concretePlanner: ModelRef = {
+    id: "terminal-concrete",
+    provider: "mock",
+    model: "terminal-concrete",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const executor: ModelRef = {
+    id: "terminal-executor",
+    provider: "mock",
+    model: "terminal-executor",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const verifier: ModelRef = {
+    id: "terminal-verifier",
+    provider: "mock",
+    model: "terminal-verifier",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+
+  registry.register(new MockAdapter(abstractPlanner, new Set(["abstractPlan"]), {}, trace));
+  registry.register(new MockAdapter(gatherer, new Set(["gather"]), {}, trace));
+  registry.register(new MockAdapter(concretePlanner, new Set(["concretePlan"]), {}, trace));
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: (context) => {
+          context.reportTerminalEvent?.({
+            stream: "system",
+            text: "$ echo hello\n"
+          });
+          context.reportTerminalEvent?.({
+            stream: "stdout",
+            text: "hello\n"
+          });
+          return {
+            summary: "Executed with terminal output",
+            outputs: ["hello"]
+          };
+        }
+      },
+      trace
+    )
+  );
+  registry.register(new MockAdapter(verifier, new Set(["verify"]), {}, trace));
+
+  const runtime = new OrchestratorRuntime(registry, {
+    persistence: {
+      saveSnapshot() {
+        // no-op
+      }
+    } as never
+  });
+
+  const result = await runtime.executeHappyPath({
+    goal: "Capture node terminal output",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner,
+      gatherer,
+      concretePlanner,
+      executor,
+      verifier
+    },
+    acceptanceCriteria: {
+      items: [
+        {
+          id: "terminal-events-recorded",
+          description: "Terminal output is persisted on the execution node",
+          required: true,
+          status: "pending"
+        }
+      ]
+    }
+  });
+
+  const terminalEvents = result.snapshot.events.filter((event) => event.type === "terminal_output");
+  assert.equal(terminalEvents.length, 2);
+  assert.equal(terminalEvents[0]?.payload.stream, "system");
+  assert.equal(terminalEvents[1]?.payload.stream, "stdout");
+  assert.match(String(terminalEvents[1]?.payload.text ?? ""), /hello/);
+  assert.equal(terminalEvents[0]?.nodeId, terminalEvents[1]?.nodeId);
+  assert.equal(typeof terminalEvents[0]?.payload.sessionId, "string");
+});
+
+test("runtime routes interactive session requests through the handler and records the transcript", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const abstractPlanner: ModelRef = {
+    id: "interactive-planner",
+    provider: "mock",
+    model: "interactive-planner",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "interactive-gatherer",
+    provider: "mock",
+    model: "interactive-gatherer",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const concretePlanner: ModelRef = {
+    id: "interactive-concrete",
+    provider: "mock",
+    model: "interactive-concrete",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const executor: ModelRef = {
+    id: "interactive-executor",
+    provider: "mock",
+    model: "interactive-executor",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const verifier: ModelRef = {
+    id: "interactive-verifier",
+    provider: "mock",
+    model: "interactive-verifier",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+
+  registry.register(new MockAdapter(abstractPlanner, new Set(["abstractPlan"]), {}, trace));
+  registry.register(new MockAdapter(gatherer, new Set(["gather"]), {}, trace));
+  registry.register(new MockAdapter(concretePlanner, new Set(["concretePlan"]), {}, trace));
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: async (context) => {
+          const response = await context.requestInteractiveSession?.({
+            abortSignal: context.abortSignal,
+            title: "Interactive Gemini stats probe",
+            message: "Open a modal PTY for the Gemini stats command",
+            commandText: "./managed-tools/bin/gemini -p \"/stats model\" -o json",
+            cwd: "/workspace/demo"
+          });
+
+          return {
+            summary: `Interactive session outcome: ${response?.outcome ?? "none"}`,
+            outputs: [response?.transcript ?? ""]
+          };
+        }
+      },
+      trace
+    )
+  );
+  registry.register(new MockAdapter(verifier, new Set(["verify"]), {}, trace));
+
+  const interactiveRequests: string[] = [];
+  const runtime = new OrchestratorRuntime(registry, {
+    requestInteractiveSession: async (request) => {
+      interactiveRequests.push(request.commandText);
+      return {
+        outcome: "terminated",
+        sessionId: "interactive-session-1",
+        exitCode: 130,
+        signal: 15,
+        transcript: "gemini interactive prompt\ncancelled by user\n"
+      };
+    }
+  });
+
+  const result = await runtime.executeHappyPath({
+    goal: "Handle interactive CLI session handoff",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner,
+      gatherer,
+      concretePlanner,
+      executor,
+      verifier
+    },
+    acceptanceCriteria: {
+      items: [
+        {
+          id: "interactive-session-recorded",
+          description: "Interactive session handoff is recorded",
+          required: true,
+          status: "pending"
+        }
+      ]
+    }
+  });
+
+  assert.deepEqual(interactiveRequests, ["./managed-tools/bin/gemini -p \"/stats model\" -o json"]);
+  const requestEvent = result.snapshot.events.find((event) => event.type === "interactive_session_requested");
+  const resolvedEvent = result.snapshot.events.find((event) => event.type === "interactive_session_resolved");
+  assert.equal(requestEvent?.payload.commandText, "./managed-tools/bin/gemini -p \"/stats model\" -o json");
+  assert.equal(resolvedEvent?.payload.outcome, "terminated");
+  assert.equal(resolvedEvent?.payload.sessionId, "interactive-session-1");
+
+  const terminalEvents = result.snapshot.events.filter((event) => event.type === "terminal_output");
+  assert.equal(
+    terminalEvents.some((event) => String(event.payload.text ?? "").includes("gemini interactive prompt")),
+    true
+  );
 });
 
 test("runtime runs a focused replan and regather loop when concrete planning requests narrower evidence", async () => {

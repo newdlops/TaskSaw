@@ -92,8 +92,45 @@ export type OrchestratorUserInputResponse = {
   answers?: Record<string, string[]>;
 };
 
+export type OrchestratorInteractiveSessionRequest = {
+  requestId: string;
+  runId: string;
+  nodeId: string;
+  capability: OrchestratorCapability;
+  provider: string;
+  model: string;
+  title?: string;
+  message: string;
+  commandText: string;
+  cwd: string;
+  createdAt: string;
+  abortSignal: AbortSignal;
+};
+
+export type OrchestratorInteractiveSessionResponse = {
+  outcome: "completed" | "terminated" | "cancelled";
+  sessionId?: string | null;
+  exitCode?: number | null;
+  signal?: number | null;
+  transcript?: string;
+};
+
+export type OrchestratorTerminalStream = "system" | "stdout" | "stderr" | "input";
+
+export type OrchestratorTerminalEventDraft = {
+  sessionId?: string;
+  title?: string;
+  stream?: OrchestratorTerminalStream;
+  text: string;
+};
+
 export type OrchestratorUserInputRequestDraft = Omit<
   OrchestratorUserInputRequest,
+  "requestId" | "runId" | "nodeId" | "capability" | "provider" | "model" | "createdAt"
+>;
+
+export type OrchestratorInteractiveSessionRequestDraft = Omit<
+  OrchestratorInteractiveSessionRequest,
   "requestId" | "runId" | "nodeId" | "capability" | "provider" | "model" | "createdAt"
 >;
 
@@ -110,10 +147,16 @@ export type ModelInvocationContext = {
   workingMemory: WorkingMemorySnapshot;
   projectStructure: ProjectStructureSnapshot;
   evidenceBundles: EvidenceBundle[];
+  terminalSessionId?: string;
+  terminalSessionTitle?: string;
   requestUserApproval?: (request: OrchestratorApprovalRequestDraft) => Promise<OrchestratorApprovalDecision>;
   requestUserInput?: (request: OrchestratorUserInputRequestDraft) => Promise<OrchestratorUserInputResponse>;
+  requestInteractiveSession?: (
+    request: OrchestratorInteractiveSessionRequestDraft
+  ) => Promise<OrchestratorInteractiveSessionResponse>;
   reportProgress?: (message: string, details?: Record<string, unknown>) => void;
   reportExecutionStatus?: (state: string, message: string, details?: Record<string, unknown>) => void;
+  reportTerminalEvent?: (event: OrchestratorTerminalEventDraft) => void;
 };
 
 export type AbstractPlanResult = {

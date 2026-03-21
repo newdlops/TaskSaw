@@ -1132,7 +1132,6 @@ body[data-has-sessions="false"] #sidebar {
   font-size: 11px;
 }
 
-#orchestrator-node-terminal,
 #orchestrator-node-log,
 #orchestrator-log {
   min-height: 0;
@@ -1154,11 +1153,16 @@ body[data-has-sessions="false"] #sidebar {
 
 #orchestrator-node-terminal {
   min-height: 280px;
-  padding-bottom: 20px;
+  padding: 10px 12px;
   background: #111827;
-  color: #d1fae5;
   border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
-  font-family: "SFMono-Regular", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  overflow: hidden;
+}
+
+#orchestrator-node-terminal .xterm,
+#orchestrator-node-terminal .xterm-viewport,
+#orchestrator-node-terminal .xterm-screen {
+  height: 100%;
 }
 
 .orchestrator-tree-node.role-stage {
@@ -1734,6 +1738,28 @@ body[data-has-sessions="false"] #sidebar {
   max-height: min(82vh, 920px);
   grid-template-rows: auto minmax(0, 160px) minmax(0, 1fr) minmax(0, 1.25fr) auto;
   min-height: 0;
+}
+
+.interactive-session-dialog-card {
+  width: min(1180px, 100%);
+  max-height: min(86vh, 960px);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.interactive-session-dialog-command {
+  margin: 0;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.interactive-session-dialog-terminal {
+  min-height: 0;
+  height: min(60vh, 680px);
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: rgba(2, 6, 23, 0.92);
+  overflow: hidden;
 }
 
 .approval-dialog-list {

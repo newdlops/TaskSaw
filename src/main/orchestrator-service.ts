@@ -11,6 +11,8 @@ import {
   ModelAdapterRegistry,
   OrchestratorApprovalDecision,
   OrchestratorApprovalRequest,
+  OrchestratorInteractiveSessionRequest,
+  OrchestratorInteractiveSessionResponse,
   OrchestratorUserInputRequest,
   OrchestratorUserInputResponse,
   ModelRef,
@@ -96,7 +98,10 @@ export class OrchestratorService {
     input: RunOrchestratorInput,
     onEvent?: (event: OrchestratorEvent) => void,
     requestUserApproval?: (request: OrchestratorApprovalRequest) => Promise<OrchestratorApprovalDecision>,
-    requestUserInput?: (request: OrchestratorUserInputRequest) => Promise<OrchestratorUserInputResponse>
+    requestUserInput?: (request: OrchestratorUserInputRequest) => Promise<OrchestratorUserInputResponse>,
+    requestInteractiveSession?: (
+      request: OrchestratorInteractiveSessionRequest
+    ) => Promise<OrchestratorInteractiveSessionResponse>
   ): Promise<RunSnapshot> {
     const workspacePath = input.workspacePath?.trim();
     if (!workspacePath) {
@@ -119,6 +124,7 @@ export class OrchestratorService {
       enableRootBootstrapSketch: true,
       requestUserApproval,
       requestUserInput,
+      requestInteractiveSession,
       onEvent: (event) => {
         if (!activeRunId) {
           activeRunId = event.runId;

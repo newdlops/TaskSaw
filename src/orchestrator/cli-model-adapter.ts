@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { buildCliPrompt } from "./cli-prompt";
 import { findUnresolvedSuccessSignal } from "./execution-guardrails";
 import {
@@ -160,7 +160,9 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
       command,
       prompt: activePrompt,
       rawStdout: stdout,
-      rawStderr: stderr
+      rawStderr: stderr,
+      terminalSessionId: context.terminalSessionId,
+      terminalSessionTitle: context.terminalSessionTitle
     };
     return parsed;
   }
@@ -185,7 +187,12 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
 
     const { args, env } = this.buildCommand(capability, prompt, context);
     const command = [this.executablePath, ...args];
-    const result = await execFileWithSignal(this.executablePath, args, {
+    const displayCommand = [this.executablePath, ...args.map((arg) => (arg === prompt ? "<prompt>" : arg))];
+    context.reportTerminalEvent?.({
+      stream: "system",
+      text: `$ ${formatTerminalCommand(displayCommand)}\n`
+    });
+    const result = await spawnFileWithSignal(this.executablePath, args, {
       cwd: this.cwd,
       env: {
         ...process.env,
@@ -193,7 +200,19 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
       },
       signal: context.abortSignal,
       timeout: this.timeoutMs,
-      maxBuffer: 1024 * 1024 * 8
+      maxBuffer: 1024 * 1024 * 8,
+      onStdout: (text) => {
+        context.reportTerminalEvent?.({
+          stream: "stdout",
+          text
+        });
+      },
+      onStderr: (text) => {
+        context.reportTerminalEvent?.({
+          stream: "stderr",
+          text
+        });
+      }
     });
     return {
       stdout: result.stdout,
@@ -873,7 +892,13 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
   }
 }
 
-function execFileWithSignal(
+function formatTerminalCommand(command: string[]): string {
+  return command
+    .map((part) => (/^[a-zA-Z0-9._/:=@-]+$/.test(part) ? part : JSON.stringify(part)))
+    .join(" ");
+}
+
+function spawnFileWithSignal(
   executablePath: string,
   args: string[],
   options: {
@@ -882,23 +907,115 @@ function execFileWithSignal(
     signal: AbortSignal;
     timeout: number;
     maxBuffer: number;
+    onStdout?: (text: string) => void;
+    onStderr?: (text: string) => void;
   }
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = execFile(executablePath, args, options, (error, stdout, stderr) => {
+    const child = spawn(executablePath, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timeoutHandle: NodeJS.Timeout | null = null;
+    let killTimerHandle: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+      if (killTimerHandle) {
+        clearTimeout(killTimerHandle);
+        killTimerHandle = null;
+      }
+      options.signal.removeEventListener("abort", handleAbort);
+    };
+
+    const finish = (error?: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
       if (error) {
         reject(error);
         return;
       }
+      resolve({ stdout, stderr });
+    };
 
-      resolve({
-        stdout,
-        stderr
-      });
-    });
+    const killChild = () => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGTERM");
+        killTimerHandle = setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) {
+            child.kill("SIGKILL");
+          }
+        }, 1_000);
+      }
+    };
+
+    const appendOutput = (
+      streamName: "stdout" | "stderr",
+      chunk: Buffer | string
+    ) => {
+      const text = chunk.toString();
+      if (streamName === "stdout") {
+        stdout += text;
+        options.onStdout?.(text);
+        if (stdout.length > options.maxBuffer) {
+          finish(new Error(`Process stdout exceeded maxBuffer=${options.maxBuffer}`));
+          killChild();
+        }
+        return;
+      }
+
+      stderr += text;
+      options.onStderr?.(text);
+      if (stderr.length > options.maxBuffer) {
+        finish(new Error(`Process stderr exceeded maxBuffer=${options.maxBuffer}`));
+        killChild();
+      }
+    };
+
+    const handleAbort = () => {
+      killChild();
+      finish(new Error("CLI invocation was aborted"));
+    };
 
     if (options.signal.aborted) {
-      child.kill("SIGTERM");
+      handleAbort();
+      return;
     }
+
+    options.signal.addEventListener("abort", handleAbort, { once: true });
+
+    child.stdout?.on("data", (chunk: Buffer | string) => {
+      appendOutput("stdout", chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      appendOutput("stderr", chunk);
+    });
+
+    child.once("error", (error) => {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    });
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        finish();
+        return;
+      }
+
+      finish(new Error(`CLI process exited with code=${code ?? "null"} signal=${signal ?? "null"}`));
+    });
+
+    timeoutHandle = setTimeout(() => {
+      killChild();
+      finish(new Error(`CLI invocation timed out after ${options.timeout}ms`));
+    }, options.timeout);
   });
 }

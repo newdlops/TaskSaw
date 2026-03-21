@@ -70,6 +70,10 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
     context: ModelInvocationContext
   ): Promise<{ stdout: string; stderr: string; command: string[] }> => {
     const command = [options.executablePath, ...options.executableArgs, "app-server"];
+    context.reportTerminalEvent?.({
+      stream: "system",
+      text: `$ ${formatTerminalCommand(command)}\n`
+    });
     const workingDirectory = options.cwd ?? process.cwd();
     const child = spawnProcess(options.executablePath, [...options.executableArgs, "app-server"], {
       cwd: options.cwd,
@@ -82,10 +86,15 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
 
     let stderrBuffer = "";
     child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderrBuffer += chunk.toString();
+      const text = chunk.toString();
+      stderrBuffer += text;
       if (stderrBuffer.length > 8_000) {
         stderrBuffer = stderrBuffer.slice(-8_000);
       }
+      context.reportTerminalEvent?.({
+        stream: "stderr",
+        text
+      });
     });
 
     const stdin = child.stdin;
@@ -166,6 +175,10 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
         const delta = readString(params.delta);
         if (delta) {
           agentMessageChunks.push(delta);
+          context.reportTerminalEvent?.({
+            stream: "stdout",
+            text: delta
+          });
         }
         return;
       }
@@ -174,6 +187,10 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
         const delta = readString(params.delta);
         if (delta) {
           context.reportExecutionStatus?.("planning_update", delta);
+          context.reportTerminalEvent?.({
+            stream: "system",
+            text: `${delta}\n`
+          });
         }
         return;
       }
@@ -182,6 +199,10 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
         const message = readString(params.message);
         if (message) {
           context.reportExecutionStatus?.("tool_progress", message);
+          context.reportTerminalEvent?.({
+            stream: "system",
+            text: `[tool] ${message}\n`
+          });
         }
         return;
       }
@@ -210,6 +231,10 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
               cwd: readString(item.cwd) || null,
               itemId: itemId || null
             });
+            context.reportTerminalEvent?.({
+              stream: "system",
+              text: `$ ${command}\n`
+            });
             return;
           }
 
@@ -221,6 +246,10 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
               exitCode: item.exitCode ?? null,
               outputPreview: aggregatedOutput ? aggregatedOutput.slice(-600) : null
             });
+            context.reportTerminalEvent?.({
+              stream: "system",
+              text: `[command completed] ${command}\n`
+            });
           } else if (status === "failed") {
             context.reportExecutionStatus?.("command_failed", `Failed command: ${command}`, {
               command,
@@ -228,10 +257,18 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
               exitCode: item.exitCode ?? null,
               outputPreview: aggregatedOutput ? aggregatedOutput.slice(-600) : null
             });
+            context.reportTerminalEvent?.({
+              stream: "system",
+              text: `[command failed] ${command}\n`
+            });
           } else if (status === "declined") {
             context.reportExecutionStatus?.("command_declined", `Declined command: ${command}`, {
               command,
               itemId: itemId || null
+            });
+            context.reportTerminalEvent?.({
+              stream: "system",
+              text: `[command declined] ${command}\n`
             });
           }
         }
@@ -244,6 +281,10 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
           context.reportExecutionStatus?.("command_output", delta.slice(-400), {
             itemId: readString(params.itemId) || null
           });
+          context.reportTerminalEvent?.({
+            stream: "stdout",
+            text: delta
+          });
         }
         return;
       }
@@ -254,6 +295,10 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
           context.reportExecutionStatus?.("terminal_interaction", inputText, {
             itemId: readString(params.itemId) || null,
             processId: readString(params.processId) || null
+          });
+          context.reportTerminalEvent?.({
+            stream: "input",
+            text: inputText
           });
         }
       }
@@ -846,4 +891,10 @@ function defaultSpawnProcess(
   }
 ): SpawnedProcess {
   return spawn(command, args, options);
+}
+
+function formatTerminalCommand(command: string[]): string {
+  return command
+    .map((part) => (/^[a-zA-Z0-9._/:=@-]+$/.test(part) ? part : JSON.stringify(part)))
+    .join(" ");
 }

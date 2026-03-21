@@ -61,11 +61,15 @@ export type SessionInfo = {
   kind: SessionKind;
   title: string;
   cwd: string;
+  hidden?: boolean;
 };
 
 export type CreateSessionInput = {
   kind: SessionKind;
   cwd: string;
+  title?: string;
+  commandText?: string;
+  hidden?: boolean;
   workspaceAccessDialog?: DirectoryDialogOptions;
 };
 
@@ -103,6 +107,15 @@ export type RespondOrchestratorUserInputInput = {
   requestId: string;
   submitted: boolean;
   answers?: Record<string, string[]>;
+};
+
+export type RespondOrchestratorInteractiveSessionInput = {
+  requestId: string;
+  outcome: "completed" | "terminated" | "cancelled";
+  sessionId?: string | null;
+  exitCode?: number | null;
+  signal?: number | null;
+  transcript?: string | null;
 };
 
 export type OrchestratorRunResponse =

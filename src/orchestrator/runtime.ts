@@ -9,6 +9,9 @@ import {
   GatherResult,
   OrchestratorApprovalDecision,
   OrchestratorApprovalRequest,
+  OrchestratorInteractiveSessionRequest,
+  OrchestratorInteractiveSessionResponse,
+  OrchestratorTerminalEventDraft,
   OrchestratorUserInputRequest,
   OrchestratorUserInputResponse,
   ModelInvocationContext,
@@ -123,6 +126,9 @@ export type OrchestratorRuntimeOptions = {
   enableRootBootstrapSketch?: boolean;
   requestUserApproval?: (request: OrchestratorApprovalRequest) => Promise<OrchestratorApprovalDecision>;
   requestUserInput?: (request: OrchestratorUserInputRequest) => Promise<OrchestratorUserInputResponse>;
+  requestInteractiveSession?: (
+    request: OrchestratorInteractiveSessionRequest
+  ) => Promise<OrchestratorInteractiveSessionResponse>;
 };
 
 export class MissingModelAssignmentError extends Error {
@@ -174,6 +180,9 @@ export class OrchestratorRuntime {
   private readonly enableRootBootstrapSketch: boolean;
   private readonly requestUserApprovalHandler: ((request: OrchestratorApprovalRequest) => Promise<OrchestratorApprovalDecision>) | undefined;
   private readonly requestUserInputHandler: ((request: OrchestratorUserInputRequest) => Promise<OrchestratorUserInputResponse>) | undefined;
+  private readonly requestInteractiveSessionHandler:
+    | ((request: OrchestratorInteractiveSessionRequest) => Promise<OrchestratorInteractiveSessionResponse>)
+    | undefined;
   private readonly scheduler = new OrderedDfsScheduler();
   private readonly workingMemoryByRun = new Map<string, WorkingMemoryStore>();
   private readonly projectStructureByRun = new Map<string, ProjectStructureMemoryStore>();
@@ -196,6 +205,7 @@ export class OrchestratorRuntime {
     this.enableRootBootstrapSketch = options.enableRootBootstrapSketch ?? false;
     this.requestUserApprovalHandler = options.requestUserApproval;
     this.requestUserInputHandler = options.requestUserInput;
+    this.requestInteractiveSessionHandler = options.requestInteractiveSession;
     this.engine.subscribe((event) => {
       if (this.workingMemoryByRun.has(event.runId)) {
         try {
@@ -1247,7 +1257,11 @@ export class OrchestratorRuntime {
     }
 
     const adapter = this.adapterRegistry.resolve(assignedModel, capability);
-    const context = this.buildInvocationContext(node, assignedModel, capability, evidenceBundles);
+    const terminalSession = {
+      id: randomUUID(),
+      title: this.buildTerminalSessionTitle(capability, assignedModel)
+    };
+    const context = this.buildInvocationContext(node, assignedModel, capability, evidenceBundles, terminalSession);
     const invocation = this.getInvocation(adapter, capability);
     try {
       const result = await invocation(context) as TResult;
@@ -1823,7 +1837,11 @@ export class OrchestratorRuntime {
     node: PlanNode,
     assignedModel: ModelRef,
     capability: OrchestratorCapability,
-    evidenceBundles: EvidenceBundle[]
+    evidenceBundles: EvidenceBundle[],
+    terminalSession: {
+      id: string;
+      title: string;
+    }
   ): ModelInvocationContext {
     const run = this.engine.getRun(node.runId);
     if (!run) {
@@ -1847,15 +1865,78 @@ export class OrchestratorRuntime {
         ? this.rebaseProjectStructureSnapshot(this.getProjectStructureSnapshot(node.runId), node.id)
         : this.getProjectStructureSnapshot(node.runId),
       evidenceBundles,
-      requestUserApproval: (request) => this.handleUserApprovalRequest(node, capability, assignedModel, request),
-      requestUserInput: (request) => this.handleUserInputRequest(node, capability, assignedModel, request),
+      terminalSessionId: terminalSession.id,
+      terminalSessionTitle: terminalSession.title,
+      requestUserApproval: async (request) => {
+        this.recordTerminalEvent(node, {
+          sessionId: terminalSession.id,
+          title: terminalSession.title,
+          stream: "system",
+          text: this.formatApprovalTerminalRequest(request)
+        });
+        const decision = await this.handleUserApprovalRequest(node, capability, assignedModel, request);
+        this.recordTerminalEvent(node, {
+          sessionId: terminalSession.id,
+          title: terminalSession.title,
+          stream: "system",
+          text: this.formatApprovalTerminalDecision(decision)
+        });
+        return decision;
+      },
+      requestUserInput: async (request) => {
+        this.recordTerminalEvent(node, {
+          sessionId: terminalSession.id,
+          title: terminalSession.title,
+          stream: "system",
+          text: this.formatUserInputTerminalRequest(request)
+        });
+        const response = await this.handleUserInputRequest(node, capability, assignedModel, request);
+        this.recordTerminalEvent(node, {
+          sessionId: terminalSession.id,
+          title: terminalSession.title,
+          stream: "system",
+          text: this.formatUserInputTerminalDecision(response)
+        });
+        return response;
+      },
+      requestInteractiveSession: async (request) => {
+        this.recordTerminalEvent(node, {
+          sessionId: terminalSession.id,
+          title: terminalSession.title,
+          stream: "system",
+          text: this.formatInteractiveSessionTerminalRequest(request)
+        });
+        const response = await this.handleInteractiveSessionRequest(node, capability, assignedModel, request);
+        if (response.transcript?.trim()) {
+          this.recordTerminalEvent(node, {
+            sessionId: terminalSession.id,
+            title: terminalSession.title,
+            stream: "stdout",
+            text: response.transcript.endsWith("\n") ? response.transcript : `${response.transcript}\n`
+          });
+        }
+        this.recordTerminalEvent(node, {
+          sessionId: terminalSession.id,
+          title: terminalSession.title,
+          stream: "system",
+          text: this.formatInteractiveSessionTerminalDecision(response)
+        });
+        return response;
+      },
       reportProgress: (message, details) => {
         this.engine.appendEvent(node.runId, node.id, "scheduler_progress", {
           message,
           ...(details ?? {})
         });
       },
-      reportExecutionStatus: (state, message, details) => this.recordExecutionStatus(node, state, message, details)
+      reportExecutionStatus: (state, message, details) => this.recordExecutionStatus(node, state, message, details),
+      reportTerminalEvent: (event) => {
+        this.recordTerminalEvent(node, {
+          sessionId: terminalSession.id,
+          title: terminalSession.title,
+          ...event
+        });
+      }
     };
   }
 
@@ -2006,6 +2087,94 @@ export class OrchestratorRuntime {
     return response;
   }
 
+  private async handleInteractiveSessionRequest(
+    node: PlanNode,
+    capability: OrchestratorCapability,
+    assignedModel: ModelRef,
+    request: Omit<
+      OrchestratorInteractiveSessionRequest,
+      "requestId" | "runId" | "nodeId" | "capability" | "provider" | "model" | "createdAt"
+    >
+  ): Promise<OrchestratorInteractiveSessionResponse> {
+    const interactiveRequest: OrchestratorInteractiveSessionRequest = {
+      ...request,
+      requestId: randomUUID(),
+      runId: node.runId,
+      nodeId: node.id,
+      capability,
+      provider: assignedModel.provider,
+      model: assignedModel.model,
+      createdAt: this.now()
+    };
+
+    this.engine.appendEvent(node.runId, node.id, "interactive_session_requested", {
+      requestId: interactiveRequest.requestId,
+      capability,
+      provider: assignedModel.provider,
+      model: assignedModel.model,
+      title: interactiveRequest.title ?? null,
+      message: interactiveRequest.message,
+      commandText: interactiveRequest.commandText,
+      cwd: interactiveRequest.cwd
+    });
+
+    this.recordExecutionStatus(
+      node,
+      "awaiting_interactive_session",
+      interactiveRequest.message,
+      {
+        command: interactiveRequest.commandText,
+        cwd: interactiveRequest.cwd
+      }
+    );
+
+    let response: OrchestratorInteractiveSessionResponse;
+    if (this.requestInteractiveSessionHandler) {
+      response = await this.requestInteractiveSessionHandler(interactiveRequest);
+    } else {
+      response = {
+        outcome: "cancelled"
+      };
+    }
+
+    const transcriptPreview = response.transcript?.trim()
+      ? response.transcript.trim().slice(-4_000)
+      : null;
+
+    this.engine.appendEvent(node.runId, node.id, "interactive_session_resolved", {
+      requestId: interactiveRequest.requestId,
+      capability,
+      provider: assignedModel.provider,
+      model: assignedModel.model,
+      outcome: response.outcome,
+      sessionId: response.sessionId ?? null,
+      exitCode: response.exitCode ?? null,
+      signal: response.signal ?? null,
+      transcriptPreview
+    });
+
+    this.recordExecutionStatus(
+      node,
+      response.outcome === "completed"
+        ? "interactive_session_completed"
+        : response.outcome === "terminated"
+          ? "interactive_session_terminated"
+          : "interactive_session_cancelled",
+      response.outcome === "completed"
+        ? "Interactive CLI session completed"
+        : response.outcome === "terminated"
+          ? "Interactive CLI session was terminated"
+          : "Interactive CLI session was cancelled",
+      {
+        sessionId: response.sessionId ?? null,
+        exitCode: response.exitCode ?? null,
+        signal: response.signal ?? null
+      }
+    );
+
+    return response;
+  }
+
   private describeApprovalOption(
     option: { optionId: string; kind?: string | null; label?: string | null } | undefined
   ): string {
@@ -2040,6 +2209,87 @@ export class OrchestratorRuntime {
     });
   }
 
+  private recordTerminalEvent(node: PlanNode, event: OrchestratorTerminalEventDraft) {
+    const text = event.text;
+    if (typeof text !== "string" || text.length === 0) {
+      return;
+    }
+
+    this.engine.appendEvent(node.runId, node.id, "terminal_output", {
+      sessionId: event.sessionId?.trim() || `${node.id}:${node.updatedAt}`,
+      title: event.title?.trim() || null,
+      stream: event.stream ?? "system",
+      text
+    });
+  }
+
+  private buildTerminalSessionTitle(capability: OrchestratorCapability, assignedModel: ModelRef): string {
+    return `${assignedModel.model} · ${capability}`;
+  }
+
+  private formatApprovalTerminalRequest(
+    request: Omit<OrchestratorApprovalRequest, "requestId" | "runId" | "nodeId" | "capability" | "provider" | "model" | "createdAt">
+  ): string {
+    const lines: string[] = [];
+    const title = request.title?.trim();
+    const message = request.message.trim();
+    const details = request.details?.trim();
+    lines.push(`[approval requested] ${title || message}`);
+    if (title && title !== message) {
+      lines.push(message);
+    }
+    if (details) {
+      lines.push(details);
+    }
+    return `${lines.join("\n")}\n`;
+  }
+
+  private formatApprovalTerminalDecision(decision: OrchestratorApprovalDecision): string {
+    if (decision.outcome !== "selected") {
+      return "[approval rejected]\n";
+    }
+
+    return `[approval granted] ${decision.optionId ?? "selected"}\n`;
+  }
+
+  private formatUserInputTerminalRequest(
+    request: Omit<OrchestratorUserInputRequest, "requestId" | "runId" | "nodeId" | "capability" | "provider" | "model" | "createdAt">
+  ): string {
+    const title = request.title?.trim() || request.message.trim();
+    return `[input requested] ${title}\n`;
+  }
+
+  private formatUserInputTerminalDecision(response: OrchestratorUserInputResponse): string {
+    return response.outcome === "submitted"
+      ? "[input submitted]\n"
+      : "[input cancelled]\n";
+  }
+
+  private formatInteractiveSessionTerminalRequest(
+    request: Omit<
+      OrchestratorInteractiveSessionRequest,
+      "requestId" | "runId" | "nodeId" | "capability" | "provider" | "model" | "createdAt"
+    >
+  ): string {
+    const title = request.title?.trim() || request.message.trim();
+    const lines = [
+      `[interactive session requested] ${title}`,
+      request.commandText.trim().length > 0 ? `$ ${request.commandText.trim()}` : "",
+      request.cwd.trim().length > 0 ? `cwd: ${request.cwd.trim()}` : ""
+    ].filter((line) => line.length > 0);
+    return `${lines.join("\n")}\n`;
+  }
+
+  private formatInteractiveSessionTerminalDecision(response: OrchestratorInteractiveSessionResponse): string {
+    if (response.outcome === "completed") {
+      return "[interactive session completed]\n";
+    }
+    if (response.outcome === "terminated") {
+      return "[interactive session terminated]\n";
+    }
+    return "[interactive session cancelled]\n";
+  }
+
   private materializeEvidenceBundle(node: PlanNode, bundleDraft: EvidenceBundleDraft): EvidenceBundle {
     const timestamp = this.now();
     return {
@@ -2066,7 +2316,9 @@ export class OrchestratorRuntime {
       provider: assignedModel.provider,
       model: assignedModel.model,
       command: debug?.command ?? [],
-      prompt: debug?.prompt ?? null
+      prompt: debug?.prompt ?? null,
+      terminalSessionId: debug?.terminalSessionId ?? null,
+      terminalSessionTitle: debug?.terminalSessionTitle ?? null
     });
 
     this.engine.appendEvent(node.runId, node.id, "model_response", {

@@ -8,6 +8,7 @@ import type {
   OrchestratorRunDetail,
   OrchestratorRunSummary,
   RespondOrchestratorApprovalInput,
+  RespondOrchestratorInteractiveSessionInput,
   RespondOrchestratorUserInputInput,
   RunOrchestratorInput,
   SessionInfo
@@ -40,6 +41,9 @@ contextBridge.exposeInMainWorld("tasksaw", {
 
   respondOrchestratorUserInput: (input: RespondOrchestratorUserInputInput): Promise<boolean> =>
       ipcRenderer.invoke("orchestrator:respond-user-input", input),
+
+  respondOrchestratorInteractiveSession: (input: RespondOrchestratorInteractiveSessionInput): Promise<boolean> =>
+      ipcRenderer.invoke("orchestrator:respond-interactive-session", input),
 
   listOrchestratorRuns: (): Promise<OrchestratorRunSummary[]> =>
       ipcRenderer.invoke("orchestrator:list"),
