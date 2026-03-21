@@ -781,6 +781,91 @@ test("runtime runs a focused replan and regather loop when concrete planning req
   assert.match(gatherObjectives[1]!, /Inspection targets from abstract plan: src\/main\/gemini-quota\.ts/);
 });
 
+test("runtime records non-zero interactive session exits as failed", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner",
+    provider: "mock",
+    model: "planner",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const worker: ModelRef = {
+    id: "worker",
+    provider: "mock",
+    model: "worker",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(new MockAdapter(planner, new Set(["abstractPlan", "concretePlan", "verify"]), {}, trace));
+  registry.register(
+    new MockAdapter(
+      worker,
+      new Set(["gather", "execute"]),
+      {
+        execute: async (context) => {
+          const response = await context.requestInteractiveSession?.({
+            abortSignal: context.abortSignal,
+            title: "Broken interactive probe",
+            message: "Run the interactive probe",
+            commandText: "./managed-tools/bin/gemini --help",
+            cwd: "/workspace/demo"
+          });
+
+          return {
+            summary: response?.outcome ?? "none",
+            outputs: []
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry, {
+    requestInteractiveSession: async () => ({
+      outcome: "failed",
+      sessionId: "interactive-session-failed",
+      exitCode: 127,
+      signal: 0,
+      transcript: "zsh: command not found\n"
+    })
+  });
+
+  const result = await runtime.executeHappyPath({
+    goal: "Record failed interactive session exits",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer: worker,
+      concretePlanner: planner,
+      executor: worker,
+      verifier: planner
+    },
+    acceptanceCriteria: {
+      items: [
+        {
+          id: "interactive-session-failure-recorded",
+          description: "The failed interactive session is recorded explicitly",
+          required: true,
+          status: "pending"
+        }
+      ]
+    }
+  });
+
+  const resolvedEvent = result.snapshot.events.find((event) => event.type === "interactive_session_resolved");
+  const failedStatusEvent = result.snapshot.events.find((event) =>
+    event.type === "execution_status" && event.payload.state === "interactive_session_failed"
+  );
+
+  assert.equal(resolvedEvent?.payload.outcome, "failed");
+  assert.equal(failedStatusEvent?.payload.message, "Interactive CLI session failed");
+});
+
 test("runtime forces a focused regather before accepting an exact-data fallback plan with weak blocker evidence", async () => {
   const trace: string[] = [];
   const registry = new ModelAdapterRegistry();

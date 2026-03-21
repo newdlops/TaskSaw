@@ -1160,6 +1160,7 @@ test("gemini ACP invoker hands interactive managed CLI commands off to a modal s
   let approvalRequestCount = 0;
   let interactiveSessionCount = 0;
   let outcome = "";
+  let handedOffCommand = "";
 
   const adapter = new CliModelAdapter({
     model: TEST_MODEL,
@@ -1222,7 +1223,7 @@ test("gemini ACP invoker hands interactive managed CLI commands off to a modal s
               const decision = await this.client.requestPermission({
                 options: [{ optionId: "allow_once", kind: "allow_once" }],
                 toolCall: {
-                  title: "./managed-tools/bin/gemini /stats model --json || ./managed-tools/bin/gemini -p \"/stats model\" -o json",
+                  title: "/Users/Test/TaskSaw/managed-tools/bin/gemini /stats model --json [current working directory /Users/Test/TaskSaw] (Gemini CLI quota output 확인)",
                   kind: "execute"
                 }
               });
@@ -1263,6 +1264,7 @@ test("gemini ACP invoker hands interactive managed CLI commands off to a modal s
     },
     requestInteractiveSession: async (request) => {
       interactiveSessionCount += 1;
+      handedOffCommand = request.commandText;
       assert.match(request.commandText, /\/stats model/);
       return {
         outcome: "terminated",
@@ -1281,8 +1283,244 @@ test("gemini ACP invoker hands interactive managed CLI commands off to a modal s
   assert.equal(outcome, "cancelled");
   assert.equal(approvalRequestCount, 0);
   assert.equal(interactiveSessionCount, 1);
+  assert.equal(handedOffCommand, "/Users/Test/TaskSaw/managed-tools/bin/gemini /stats model --json");
   assert.equal(
     progressMessages.some((entry) => entry.message === "Opening modal interactive session for CLI tool call"),
+    true
+  );
+});
+
+test("gemini ACP invoker keeps plain managed CLI help probes on the normal approval path", async () => {
+  const fakeChild = new FakeChildProcess();
+  let approvalRequestCount = 0;
+  let interactiveSessionCount = 0;
+  let outcome = "";
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const decision = await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "/Users/Test/TaskSaw/managed-tools/bin/gemini --help [current working directory /Users/Test/TaskSaw]",
+                  kind: "execute"
+                }
+              });
+              outcome = decision.outcome.outcome;
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Managed CLI help stayed on approval path",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    requestInteractiveSession: async () => {
+      interactiveSessionCount += 1;
+      return {
+        outcome: "cancelled"
+      };
+    }
+  });
+
+  assert.equal(result.summary, "Managed CLI help stayed on approval path");
+  assert.equal(outcome, "selected");
+  assert.equal(approvalRequestCount, 1);
+  assert.equal(interactiveSessionCount, 0);
+});
+
+test("gemini ACP invoker aborts a gather prompt after repeated cutoff rejections to preserve budget", async () => {
+  const fakeChild = new FakeChildProcess();
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+  const outcomes: string[] = [];
+  let approvalRequestCount = 0;
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const commands = [
+                "\"/Users/test/managed-tools/bin/gemini\" --help",
+                "\"/Users/test/managed-tools/bin/gemini\" /stats model --json",
+                "\"/Users/test/managed-tools/bin/gemini\" -p \"/stats model\" -o json",
+                "\"/Users/test/managed-tools/bin/gemini\" --version",
+                "\"/Users/test/managed-tools/bin/gemini\" login status",
+                "\"/Users/test/managed-tools/bin/gemini\" --help",
+                "\"/Users/test/managed-tools/bin/gemini\" --version"
+              ];
+
+              for (const title of commands) {
+                const decision = await this.client.requestPermission({
+                  options: [{ optionId: "allow_once", kind: "allow_once" }],
+                  toolCall: {
+                    title,
+                    kind: "execute"
+                  }
+                });
+                outcomes.push(decision.outcome.outcome);
+              }
+
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    workflowStage: "task_orchestration",
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(
+    result.summary,
+    "Gather stopped early after repeated external CLI probing hit the cutoff. Continue planning from the workspace-local evidence collected so far."
+  );
+  assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "cancelled", "cancelled"]);
+  assert.equal(approvalRequestCount, 4);
+  assert.equal(
+    progressMessages.some((entry) => entry.message === "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget"),
     true
   );
 });

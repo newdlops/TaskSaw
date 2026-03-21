@@ -132,6 +132,7 @@ type GeminiLiveSession = {
 type ReadOnlyProbeGuardState = {
   attemptedCommandFingerprints: Set<string>;
   hypothesisCounts: Map<string, number>;
+  consecutiveRejections: number;
 };
 
 const DEFAULT_GEMINI_MODE_BY_CAPABILITY: Partial<Record<OrchestratorCapability, string>> = {
@@ -318,7 +319,8 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
       );
       const readOnlyProbeGuardState: ReadOnlyProbeGuardState = {
         attemptedCommandFingerprints: new Set(),
-        hypothesisCounts: new Map()
+        hypothesisCounts: new Map(),
+        consecutiveRejections: 0
       };
       const retryNotes: string[] = [];
       let lastError: unknown;
@@ -443,6 +445,22 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 state: readOnlyProbeGuardState
               });
               if (repeatedProbeReason) {
+                readOnlyProbeGuardState.consecutiveRejections += 1;
+                if (shouldAbortReadOnlyProbeLoop({
+                  workflowStage: context.workflowStage,
+                  state: readOnlyProbeGuardState
+                })) {
+                  const abortMessage = "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget";
+                  context.reportProgress?.(
+                    abortMessage,
+                    {
+                      capability,
+                      model: modelId,
+                      toolCall: toolCallSummary ?? null
+                    }
+                  );
+                  throw new GeminiAcpReadOnlyProbeLoopAbortError(abortMessage);
+                }
                 const decision: OrchestratorApprovalDecision = {
                   outcome: "cancelled"
                 };
@@ -458,6 +476,8 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 return decision;
               }
 
+              readOnlyProbeGuardState.consecutiveRejections = 0;
+
               const interactiveSessionCommand = getInteractiveSessionHandoffCommand(permissionRequest.toolCall);
               if (interactiveSessionCommand && context.requestInteractiveSession) {
                 context.reportProgress?.(
@@ -472,7 +492,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 try {
                   const response = await context.requestInteractiveSession({
                     abortSignal: context.abortSignal,
-                    title: permissionRequest.toolCall?.title?.trim() || undefined,
+                    title: interactiveSessionCommand,
                     message: buildInteractiveSessionRequestMessage(context.outputLanguage),
                     commandText: interactiveSessionCommand,
                     cwd: workspaceRoot
@@ -482,7 +502,9 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                       ? "Interactive CLI session completed; original Gemini tool call was cancelled to avoid hanging the ACP run"
                       : response.outcome === "terminated"
                         ? "Interactive CLI session was terminated; original Gemini tool call was cancelled"
-                        : "Interactive CLI session was cancelled; original Gemini tool call was cancelled",
+                        : response.outcome === "failed"
+                          ? "Interactive CLI session failed; original Gemini tool call was cancelled"
+                          : "Interactive CLI session was cancelled; original Gemini tool call was cancelled",
                     {
                       capability,
                       model: modelId,
@@ -597,6 +619,16 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               stderr: session.stderrBuffer().slice(stderrStartIndex),
               command
             };
+          } catch (error) {
+            if (error instanceof GeminiAcpReadOnlyProbeLoopAbortError) {
+              await invalidateSession(session);
+              return {
+                stdout: buildReadOnlyProbeLoopAbortOutput(capability, context.outputLanguage),
+                stderr: session.stderrBuffer().slice(stderrStartIndex),
+                command
+              };
+            }
+            throw error;
           } finally {
             promptActivity.stop();
             activeRuntime = null;
@@ -1054,6 +1086,13 @@ const READ_ONLY_HYPOTHESIS_CUTOFF_BY_STAGE: Partial<Record<ModelInvocationContex
   task_orchestration: 4
 };
 
+const READ_ONLY_PROBE_LOOP_ABORT_THRESHOLD_BY_STAGE: Partial<Record<ModelInvocationContext["workflowStage"], number>> = {
+  bootstrap_sketch: 2,
+  project_structure_discovery: 3,
+  project_structure_inspection: 3,
+  task_orchestration: 3
+};
+
 const BOOTSTRAP_SKETCH_ALLOWED_READ_ONLY_COMMANDS = new Set([
   "ls",
   "find",
@@ -1098,6 +1137,13 @@ const SHELL_WRAPPER_COMMANDS = new Set([
   "/bin/bash",
   "/bin/zsh"
 ]);
+
+class GeminiAcpReadOnlyProbeLoopAbortError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GeminiAcpReadOnlyProbeLoopAbortError";
+  }
+}
 
 function buildGeminiAttemptModels(
   primaryModelId: string,
@@ -1188,7 +1234,10 @@ function getReadOnlyProbeGuardRejectionReason(params: {
     return "Rejected Gemini tool call because this command was already attempted in this phase";
   }
 
-  const hypothesisKeys = buildReadOnlyHypothesisKeys(params.toolCall?.title ?? "", params.workspaceRoot);
+  const commandText = extractExecuteToolCallCommandText(params.toolCall)
+    ?? buildExecuteToolCallFingerprint(params.toolCall)
+    ?? "";
+  const hypothesisKeys = buildReadOnlyHypothesisKeys(commandText, params.workspaceRoot);
   const cutoff = READ_ONLY_HYPOTHESIS_CUTOFF_BY_STAGE[params.workflowStage] ?? 6;
   for (const key of hypothesisKeys) {
     const count = params.state.hypothesisCounts.get(key) ?? 0;
@@ -1205,6 +1254,85 @@ function getReadOnlyProbeGuardRejectionReason(params: {
   }
 
   return null;
+}
+
+function shouldAbortReadOnlyProbeLoop(params: {
+  workflowStage: ModelInvocationContext["workflowStage"];
+  state: ReadOnlyProbeGuardState;
+}): boolean {
+  const threshold = READ_ONLY_PROBE_LOOP_ABORT_THRESHOLD_BY_STAGE[params.workflowStage] ?? 4;
+  return params.state.consecutiveRejections >= threshold;
+}
+
+function buildReadOnlyProbeLoopAbortOutput(
+  capability: OrchestratorCapability,
+  outputLanguage: ModelInvocationContext["outputLanguage"]
+): string {
+  if (capability === "gather") {
+    return JSON.stringify({
+      summary: outputLanguage === "ko"
+        ? "반복된 외부 CLI probing이 cutoff에 걸려 gather를 조기 종료했습니다. 현재까지의 workspace-local 근거로 후속 계획 단계가 이어집니다."
+        : "Gather stopped early after repeated external CLI probing hit the cutoff. Continue planning from the workspace-local evidence collected so far.",
+      evidenceBundles: []
+    });
+  }
+
+  if (capability === "abstractPlan") {
+    return JSON.stringify({
+      summary: outputLanguage === "ko"
+        ? "반복된 외부 probing이 cutoff에 걸려 abstract plan을 조기 종료했습니다."
+        : "Abstract planning stopped early after repeated external probing hit the cutoff.",
+      targetsToInspect: [],
+      evidenceRequirements: []
+    });
+  }
+
+  if (capability === "concretePlan") {
+    return JSON.stringify({
+      summary: outputLanguage === "ko"
+        ? "반복된 외부 probing이 cutoff에 걸려 concrete plan을 조기 종료했습니다."
+        : "Concrete planning stopped early after repeated external probing hit the cutoff.",
+      childTasks: [],
+      executionNotes: [],
+      needsAdditionalGather: true,
+      additionalGatherObjectives: [
+        outputLanguage === "ko"
+          ? "workspace-local 근거만으로 다음 gather 범위를 좁히기"
+          : "Narrow the next gather pass using workspace-local evidence only"
+      ]
+    });
+  }
+
+  if (capability === "review") {
+    return JSON.stringify({
+      summary: outputLanguage === "ko"
+        ? "반복된 외부 probing이 cutoff에 걸려 review를 조기 종료했습니다."
+        : "Review stopped early after repeated external probing hit the cutoff.",
+      approved: false,
+      followUpQuestions: [],
+      nextActions: []
+    });
+  }
+
+  if (capability === "verify") {
+    return JSON.stringify({
+      summary: outputLanguage === "ko"
+        ? "반복된 외부 probing이 cutoff에 걸려 verify를 조기 종료했습니다."
+        : "Verification stopped early after repeated external probing hit the cutoff.",
+      passed: false,
+      findings: [
+        outputLanguage === "ko"
+          ? "외부 CLI probing 반복으로 검증이 중단되었습니다."
+          : "Verification stopped because external CLI probing kept repeating after cutoff."
+      ]
+    });
+  }
+
+  return JSON.stringify({
+    summary: outputLanguage === "ko"
+      ? "반복된 외부 probing이 cutoff에 걸려 단계를 조기 종료했습니다."
+      : "The stage stopped early after repeated external probing hit the cutoff."
+  });
 }
 
 function getBootstrapSketchExecuteRejectionReason(params: {
@@ -1275,6 +1403,11 @@ function buildExecuteToolCallFingerprint(toolCall: {
     }
   >;
 } | undefined): string | null {
+  const executableCommandText = extractExecuteToolCallCommandText(toolCall);
+  if (executableCommandText) {
+    return normalizeShellLikeText(executableCommandText);
+  }
+
   const textParts = [
     toolCall?.title ?? "",
     ...(toolCall?.content ?? []).map((entry) =>
@@ -1285,6 +1418,90 @@ function buildExecuteToolCallFingerprint(toolCall: {
   ];
   const normalized = normalizeShellLikeText(textParts.join("\n"));
   return normalized.length > 0 ? normalized : null;
+}
+
+function extractExecuteToolCallCommandText(toolCall: {
+  title?: string;
+  content?: Array<
+    | {
+      type?: string;
+      path?: string;
+      oldText?: string;
+      newText?: string;
+    }
+    | {
+      type?: string;
+      content?: {
+        type?: string;
+        text?: string;
+      };
+    }
+  >;
+} | undefined): string | null {
+  for (const candidate of collectExecuteToolCallTextCandidates(toolCall)) {
+    const sanitized = sanitizeExecuteToolCallCommandText(candidate);
+    if (sanitized) {
+      return sanitized;
+    }
+  }
+
+  return null;
+}
+
+function collectExecuteToolCallTextCandidates(toolCall: {
+  title?: string;
+  content?: Array<
+    | {
+      type?: string;
+      path?: string;
+      oldText?: string;
+      newText?: string;
+    }
+    | {
+      type?: string;
+      content?: {
+        type?: string;
+        text?: string;
+      };
+    }
+  >;
+} | undefined): string[] {
+  const candidates: string[] = [];
+  if (typeof toolCall?.title === "string" && toolCall.title.trim().length > 0) {
+    candidates.push(toolCall.title);
+  }
+
+  for (const entry of toolCall?.content ?? []) {
+    const text = "content" in entry && entry.content?.type === "text" && typeof entry.content.text === "string"
+      ? entry.content.text
+      : "";
+    if (text.trim().length > 0) {
+      candidates.push(text);
+    }
+  }
+
+  return candidates;
+}
+
+function sanitizeExecuteToolCallCommandText(value: string): string | null {
+  const firstLine = value
+    .normalize("NFKC")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!firstLine) {
+    return null;
+  }
+
+  let commandText = firstLine;
+  const cwdMarker = commandText.match(/\s+\[(?:current working directory|cwd)\b/i);
+  if (typeof cwdMarker?.index === "number") {
+    commandText = commandText.slice(0, cwdMarker.index).trimEnd();
+  }
+
+  commandText = commandText.replace(/\s+\((?:[^()]|\([^()]*\))*\)\s*$/, "").trim();
+  return commandText.length > 0 ? commandText : null;
 }
 
 function buildReadOnlyHypothesisKeys(commandText: string, workspaceRoot: string): string[] {
@@ -1399,7 +1616,7 @@ function getInteractiveSessionHandoffCommand(toolCall: {
     return null;
   }
 
-  const commandText = buildExecuteToolCallFingerprint(toolCall);
+  const commandText = extractExecuteToolCallCommandText(toolCall);
   if (!commandText) {
     return null;
   }
@@ -1408,32 +1625,54 @@ function getInteractiveSessionHandoffCommand(toolCall: {
 }
 
 function looksLikeInteractiveCliCommand(commandText: string): boolean {
-  const normalizedCommandText = normalizeShellLikeText(commandText).toLowerCase();
-  const commandName = extractPrimaryCommandName(normalizedCommandText);
-  if (!commandName) {
+  const tokens = tokenizeCommandText(commandText)
+    .map((token) => stripOuterQuotes(token).trim())
+    .filter(Boolean);
+  if (tokens.length === 0) {
     return false;
   }
 
-  if (!EXTERNAL_TOOL_SURFACE_COMMANDS.has(path.basename(commandName).toLowerCase())) {
+  const commandIndex = findPrimaryCommandIndex(tokens);
+  const commandToken = tokens[commandIndex];
+  if (!commandToken) {
     return false;
   }
 
-  if (/(?:^|\s)\/[a-z][\w-]*/i.test(normalizedCommandText)) {
-    return true;
+  const commandName = path.basename(commandToken).toLowerCase();
+  if (!EXTERNAL_TOOL_SURFACE_COMMANDS.has(commandName)) {
+    return false;
   }
 
-  if (/\b(?:-p|--prompt)\b/i.test(normalizedCommandText)) {
-    return true;
+  for (let index = commandIndex + 1; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    const normalizedToken = token.toLowerCase();
+
+    if (isShellOperatorToken(token) || isEnvironmentAssignmentToken(token)) {
+      continue;
+    }
+
+    if (normalizedToken === "-p" || normalizedToken === "--prompt") {
+      return true;
+    }
+
+    if (isSlashCommandToken(token)) {
+      return true;
+    }
+
+    if (normalizedToken === "login" || normalizedToken === "auth") {
+      const nextToken = findNextMeaningfulCommandToken(tokens, index + 1);
+      if (!nextToken) {
+        return true;
+      }
+
+      const normalizedNextToken = nextToken.toLowerCase();
+      if (normalizedNextToken !== "status" && normalizedNextToken !== "--help" && normalizedNextToken !== "-h") {
+        return true;
+      }
+    }
   }
 
-  if (
-    tokenizeCommandText(normalizedCommandText).some((token) => isShellOperatorToken(token))
-    && /\b(?:-p|--prompt)\b|(?:^|\s)\/[a-z][\w-]*/i.test(normalizedCommandText)
-  ) {
-    return true;
-  }
-
-  return /\b(?:login|auth)\b(?!\s+(?:status|--help|-h)\b)/i.test(normalizedCommandText);
+  return false;
 }
 
 function buildInteractiveSessionRequestMessage(outputLanguage: ModelInvocationContext["outputLanguage"]): string {
@@ -1520,6 +1759,22 @@ function tokenizeCommandText(commandText: string): string[] {
   return [...commandText.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`|(\S+)/g)]
     .map((match) => match[1] ?? match[2] ?? match[3] ?? match[4] ?? "")
     .filter((token) => token.length > 0);
+}
+
+function findNextMeaningfulCommandToken(tokens: string[], startIndex: number): string | null {
+  for (let index = startIndex; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    if (isShellOperatorToken(token) || isEnvironmentAssignmentToken(token)) {
+      continue;
+    }
+    return stripOuterQuotes(token).trim() || null;
+  }
+
+  return null;
+}
+
+function isSlashCommandToken(value: string): boolean {
+  return /^\/[a-z][\w-]*$/i.test(value.trim());
 }
 
 function stripOuterQuotes(value: string): string {

@@ -108,7 +108,7 @@ export type OrchestratorInteractiveSessionRequest = {
 };
 
 export type OrchestratorInteractiveSessionResponse = {
-  outcome: "completed" | "terminated" | "cancelled";
+  outcome: "completed" | "terminated" | "cancelled" | "failed";
   sessionId?: string | null;
   exitCode?: number | null;
   signal?: number | null;

@@ -2159,11 +2159,15 @@ export class OrchestratorRuntime {
         ? "interactive_session_completed"
         : response.outcome === "terminated"
           ? "interactive_session_terminated"
+          : response.outcome === "failed"
+            ? "interactive_session_failed"
           : "interactive_session_cancelled",
       response.outcome === "completed"
         ? "Interactive CLI session completed"
         : response.outcome === "terminated"
           ? "Interactive CLI session was terminated"
+          : response.outcome === "failed"
+            ? "Interactive CLI session failed"
           : "Interactive CLI session was cancelled",
       {
         sessionId: response.sessionId ?? null,
@@ -2286,6 +2290,9 @@ export class OrchestratorRuntime {
     }
     if (response.outcome === "terminated") {
       return "[interactive session terminated]\n";
+    }
+    if (response.outcome === "failed") {
+      return "[interactive session failed]\n";
     }
     return "[interactive session cancelled]\n";
   }

@@ -294,7 +294,7 @@ type TasksawApi = {
   }): Promise<boolean>;
   respondOrchestratorInteractiveSession(input: {
     requestId: string;
-    outcome: "completed" | "terminated" | "cancelled";
+    outcome: "completed" | "terminated" | "cancelled" | "failed";
     sessionId?: string | null;
     exitCode?: number | null;
     signal?: number | null;
@@ -400,6 +400,7 @@ const TEXT = {
       interactiveSessionTitle: "Interactive Session",
       interactiveSessionStarting: "Starting",
       interactiveSessionRunning: "Running",
+      interactiveSessionFailed: "Failed",
       interactiveSessionTerminated: "Terminated",
       interactiveSessionCompleted: "Completed",
       interactiveSessionTerminate: "Terminate",
@@ -568,6 +569,7 @@ const TEXT = {
       interactiveSessionTitle: "대화형 세션",
       interactiveSessionStarting: "시작 중",
       interactiveSessionRunning: "실행 중",
+      interactiveSessionFailed: "실패",
       interactiveSessionTerminated: "종료됨",
       interactiveSessionCompleted: "완료됨",
       interactiveSessionTerminate: "강제 종료",
@@ -2235,6 +2237,7 @@ function formatExecutionStatusLabel(state: string | undefined): string {
       user_input_submitted: "입력 제출됨",
       user_input_cancelled: "입력 취소됨",
       interactive_session_completed: "대화형 세션 완료",
+      interactive_session_failed: "대화형 세션 실패",
       interactive_session_terminated: "대화형 세션 종료됨",
       interactive_session_cancelled: "대화형 세션 취소됨",
       planning_update: "계획 갱신 중",
@@ -2270,6 +2273,7 @@ function formatExecutionStatusLabel(state: string | undefined): string {
     user_input_submitted: "Input submitted",
     user_input_cancelled: "Input cancelled",
     interactive_session_completed: "Interactive session completed",
+    interactive_session_failed: "Interactive session failed",
     interactive_session_terminated: "Interactive session terminated",
     interactive_session_cancelled: "Interactive session cancelled",
     planning_update: "Planning update",
@@ -2493,6 +2497,7 @@ function closeApprovalDialog() {
 }
 
 function getInteractiveSessionStatusLabel(request: OrchestratorPendingInteractiveSession): string {
+  const hasTerminationSignal = typeof request.signal === "number" && request.signal > 0;
   if (!request.sessionId) {
     return translate("ui.interactiveSessionStarting");
   }
@@ -2501,9 +2506,15 @@ function getInteractiveSessionStatusLabel(request: OrchestratorPendingInteractiv
     return translate("ui.interactiveSessionRunning");
   }
 
-  return request.terminateRequested
-    ? translate("ui.interactiveSessionTerminated")
-    : translate("ui.interactiveSessionCompleted");
+  if (request.terminateRequested || hasTerminationSignal) {
+    return translate("ui.interactiveSessionTerminated");
+  }
+
+  if (request.exitCode !== 0) {
+    return translate("ui.interactiveSessionFailed");
+  }
+
+  return translate("ui.interactiveSessionCompleted");
 }
 
 function getActiveInteractiveSession(): OrchestratorPendingInteractiveSession | null {
@@ -2609,6 +2620,7 @@ function renderInteractiveSessionDialog() {
 }
 
 async function respondInteractiveSession(request: OrchestratorPendingInteractiveSession) {
+  const hasTerminationSignal = typeof request.signal === "number" && request.signal > 0;
   if (request.responseSubmitted) {
     return;
   }
@@ -2618,8 +2630,12 @@ async function respondInteractiveSession(request: OrchestratorPendingInteractive
     requestId: request.requestId,
     outcome: request.terminateRequested
       ? "terminated"
+      : hasTerminationSignal
+        ? "terminated"
       : request.exited
-        ? "completed"
+        ? request.exitCode === 0
+          ? "completed"
+          : "failed"
         : "cancelled",
     sessionId: request.sessionId,
     exitCode: request.exitCode,
