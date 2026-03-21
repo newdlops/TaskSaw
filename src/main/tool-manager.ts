@@ -67,6 +67,11 @@ type InstructionSource = {
   content: string;
 };
 
+type GeminiUsageRecord = {
+  modelId: string | null;
+  remainingPercent: number | null;
+};
+
 const dynamicImport = new Function("specifier", "return import(specifier);") as (specifier: string) => Promise<unknown>;
 
 const CODEX_INSTRUCTION_CANDIDATES = ["AGENTS.MD", "AGENTS.md", "agents.md", "agents.MD"];
@@ -209,13 +214,15 @@ export class ToolManager {
 
   private async getGeminiUsage(): Promise<ManagedToolStatus["usage"]> {
     try {
-      // Use the cached catalog if available to avoid expensive CLI calls during status checks
       const catalog = this.resolvedModelCatalogs.get("gemini:")
         ?? await this.discoverModelCatalog("gemini").catch(() => null);
 
       if (!catalog || !catalog.models) {
         return null;
       }
+
+      const usageStats = await this.queryGeminiModelUsageStats();
+      const usageRecords = this.extractGeminiUsageRecords(usageStats);
 
       const models = catalog.models
         .filter((model) => !model.hidden)
@@ -227,17 +234,205 @@ export class ToolManager {
           return {
             modelId: model.id,
             displayName,
-            remainingPercent: null // Managed Gemini CLI does not yet expose quota/limit info via /stats
+            remainingPercent: this.findGeminiRemainingPercentForModel(model.id, usageRecords)
           };
         });
 
+      const selectedModelId = catalog.currentModelId ?? models[0]?.modelId ?? null;
+      const remainingPercent = selectedModelId
+        ? this.findGeminiRemainingPercentForModel(selectedModelId, usageRecords)
+        : null;
+
       return {
-        remainingPercent: null, // Global remaining percent is also unavailable
+        remainingPercent,
         gemini: { models }
       };
     } catch {
       return null;
     }
+  }
+
+  private async queryGeminiModelUsageStats(): Promise<unknown> {
+    const launchCommand = this.resolveInstalledLaunchCommand("gemini");
+    if (!launchCommand) {
+      return null;
+    }
+
+    const env = this.buildManagedCommandEnv("gemini", launchCommand.env);
+    const commandAttempts = [
+      ["/stats", "model", "--json"],
+      ["-p", "/stats model", "-o", "json"]
+    ];
+
+    for (const args of commandAttempts) {
+      const result = await this.runJsonCommand(launchCommand.command, [...launchCommand.args, ...args], env, 5_000);
+      if (result !== null) {
+        return result;
+      }
+    }
+
+    return null;
+  }
+
+  private async runJsonCommand(
+    command: string,
+    args: string[],
+    env: Record<string, string>,
+    timeoutMs: number
+  ): Promise<unknown> {
+    const child = spawn(command, args, {
+      env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+
+    return await new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        child.kill();
+        resolve(null);
+      }, timeoutMs);
+
+      child.on("close", (code) => {
+        clearTimeout(timeout);
+        if (code !== 0) {
+          resolve(null);
+          return;
+        }
+
+        try {
+          resolve(JSON.parse(stdout));
+        } catch {
+          resolve(null);
+        }
+      });
+
+      child.on("error", () => {
+        clearTimeout(timeout);
+        resolve(null);
+      });
+    });
+  }
+
+  private extractGeminiUsageRecords(stats: unknown): GeminiUsageRecord[] {
+    const records: GeminiUsageRecord[] = [];
+    const visit = (value: unknown) => {
+      if (!value || typeof value !== "object") {
+        return;
+      }
+
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
+
+      const record = this.parseGeminiUsageRecord(value as Record<string, unknown>);
+      if (record) {
+        records.push(record);
+      }
+
+      Object.values(value).forEach(visit);
+    };
+
+    visit(stats);
+    return records;
+  }
+
+  private parseGeminiUsageRecord(value: Record<string, unknown>): GeminiUsageRecord | null {
+    const modelId = this.readFirstString(value, [
+      "model",
+      "modelId",
+      "model_id",
+      "id",
+      "name",
+      "displayName",
+      "display_name"
+    ]);
+    const remainingPercent = this.readGeminiRemainingPercent(value);
+
+    if (modelId === null || remainingPercent === null) {
+      return null;
+    }
+
+    return {
+      modelId,
+      remainingPercent
+    };
+  }
+
+  private findGeminiRemainingPercentForModel(modelId: string, records: GeminiUsageRecord[]): number | null {
+    const normalizedModelId = this.normalizeGeminiModelIdentifier(modelId);
+    for (const record of records) {
+      if (record.remainingPercent === null || record.modelId === null) {
+        continue;
+      }
+
+      if (this.normalizeGeminiModelIdentifier(record.modelId) === normalizedModelId) {
+        return record.remainingPercent;
+      }
+    }
+
+    return null;
+  }
+
+  private normalizeGeminiModelIdentifier(value: string): string {
+    return value.trim().toLowerCase().replace(/^models\//, "");
+  }
+
+  private readGeminiRemainingPercent(value: Record<string, unknown>): number | null {
+    const directPercent = this.readFirstNumber(value, [
+      "remainingPercent",
+      "remaining_percentage",
+      "remainingPercentage",
+      "percentRemaining",
+      "remaining_pct"
+    ]);
+    if (directPercent !== null) {
+      return this.clampPercentage(directPercent);
+    }
+
+    const remaining = this.readFirstNumber(value, ["remaining", "remainingQuota", "remaining_quota"]);
+    const quota = this.readFirstNumber(value, ["quota", "limit", "max", "total", "totalQuota", "total_quota"]);
+    if (remaining !== null && quota !== null && quota > 0) {
+      return this.clampPercentage((remaining / quota) * 100);
+    }
+
+    const used = this.readFirstNumber(value, ["used", "usage", "usedQuota", "used_quota", "consumed"]);
+    if (used !== null && quota !== null && quota > 0) {
+      return this.clampPercentage(((quota - used) / quota) * 100);
+    }
+
+    return null;
+  }
+
+  private readFirstString(value: Record<string, unknown>, keys: string[]): string | null {
+    for (const key of keys) {
+      const candidate = value[key];
+      if (typeof candidate === "string" && candidate.trim().length > 0) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  private readFirstNumber(value: Record<string, unknown>, keys: string[]): number | null {
+    for (const key of keys) {
+      const candidate = value[key];
+      if (typeof candidate === "number" && Number.isFinite(candidate)) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  private clampPercentage(value: number): number {
+    return Math.max(0, Math.min(100, Math.round(value)));
   }
 
   buildManagedExecutionEnvironment(toolId: ManagedToolId): Record<string, string> {

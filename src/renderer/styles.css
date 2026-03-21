@@ -1153,6 +1153,9 @@ body[data-has-sessions="false"] #sidebar {
 
 #orchestrator-node-terminal {
   min-height: 280px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 10px 12px;
   background: #111827;
   border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
@@ -1163,6 +1166,13 @@ body[data-has-sessions="false"] #sidebar {
 #orchestrator-node-terminal .xterm-viewport,
 #orchestrator-node-terminal .xterm-screen {
   height: 100%;
+  width: 100%;
+  max-width: 100%;
+}
+
+#orchestrator-node-terminal .xterm-screen canvas {
+  display: block;
+  max-width: 100%;
 }
 
 .orchestrator-tree-node.role-stage {

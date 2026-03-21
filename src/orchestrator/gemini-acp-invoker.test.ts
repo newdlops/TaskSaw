@@ -1410,6 +1410,139 @@ test("gemini ACP invoker keeps plain managed CLI help probes on the normal appro
   assert.equal(interactiveSessionCount, 0);
 });
 
+test("gemini ACP invoker rejects low-signal rediscovery commands during focused gather", async () => {
+  const fakeChild = new FakeChildProcess();
+  const outcomes: string[] = [];
+  let approvalRequestCount = 0;
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const commands = [
+                "find . -name \"gemini\" -type f -perm +111",
+                "ls src/main/gemini-quota.ts",
+                "sed -n '1,40p' src/main/tool-manager.ts"
+              ];
+
+              for (const title of commands) {
+                const decision = await this.client.requestPermission({
+                  options: [{ optionId: "allow_once", kind: "allow_once" }],
+                  toolCall: {
+                    title,
+                    kind: "execute"
+                  }
+                });
+                outcomes.push(decision.outcome.outcome);
+              }
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Focused gather stayed on named target inspection",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const baseContext = createContext(TEST_MODEL);
+  const result = await adapter.gather!({
+    ...baseContext,
+    node: {
+      ...baseContext.node,
+      title: "Focused Gather"
+    },
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Focused gather stayed on named target inspection");
+  assert.deepEqual(outcomes, ["cancelled", "cancelled", "selected"]);
+  assert.equal(approvalRequestCount, 1);
+  assert.equal(
+    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because focused gather must inspect named targets directly instead of rediscovering files or paths"),
+    true
+  );
+});
+
 test("gemini ACP invoker aborts a gather prompt after repeated cutoff rejections to preserve budget", async () => {
   const fakeChild = new FakeChildProcess();
   const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];

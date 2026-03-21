@@ -337,6 +337,8 @@ function buildStageInstructions(
       "If an external CLI/API surface already appears absent or unsupported, stop after enough evidence to establish that fact. Do not keep probing undocumented alternative commands, slash commands, or ad hoc flags.",
       "If the user asked for exact or actual data, do not treat a UI fallback label as sufficient. Gather one direct proof about the narrowest missing or unsupported data source before recommending that fallback.",
       "When probing an external CLI surface, prefer one documented help/usage check and one direct capability check. Do not spend gather budget on multiple synonymous command variants that test the same hypothesis.",
+      "In a focused follow-up gather pass, inspect named files, symbols, or managed-tool surfaces directly instead of rediscovering whether they exist.",
+      "Do not spend focused gather budget on existence-only commands such as find-by-name sweeps, plain ls path checks, recursive ls listings, or broad *.md/settings.json searches when the target path is already named in memory.",
       "Do not ask the user for permission to continue planning, escape plan mode, or work around internal tool/runtime errors. Report those blockers directly in the JSON response instead.",
       "Do not edit files, run builds, or execute other mutating commands in gather. This phase is read-only evidence collection.",
       "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node.",
@@ -348,6 +350,7 @@ function buildStageInstructions(
     return [
       "Carry out the requested implementation work instead of restating the plan.",
       "Do not invent undocumented CLI flags, slash commands, APIs, or data sources.",
+      "When execution needs tests in this TypeScript workspace, prefer the project's documented scripts or a build-first path such as npm run build followed by built dist tests over raw node --test src/**/*.ts entrypoints.",
       "If a required user-visible behavior still depends on placeholder/no-data fallback because the upstream source is missing or unsupported, set completed=false and explain the blocker instead of claiming success.",
       "Set completed=true only if the execution actually changed or completed the intended work.",
       "If execution was blocked, denied, or intentionally not performed, set completed=false and explain the concrete reason in blockedReason."
@@ -359,6 +362,7 @@ function buildStageInstructions(
       "Verify the requested user-visible behavior, not just the presence of code changes or lint/build success.",
       "A generic success claim is insufficient. State the concrete observed behavior or the concrete blocker that justifies the verdict.",
       "Set passed=false if any requested behavior still relies on placeholder, fallback, no-data, or unsupported upstream sources instead of the requested real result.",
+      "When additional tests are necessary in this TypeScript workspace, prefer the project's documented scripts or built dist tests after a build instead of raw node --test src/**/*.ts entrypoints.",
       "Do not modify files, create temp scripts or temp files, run builds, or attempt follow-up fixes during verify.",
       "Use already captured evidence first and keep any additional inspection strictly read-only and minimal."
     ].join(" ");

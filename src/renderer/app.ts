@@ -886,6 +886,7 @@ let lastOrchestratorDetailSignature = "";
 let lastOrchestratorTreeSignature = "";
 let fitAllSessionsHandle: number | null = null;
 let fitOrchestratorNodeTerminalHandle: number | null = null;
+let fitOrchestratorNodeTerminalRetryCount = 0;
 let activeWorkspaceTabId: string | null = "orchestrator";
 let isOrchestratorTabOpen = true;
 let selectedOrchestratorNodeId: string | null = null;
@@ -4369,13 +4370,53 @@ function normalizeTerminalTextForXterm(value: string): string {
   return value.replace(/\r?\n/g, "\r\n");
 }
 
-function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal) {
+function resolveReadOnlyTerminalDimension(
+  candidates: number[],
+  minimum: number,
+  maximum = Number.POSITIVE_INFINITY
+): number | null {
+  const finiteCandidates = candidates
+    .filter((candidate) => Number.isFinite(candidate) && candidate > 0)
+    .map((candidate) => Math.min(candidate, maximum));
+  if (finiteCandidates.length === 0) {
+    return null;
+  }
+
+  return Math.max(Math.min(...finiteCandidates), minimum);
+}
+
+function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): boolean {
   const viewportRect = container.getBoundingClientRect();
-  const availableWidth = Math.max(viewportRect.width, 360);
-  const availableHeight = Math.max(viewportRect.height, 220);
+  const parentElement = container.parentElement;
+  const parentRect = parentElement?.getBoundingClientRect() ?? null;
+  const maxViewportWidth = Math.max(360, appWindow.innerWidth - 48);
+  const availableWidth = resolveReadOnlyTerminalDimension(
+    [
+      container.clientWidth,
+      viewportRect.width,
+      parentElement?.clientWidth ?? 0,
+      parentRect?.width ?? 0
+    ],
+    360,
+    maxViewportWidth
+  );
+  const availableHeight = resolveReadOnlyTerminalDimension(
+    [
+      container.clientHeight,
+      viewportRect.height,
+      parentElement?.clientHeight ?? 0,
+      parentRect?.height ?? 0
+    ],
+    220
+  );
+  if (availableWidth === null || availableHeight === null) {
+    return false;
+  }
+
   const cols = Math.max(40, Math.floor(availableWidth / 9));
   const rows = Math.max(12, Math.floor(availableHeight / 18));
   terminal.resize(cols, rows);
+  return true;
 }
 
 function ensureOrchestratorNodeTerminal() {
@@ -4391,15 +4432,17 @@ function ensureOrchestratorNodeTerminal() {
   });
   terminal.open(orchestratorNodeTerminalEl);
   orchestratorNodeTerminal = terminal;
-  fitReadOnlyTerminal(orchestratorNodeTerminalEl, terminal);
+  if (!fitReadOnlyTerminal(orchestratorNodeTerminalEl, terminal)) {
+    scheduleFitOrchestratorNodeTerminal();
+  }
 }
 
-function fitOrchestratorNodeTerminal() {
+function fitOrchestratorNodeTerminal(): boolean {
   if (!orchestratorNodeTerminal) {
-    return;
+    return false;
   }
 
-  fitReadOnlyTerminal(orchestratorNodeTerminalEl, orchestratorNodeTerminal);
+  return fitReadOnlyTerminal(orchestratorNodeTerminalEl, orchestratorNodeTerminal);
 }
 
 function scheduleFitOrchestratorNodeTerminal() {
@@ -4409,7 +4452,25 @@ function scheduleFitOrchestratorNodeTerminal() {
 
   fitOrchestratorNodeTerminalHandle = appWindow.requestAnimationFrame(() => {
     fitOrchestratorNodeTerminalHandle = null;
-    fitOrchestratorNodeTerminal();
+    const fitted = fitOrchestratorNodeTerminal();
+    if (fitted) {
+      fitOrchestratorNodeTerminalRetryCount = 0;
+      return;
+    }
+
+    if (
+      fitOrchestratorNodeTerminalRetryCount >= 2
+      || orchestratorDetailPanelNodeEl.hidden
+      || activeOrchestratorDetailTab !== "node"
+    ) {
+      fitOrchestratorNodeTerminalRetryCount = 0;
+      return;
+    }
+
+    fitOrchestratorNodeTerminalRetryCount += 1;
+    appWindow.setTimeout(() => {
+      scheduleFitOrchestratorNodeTerminal();
+    }, 32);
   });
 }
 

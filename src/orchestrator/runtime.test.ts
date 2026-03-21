@@ -2503,6 +2503,104 @@ test("runtime rejects claimed verification success when model output still conta
   );
 });
 
+test("runtime does not fail successful verification just because raw execute output mentions placeholder text", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        concretePlan: () => ({
+          summary: "Execution is ready",
+          childTasks: [],
+          executionNotes: []
+        }),
+        verify: () => ({
+          summary: "Verification passed with real Gemini percentage output wired to the UI.",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => ({
+          summary: "Gather complete",
+          evidenceBundles: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execute complete",
+          outputs: [
+            "Test fixture note: the legacy placeholder/no-data fallback string still exists in an old test snapshot."
+          ],
+          completed: true
+        })
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry);
+  const result = await runtime.executeScheduledRun({
+    goal: "Ignore raw placeholder text in execute logs when verification passes",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    },
+    reviewPolicy: "none"
+  });
+
+  assert.equal(result.snapshot.run.status, "done");
+  assert.equal(
+    result.snapshot.events.some((event) =>
+      event.type === "run_failed"
+      && String(event.payload.error).includes("unresolved blocker signal")
+    ),
+    false
+  );
+});
+
 test("runtime records failure events when a node invocation throws", async () => {
   const trace: string[] = [];
   const registry = new ModelAdapterRegistry();

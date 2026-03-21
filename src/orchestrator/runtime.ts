@@ -794,7 +794,6 @@ export class OrchestratorRuntime {
     const unresolvedSuccessSignal = verificationPassed
       ? findUnresolvedSuccessSignal([
           execute.summary,
-          ...execute.outputs,
           verify.summary,
           ...verify.findings,
           review?.summary,

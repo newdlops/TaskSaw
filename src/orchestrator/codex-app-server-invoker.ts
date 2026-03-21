@@ -658,6 +658,10 @@ function buildCodexApprovalDetails(method: string, params: Record<string, unknow
   const command = readString(params.command);
   if (command) {
     lines.push(`command: ${command}`);
+    const normalizationNote = getCodexCommandNormalizationNote(command);
+    if (normalizationNote) {
+      lines.push(normalizationNote);
+    }
   }
 
   const reason = readString(params.reason);
@@ -671,6 +675,15 @@ function buildCodexApprovalDetails(method: string, params: Record<string, unknow
   }
 
   return lines.length > 0 ? lines.join("\n\n") : undefined;
+}
+
+function getCodexCommandNormalizationNote(command: string): string | null {
+  const normalized = command.trim();
+  if (!/\bnode\s+--test\b/.test(normalized) || !/\bsrc\/.*\.ts\b/.test(normalized)) {
+    return null;
+  }
+
+  return "Preferred verification path for this repo: run npm run build first, then use built dist tests (for example node --test dist/...) or the project's documented test script.";
 }
 
 function extractCodexRequestLocations(params: Record<string, unknown>): string[] {

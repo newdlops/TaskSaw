@@ -437,6 +437,44 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 return decision;
               }
 
+              const focusedGatherLowSignalReason = getFocusedGatherLowSignalRejectionReason({
+                capability,
+                workflowStage: context.workflowStage,
+                nodeTitle: context.node.title,
+                toolCall: permissionRequest.toolCall
+              });
+              if (focusedGatherLowSignalReason) {
+                readOnlyProbeGuardState.consecutiveRejections += 1;
+                if (shouldAbortReadOnlyProbeLoop({
+                  workflowStage: context.workflowStage,
+                  state: readOnlyProbeGuardState
+                })) {
+                  const abortMessage = "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget";
+                  context.reportProgress?.(
+                    abortMessage,
+                    {
+                      capability,
+                      model: modelId,
+                      toolCall: toolCallSummary ?? null
+                    }
+                  );
+                  throw new GeminiAcpReadOnlyProbeLoopAbortError(abortMessage);
+                }
+                const decision: OrchestratorApprovalDecision = {
+                  outcome: "cancelled"
+                };
+                context.reportProgress?.(
+                  focusedGatherLowSignalReason,
+                  {
+                    capability,
+                    model: modelId,
+                    toolCall: toolCallSummary ?? null
+                  }
+                );
+                promptActivity.touch();
+                return decision;
+              }
+
               const repeatedProbeReason = getReadOnlyProbeGuardRejectionReason({
                 capability,
                 workflowStage: context.workflowStage,
@@ -1106,6 +1144,13 @@ const BOOTSTRAP_SKETCH_ALLOWED_READ_ONLY_COMMANDS = new Set([
   "pwd"
 ]);
 
+const FOCUSED_GATHER_LOW_SIGNAL_COMMANDS = new Set([
+  "find",
+  "ls",
+  "pwd",
+  "which"
+]);
+
 const COMMAND_FAMILY_SKIP_SET = new Set([
   "cat",
   "ls",
@@ -1256,6 +1301,50 @@ function getReadOnlyProbeGuardRejectionReason(params: {
   return null;
 }
 
+function getFocusedGatherLowSignalRejectionReason(params: {
+  capability: OrchestratorCapability;
+  workflowStage: ModelInvocationContext["workflowStage"];
+  nodeTitle: string;
+  toolCall: {
+    title?: string;
+    kind?: string;
+    content?: Array<
+      | {
+        type?: string;
+        path?: string;
+        oldText?: string;
+        newText?: string;
+      }
+      | {
+        type?: string;
+        content?: {
+          type?: string;
+          text?: string;
+        };
+      }
+    >;
+  } | undefined;
+}): string | null {
+  if (
+    params.capability !== "gather"
+    || params.workflowStage !== "task_orchestration"
+    || params.toolCall?.kind?.trim() !== "execute"
+    || !/focused gather/i.test(params.nodeTitle)
+  ) {
+    return null;
+  }
+
+  const commandText = extractExecuteToolCallCommandText(params.toolCall)
+    ?? buildExecuteToolCallFingerprint(params.toolCall);
+  if (!commandText) {
+    return null;
+  }
+
+  return isFocusedGatherLowSignalReadOnlyCommand(commandText)
+    ? "Rejected Gemini tool call because focused gather must inspect named targets directly instead of rediscovering files or paths"
+    : null;
+}
+
 function shouldAbortReadOnlyProbeLoop(params: {
   workflowStage: ModelInvocationContext["workflowStage"];
   state: ReadOnlyProbeGuardState;
@@ -1333,6 +1422,15 @@ function buildReadOnlyProbeLoopAbortOutput(
       ? "반복된 외부 probing이 cutoff에 걸려 단계를 조기 종료했습니다."
       : "The stage stopped early after repeated external probing hit the cutoff."
   });
+}
+
+function isFocusedGatherLowSignalReadOnlyCommand(commandText: string): boolean {
+  const commandName = extractPrimaryCommandName(commandText);
+  if (!commandName) {
+    return false;
+  }
+
+  return FOCUSED_GATHER_LOW_SIGNAL_COMMANDS.has(commandName);
 }
 
 function getBootstrapSketchExecuteRejectionReason(params: {

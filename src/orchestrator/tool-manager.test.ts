@@ -351,3 +351,101 @@ test("tool manager resolves Gemini auto aliases to concrete catalog models befor
     fs.rmSync(userData, { recursive: true, force: true });
   }
 });
+
+test("tool manager maps Gemini /stats model remaining percent onto the selected model", async () => {
+  const userData = createTempDirectory("tasksaw-user-data-");
+
+  try {
+    const manager = new ToolManager(userData);
+    const managerStub = manager as unknown as {
+      discoverModelCatalog: (toolId: "gemini") => Promise<{
+        currentModelId: string;
+        models: Array<{ id: string; displayName: string; hidden: boolean }>;
+      }>;
+      queryGeminiModelUsageStats: () => Promise<unknown>;
+      getGeminiUsage: () => Promise<{
+        remainingPercent: number | null;
+        gemini: {
+          models: Array<{ modelId: string; displayName: string; remainingPercent: number | null }>;
+        };
+      } | null>;
+    };
+
+    managerStub.discoverModelCatalog = async () => ({
+      currentModelId: "gemini-2.5-pro",
+      models: [
+        { id: "gemini-2.5-pro", displayName: "Gemini 2.5 Pro", hidden: false },
+        { id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash", hidden: false }
+      ]
+    });
+    managerStub.queryGeminiModelUsageStats = async () => ({
+      models: [
+        { model: "gemini-2.5-pro", remainingPercent: 62.4 },
+        { model: "gemini-2.5-flash", remainingPercent: 15 }
+      ]
+    });
+
+    const usage = await managerStub.getGeminiUsage();
+
+    assert.deepEqual(usage, {
+      remainingPercent: 62,
+      gemini: {
+        models: [
+          { modelId: "gemini-2.5-pro", displayName: "2.5 Pro", remainingPercent: 62 },
+          { modelId: "gemini-2.5-flash", displayName: "2.5 Flash", remainingPercent: 15 }
+        ]
+      }
+    });
+  } finally {
+    fs.rmSync(userData, { recursive: true, force: true });
+  }
+});
+
+test("tool manager computes Gemini remaining percent from quota and usage fields", async () => {
+  const userData = createTempDirectory("tasksaw-user-data-");
+
+  try {
+    const manager = new ToolManager(userData);
+    const managerStub = manager as unknown as {
+      discoverModelCatalog: (toolId: "gemini") => Promise<{
+        currentModelId: string;
+        models: Array<{ id: string; displayName: string; hidden: boolean }>;
+      }>;
+      queryGeminiModelUsageStats: () => Promise<unknown>;
+      getGeminiUsage: () => Promise<{
+        remainingPercent: number | null;
+        gemini: {
+          models: Array<{ modelId: string; displayName: string; remainingPercent: number | null }>;
+        };
+      } | null>;
+    };
+
+    managerStub.discoverModelCatalog = async () => ({
+      currentModelId: "gemini-2.5-pro",
+      models: [
+        { id: "gemini-2.5-pro", displayName: "Gemini 2.5 Pro", hidden: false },
+        { id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash", hidden: false }
+      ]
+    });
+    managerStub.queryGeminiModelUsageStats = async () => ({
+      stats: [
+        { modelId: "models/gemini-2.5-pro", quota: 1000, used: 420 },
+        { modelId: "models/gemini-2.5-flash", quota: 200, used: 20 }
+      ]
+    });
+
+    const usage = await managerStub.getGeminiUsage();
+
+    assert.deepEqual(usage, {
+      remainingPercent: 58,
+      gemini: {
+        models: [
+          { modelId: "gemini-2.5-pro", displayName: "2.5 Pro", remainingPercent: 58 },
+          { modelId: "gemini-2.5-flash", displayName: "2.5 Flash", remainingPercent: 90 }
+        ]
+      }
+    });
+  } finally {
+    fs.rmSync(userData, { recursive: true, force: true });
+  }
+});

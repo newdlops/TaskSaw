@@ -173,6 +173,23 @@ test("task orchestration gather prompt forbids broad search before checking memo
     prompt,
     /When probing an external CLI surface, prefer one documented help\/usage check and one direct capability check\./
   );
+  assert.match(
+    prompt,
+    /In a focused follow-up gather pass, inspect named files, symbols, or managed-tool surfaces directly instead of rediscovering whether they exist\./
+  );
+  assert.match(
+    prompt,
+    /Do not spend focused gather budget on existence-only commands such as find-by-name sweeps, plain ls path checks, recursive ls listings, or broad \*\.md\/settings\.json searches/
+  );
+});
+
+test("task orchestration execute prompt prefers build-first dist tests over raw source TypeScript tests", () => {
+  const prompt = buildCliPrompt("execute", createContext(TEST_MODEL));
+
+  assert.match(
+    prompt,
+    /When execution needs tests in this TypeScript workspace, prefer the project's documented scripts or a build-first path such as npm run build followed by built dist tests over raw node --test src\/\*\*\/\*\.ts entrypoints\./
+  );
 });
 
 test("bootstrap sketch gather prompt stays at seed level and defers deep probing", () => {
@@ -246,6 +263,10 @@ test("task orchestration verify prompt rejects placeholder successes and follow-
   assert.match(
     prompt,
     /Set passed=false if any requested behavior still relies on placeholder, fallback, no-data, or unsupported upstream sources instead of the requested real result\./
+  );
+  assert.match(
+    prompt,
+    /When additional tests are necessary in this TypeScript workspace, prefer the project's documented scripts or built dist tests after a build instead of raw node --test src\/\*\*\/\*\.ts entrypoints\./
   );
   assert.match(
     prompt,
