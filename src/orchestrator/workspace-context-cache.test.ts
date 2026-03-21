@@ -33,7 +33,35 @@ function createSnapshot(runId: string): RunSnapshot {
       completedAt: "2026-03-20T00:05:00.000Z"
     },
     nodes: [],
-    evidenceBundles: [],
+    evidenceBundles: [
+      {
+        id: "bundle-1",
+        runId,
+        nodeId: "root-node",
+        summary: "tool-manager.ts handles managed tool discovery",
+        facts: [
+          {
+            id: "evidence-fact-1",
+            statement: "Managed tool discovery starts in src/main/tool-manager.ts",
+            confidence: "high",
+            referenceIds: []
+          }
+        ],
+        hypotheses: [],
+        unknowns: [],
+        relevantTargets: [
+          {
+            filePath: "src/main/tool-manager.ts",
+            note: "Primary managed tool integration point"
+          }
+        ],
+        snippets: [],
+        references: [],
+        confidence: "high",
+        createdAt: "2026-03-20T00:00:00.000Z",
+        updatedAt: "2026-03-20T00:05:00.000Z"
+      }
+    ],
     workingMemory: {
       runId,
       facts: [
@@ -111,6 +139,7 @@ test("workspace context cache saves, loads, and resets .tasksaw clues", () => {
 
   const seed = cache.loadSeed();
   assert.ok(seed);
+  assert.equal(seed?.evidenceBundles[0]?.summary, "tool-manager.ts handles managed tool discovery");
   assert.equal(seed?.workingMemory.facts[0]?.statement, "src/main owns tool installation and auth");
   assert.equal(seed?.projectStructure.summary, "Electron app split across main, renderer, and orchestrator");
   assert.equal(fs.existsSync(path.join(workspacePath, ".tasksaw", "context.json")), true);
@@ -126,4 +155,102 @@ test("workspace context cache saves, loads, and resets .tasksaw clues", () => {
 
   cache.clear();
   assert.equal(fs.existsSync(path.join(workspacePath, ".tasksaw")), false);
+});
+
+test("workspace context cache actively merges README and mirrored hint files into the loaded seed", () => {
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "tasksaw-workspace-hint-merge-"));
+  const cache = new WorkspaceContextCache(workspacePath);
+
+  const snapshot = createSnapshot("run-cache-merge");
+  snapshot.run.workspacePath = workspacePath;
+  cache.saveSnapshot(snapshot);
+
+  fs.appendFileSync(
+    path.join(workspacePath, ".tasksaw", "README.md"),
+    "\n## Cached Facts\n\n- Manual hint fact from README\n",
+    "utf8"
+  );
+
+  const mirroredHintPath = path.join(workspacePath, ".tasksaw", "src", "renderer", "app.ts.tasksaw.md");
+  fs.mkdirSync(path.dirname(mirroredHintPath), { recursive: true });
+  fs.writeFileSync(
+    mirroredHintPath,
+    [
+      "# TaskSaw Hint",
+      "",
+      "Source path: src/renderer/app.ts",
+      "Reference only. Real workspace files win on conflict.",
+      "",
+      "## Key File",
+      "Summary: Renderer usage indicator and logbar rendering",
+      "Confidence: medium",
+      "",
+      "## Module",
+      "Name: renderer-status-ui",
+      "Summary: Status bar and usage UI rendering",
+      "Confidence: medium",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  const seed = cache.loadSeed();
+  assert.ok(seed);
+  assert.equal(seed?.workingMemory.facts.some((fact) => fact.statement === "Manual hint fact from README"), true);
+  assert.equal(seed?.projectStructure.keyFiles.some((entry) => entry.path === "src/renderer/app.ts"), true);
+  assert.equal(seed?.projectStructure.modules.some((entry) => entry.name === "renderer-status-ui"), true);
+});
+
+test("workspace context cache can rebuild a seed from hint files when context.json is missing", () => {
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "tasksaw-workspace-hint-fallback-"));
+  const cacheRoot = path.join(workspacePath, ".tasksaw");
+  fs.mkdirSync(path.join(cacheRoot, "src", "main"), { recursive: true });
+
+  fs.writeFileSync(
+    path.join(cacheRoot, "README.md"),
+    [
+      "# TaskSaw Workspace Cache",
+      "",
+      "Updated at: 2026-03-20T00:05:00.000Z",
+      "Source run: run-from-hints",
+      "",
+      "## Project Summary",
+      "",
+      "Workspace reconstructed from markdown hints.",
+      "",
+      "## Cached Facts",
+      "",
+      "- Hint-only fact",
+      "",
+      "## Key Files",
+      "",
+      "- src/main/tool-manager.ts: Managed tool integration",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  fs.writeFileSync(
+    path.join(cacheRoot, "src", "main", "tool-manager.ts.tasksaw.md"),
+    [
+      "# TaskSaw Hint",
+      "",
+      "Source path: src/main/tool-manager.ts",
+      "Reference only. Real workspace files win on conflict.",
+      "",
+      "## Key File",
+      "Summary: Managed tool status collection",
+      "Confidence: high",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  const cache = new WorkspaceContextCache(workspacePath);
+  const seed = cache.loadSeed();
+
+  assert.ok(seed);
+  assert.equal(seed?.projectStructure.summary, "Workspace reconstructed from markdown hints.");
+  assert.equal(seed?.workingMemory.facts.some((fact) => fact.statement === "Hint-only fact"), true);
+  assert.equal(seed?.projectStructure.keyFiles.some((entry) => entry.path === "src/main/tool-manager.ts"), true);
 });

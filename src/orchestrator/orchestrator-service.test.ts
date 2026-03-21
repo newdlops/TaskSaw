@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { OrchestratorService } from "../main/orchestrator-service";
 import { ManagedToolModelCatalog } from "../main/types";
-import { RunSnapshot } from "./types";
+import { ContinuationSeed, RunSnapshot } from "./types";
 
 function createCodexCatalog(overrides: Partial<ManagedToolModelCatalog> = {}): ManagedToolModelCatalog {
   return {
@@ -537,7 +537,7 @@ test("orchestrator service reset removes saved workspace .tasksaw caches", () =>
   assert.equal(fs.existsSync(path.join(workspacePath, ".tasksaw")), false);
 });
 
-test("orchestrator service does not auto-load cached continuation for a fresh explicit goal", () => {
+test("orchestrator service always considers cached continuation as workspace memory, even for explicit goals", () => {
   const service = new OrchestratorService("/tmp/tasksaw-app", "/tmp/tasksaw-user-data", {
     prepareWorkspaceContext: async () => undefined,
     discoverModelCatalog: async () => createCodexCatalog()
@@ -549,20 +549,168 @@ test("orchestrator service does not auto-load cached continuation for a fresh ex
     }
   ).shouldUseCachedContinuation({ goal: "Add a compact usage indicator" }, undefined);
 
-  assert.equal(shouldUseCachedContinuation, false);
+  assert.equal(shouldUseCachedContinuation, true);
 });
 
-test("orchestrator service allows cached continuation only when there is no explicit goal and no direct continuation snapshot", () => {
+test("orchestrator service merges explicit continuation clues with cached workspace seed", () => {
   const service = new OrchestratorService("/tmp/tasksaw-app", "/tmp/tasksaw-user-data", {
     prepareWorkspaceContext: async () => undefined,
     discoverModelCatalog: async () => createCodexCatalog()
   } as never);
 
-  const shouldUseCachedContinuation = (
-    service as unknown as {
-      shouldUseCachedContinuation(input: { goal: string }, continuationSnapshot?: RunSnapshot): boolean;
+  const explicitContinuation: ContinuationSeed = {
+    sourceRunId: "run-explicit",
+    evidenceBundles: [
+      {
+        id: "bundle-explicit",
+        runId: "run-explicit",
+        nodeId: "node-explicit",
+        summary: "renderer owns usage label rendering",
+        facts: [],
+        hypotheses: [],
+        unknowns: [],
+        relevantTargets: [{ filePath: "src/renderer/app.ts" }],
+        snippets: [],
+        references: [],
+        confidence: "high",
+        createdAt: "2026-03-20T01:00:00.000Z",
+        updatedAt: "2026-03-20T01:00:00.000Z"
+      }
+    ],
+    workingMemory: {
+      runId: "run-explicit",
+      facts: [
+        {
+          id: "fact-explicit",
+          statement: "Renderer owns the status bar usage text",
+          confidence: "medium",
+          referenceIds: ["ref-explicit"],
+          relatedNodeIds: ["node-explicit"],
+          createdAt: "2026-03-20T01:00:00.000Z",
+          updatedAt: "2026-03-20T01:00:00.000Z"
+        }
+      ],
+      openQuestions: [],
+      unknowns: [],
+      conflicts: [],
+      decisions: [],
+      updatedAt: "2026-03-20T01:00:00.000Z"
+    },
+    projectStructure: {
+      runId: "run-explicit",
+      summary: "",
+      directories: [],
+      keyFiles: [
+        {
+          id: "file-explicit",
+          path: "src/renderer/app.ts",
+          summary: "Renderer usage rendering",
+          confidence: "medium",
+          referenceIds: ["ref-explicit"],
+          relatedNodeIds: ["node-explicit"],
+          createdAt: "2026-03-20T01:00:00.000Z",
+          updatedAt: "2026-03-20T01:00:00.000Z"
+        }
+      ],
+      entryPoints: [],
+      modules: [],
+      openQuestions: [],
+      contradictions: [],
+      updatedAt: "2026-03-20T01:00:00.000Z"
     }
-  ).shouldUseCachedContinuation({ goal: "   " }, undefined);
+  };
 
-  assert.equal(shouldUseCachedContinuation, true);
+  const cachedContinuation: ContinuationSeed = {
+    sourceRunId: "run-cached",
+    evidenceBundles: [
+      {
+        id: "bundle-cached",
+        runId: "run-cached",
+        nodeId: "node-cached",
+        summary: "tool manager owns managed usage collection",
+        facts: [],
+        hypotheses: [],
+        unknowns: [],
+        relevantTargets: [{ filePath: "src/main/tool-manager.ts" }],
+        snippets: [],
+        references: [],
+        confidence: "high",
+        createdAt: "2026-03-19T23:00:00.000Z",
+        updatedAt: "2026-03-19T23:00:00.000Z"
+      }
+    ],
+    workingMemory: {
+      runId: "run-cached",
+      facts: [
+        {
+          id: "fact-cached",
+          statement: "Tool manager owns managed usage collection",
+          confidence: "high",
+          referenceIds: ["ref-cached"],
+          relatedNodeIds: ["node-cached"],
+          createdAt: "2026-03-19T23:00:00.000Z",
+          updatedAt: "2026-03-19T23:00:00.000Z"
+        }
+      ],
+      openQuestions: [],
+      unknowns: [],
+      conflicts: [],
+      decisions: [],
+      updatedAt: "2026-03-19T23:00:00.000Z"
+    },
+    projectStructure: {
+      runId: "run-cached",
+      summary: "Workspace cache summary",
+      directories: [
+        {
+          id: "dir-cached",
+          path: "src/main",
+          summary: "Main process integration layer",
+          confidence: "high",
+          referenceIds: ["ref-cached"],
+          relatedNodeIds: ["node-cached"],
+          createdAt: "2026-03-19T23:00:00.000Z",
+          updatedAt: "2026-03-19T23:00:00.000Z"
+        }
+      ],
+      keyFiles: [],
+      entryPoints: [],
+      modules: [],
+      openQuestions: [],
+      contradictions: [],
+      updatedAt: "2026-03-19T23:00:00.000Z"
+    }
+  };
+
+  const resolvedContinuation = (
+    service as unknown as {
+      resolveContinuationSeed(
+        explicitContinuation: ContinuationSeed | undefined,
+        cachedContinuation: ContinuationSeed | undefined
+      ): ContinuationSeed | undefined;
+    }
+  ).resolveContinuationSeed(explicitContinuation, cachedContinuation);
+
+  assert.ok(resolvedContinuation);
+  assert.equal(resolvedContinuation?.sourceRunId, "run-explicit");
+  assert.deepEqual(
+    resolvedContinuation?.evidenceBundles.map((bundle) => bundle.summary),
+    ["renderer owns usage label rendering", "tool manager owns managed usage collection"]
+  );
+  assert.deepEqual(
+    resolvedContinuation?.workingMemory.facts.map((fact) => fact.statement),
+    [
+      "Renderer owns the status bar usage text",
+      "Tool manager owns managed usage collection"
+    ]
+  );
+  assert.equal(resolvedContinuation?.projectStructure.summary, "Workspace cache summary");
+  assert.deepEqual(
+    resolvedContinuation?.projectStructure.keyFiles.map((entry) => entry.path),
+    ["src/renderer/app.ts"]
+  );
+  assert.deepEqual(
+    resolvedContinuation?.projectStructure.directories.map((entry) => entry.path),
+    ["src/main"]
+  );
 });

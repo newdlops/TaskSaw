@@ -2,7 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   CliModelAdapter,
+  ConfidenceLevel,
   ContinuationSeed,
+  EvidenceBundle,
   createCodexAppServerInvoker,
   createGeminiAcpInvoker,
   ModelAssignment,
@@ -17,6 +19,7 @@ import {
   OrchestratorPersistence,
   OrchestratorRuntime,
   RunSnapshot,
+  WorkingMemoryUnknown,
   WorkspaceContextCache
 } from "../orchestrator";
 import { ToolManager } from "./tool-manager";
@@ -242,11 +245,9 @@ export class OrchestratorService {
     input: RunOrchestratorInput,
     continuationSnapshot: RunSnapshot | undefined
   ): boolean {
-    if (continuationSnapshot) {
-      return false;
-    }
-
-    return input.goal.trim().length === 0;
+    void input;
+    void continuationSnapshot;
+    return true;
   }
 
   private resolveRunGoal(input: RunOrchestratorInput, continuationSnapshot: RunSnapshot | undefined): string {
@@ -289,15 +290,248 @@ export class OrchestratorService {
     explicitContinuation: ContinuationSeed | undefined,
     cachedContinuation: ContinuationSeed | undefined
   ): ContinuationSeed | undefined {
-    if (explicitContinuation && this.hasContinuationClues(explicitContinuation)) {
-      return explicitContinuation;
+    const explicitWithClues = explicitContinuation && this.hasContinuationClues(explicitContinuation)
+      ? explicitContinuation
+      : undefined;
+    const cachedWithClues = cachedContinuation && this.hasContinuationClues(cachedContinuation)
+      ? cachedContinuation
+      : undefined;
+
+    if (explicitWithClues && cachedWithClues) {
+      return this.mergeContinuationSeeds(explicitWithClues, cachedWithClues);
     }
 
-    if (cachedContinuation && this.hasContinuationClues(cachedContinuation)) {
-      return cachedContinuation;
+    return explicitWithClues ?? cachedWithClues ?? explicitContinuation ?? cachedContinuation;
+  }
+
+  private mergeContinuationSeeds(
+    primary: ContinuationSeed,
+    supplemental: ContinuationSeed
+  ): ContinuationSeed {
+    return {
+      sourceRunId: primary.sourceRunId,
+      evidenceBundles: this.mergeEvidenceBundles(primary.evidenceBundles, supplemental.evidenceBundles),
+      workingMemory: {
+        ...primary.workingMemory,
+        facts: this.mergePrimaryFirstEntries(
+          primary.workingMemory.facts,
+          supplemental.workingMemory.facts,
+          (entry) => this.normalizeContinuationText(entry.statement),
+          (preferred, secondary) => ({
+            ...preferred,
+            confidence: this.mergeConfidence(preferred.confidence, secondary.confidence),
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        openQuestions: this.mergePrimaryFirstEntries(
+          primary.workingMemory.openQuestions,
+          supplemental.workingMemory.openQuestions,
+          (entry) => this.normalizeContinuationText(entry.question),
+          (preferred, secondary) => ({
+            ...preferred,
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        unknowns: this.mergePrimaryFirstEntries(
+          primary.workingMemory.unknowns,
+          supplemental.workingMemory.unknowns,
+          (entry) => this.normalizeContinuationText(entry.description),
+          (preferred, secondary) => ({
+            ...preferred,
+            impact: this.mergeImpact(preferred.impact, secondary.impact),
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        conflicts: this.mergePrimaryFirstEntries(
+          primary.workingMemory.conflicts,
+          supplemental.workingMemory.conflicts,
+          (entry) => this.normalizeContinuationText(entry.summary),
+          (preferred, secondary) => ({
+            ...preferred,
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        decisions: this.mergePrimaryFirstEntries(
+          primary.workingMemory.decisions,
+          supplemental.workingMemory.decisions,
+          (entry) => `${this.normalizeContinuationText(entry.summary)}::${this.normalizeContinuationText(entry.rationale)}`,
+          (preferred, secondary) => ({
+            ...preferred,
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        updatedAt: this.pickLaterTimestamp(primary.workingMemory.updatedAt, supplemental.workingMemory.updatedAt)
+      },
+      projectStructure: {
+        ...primary.projectStructure,
+        summary: primary.projectStructure.summary.trim().length > 0
+          ? primary.projectStructure.summary
+          : supplemental.projectStructure.summary,
+        directories: this.mergePrimaryFirstEntries(
+          primary.projectStructure.directories,
+          supplemental.projectStructure.directories,
+          (entry) => entry.path.trim(),
+          (preferred, secondary) => ({
+            ...preferred,
+            summary: preferred.summary.trim().length > 0 ? preferred.summary : secondary.summary,
+            confidence: this.mergeConfidence(preferred.confidence, secondary.confidence),
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        keyFiles: this.mergePrimaryFirstEntries(
+          primary.projectStructure.keyFiles,
+          supplemental.projectStructure.keyFiles,
+          (entry) => entry.path.trim(),
+          (preferred, secondary) => ({
+            ...preferred,
+            summary: preferred.summary.trim().length > 0 ? preferred.summary : secondary.summary,
+            confidence: this.mergeConfidence(preferred.confidence, secondary.confidence),
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        entryPoints: this.mergePrimaryFirstEntries(
+          primary.projectStructure.entryPoints,
+          supplemental.projectStructure.entryPoints,
+          (entry) => `${entry.path.trim()}::${entry.role.trim()}`,
+          (preferred, secondary) => ({
+            ...preferred,
+            summary: preferred.summary.trim().length > 0 ? preferred.summary : secondary.summary,
+            confidence: this.mergeConfidence(preferred.confidence, secondary.confidence),
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        modules: this.mergePrimaryFirstEntries(
+          primary.projectStructure.modules,
+          supplemental.projectStructure.modules,
+          (entry) => entry.name.trim(),
+          (preferred, secondary) => ({
+            ...preferred,
+            summary: preferred.summary.trim().length > 0 ? preferred.summary : secondary.summary,
+            relatedPaths: this.mergeStringLists(preferred.relatedPaths, secondary.relatedPaths),
+            confidence: this.mergeConfidence(preferred.confidence, secondary.confidence),
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        openQuestions: this.mergePrimaryFirstEntries(
+          primary.projectStructure.openQuestions,
+          supplemental.projectStructure.openQuestions,
+          (entry) => this.normalizeContinuationText(entry.question),
+          (preferred, secondary) => ({
+            ...preferred,
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        contradictions: this.mergePrimaryFirstEntries(
+          primary.projectStructure.contradictions,
+          supplemental.projectStructure.contradictions,
+          (entry) => this.normalizeContinuationText(entry.summary),
+          (preferred, secondary) => ({
+            ...preferred,
+            referenceIds: this.mergeStringLists(preferred.referenceIds, secondary.referenceIds),
+            relatedNodeIds: this.mergeStringLists(preferred.relatedNodeIds, secondary.relatedNodeIds),
+            createdAt: this.pickEarlierTimestamp(preferred.createdAt, secondary.createdAt),
+            updatedAt: this.pickLaterTimestamp(preferred.updatedAt, secondary.updatedAt)
+          })
+        ),
+        updatedAt: this.pickLaterTimestamp(primary.projectStructure.updatedAt, supplemental.projectStructure.updatedAt)
+      }
+    };
+  }
+
+  private mergeEvidenceBundles(primary: EvidenceBundle[], supplemental: EvidenceBundle[]): EvidenceBundle[] {
+    return this.mergePrimaryFirstEntries(
+      primary,
+      supplemental,
+      (entry) => entry.id.trim() || this.normalizeContinuationText(entry.summary),
+      (preferred) => preferred
+    );
+  }
+
+  private mergePrimaryFirstEntries<T>(
+    primary: T[],
+    supplemental: T[],
+    keyFor: (entry: T) => string,
+    merge: (preferred: T, secondary: T) => T
+  ): T[] {
+    const merged = new Map<string, T>();
+
+    for (const entry of primary) {
+      const key = keyFor(entry).trim();
+      if (!key) {
+        continue;
+      }
+      merged.set(key, entry);
     }
 
-    return explicitContinuation ?? cachedContinuation;
+    for (const entry of supplemental) {
+      const key = keyFor(entry).trim();
+      if (!key) {
+        continue;
+      }
+      const existing = merged.get(key);
+      merged.set(key, existing ? merge(existing, entry) : entry);
+    }
+
+    return [...merged.values()];
+  }
+
+  private mergeStringLists(primary: string[], supplemental: string[]): string[] {
+    return [...new Set([...primary, ...supplemental].map((entry) => entry.trim()).filter(Boolean))];
+  }
+
+  private mergeConfidence(left: ConfidenceLevel, right: ConfidenceLevel): ConfidenceLevel {
+    return this.confidenceRank(left) >= this.confidenceRank(right) ? left : right;
+  }
+
+  private mergeImpact(left: WorkingMemoryUnknown["impact"], right: WorkingMemoryUnknown["impact"]): WorkingMemoryUnknown["impact"] {
+    const rank = { low: 1, medium: 2, high: 3 };
+    return rank[left] >= rank[right] ? left : right;
+  }
+
+  private confidenceRank(value: string): number {
+    if (value === "high") return 4;
+    if (value === "mixed") return 3;
+    if (value === "medium") return 2;
+    if (value === "low") return 1;
+    return 0;
+  }
+
+  private pickEarlierTimestamp(left: string, right: string): string {
+    return Date.parse(left) <= Date.parse(right) ? left : right;
+  }
+
+  private pickLaterTimestamp(left: string, right: string): string {
+    return Date.parse(left) >= Date.parse(right) ? left : right;
   }
 
   private hasContinuationClues(continuation: ContinuationSeed): boolean {
