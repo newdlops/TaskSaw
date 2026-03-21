@@ -272,7 +272,9 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const loadAcpModule = options.dependencies?.loadAcpModule ?? defaultLoadAcpModule;
   const spawnProcess = options.dependencies?.spawnProcess ?? defaultSpawnProcess;
   const desiredModeId = options.modeId?.trim();
-  const startupTimeoutMs = Math.max(5_000, options.timeoutMs ?? 30_000);
+  const startupTimeoutMs = typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
+    ? Math.max(1_000, Math.trunc(options.timeoutMs))
+    : null;
   const promptInactivityTimeoutMs = typeof options.promptInactivityTimeoutMs === "number" && Number.isFinite(options.promptInactivityTimeoutMs)
     ? Math.max(1_000, Math.trunc(options.promptInactivityTimeoutMs))
     : null;
@@ -311,12 +313,12 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
 
           if (session.currentModelId !== modelId) {
             await withAbort(
-              withTimeout(
+              withOptionalTimeout(
                 session.connection.unstable_setSessionModel({
                   sessionId: session.sessionId,
                   modelId
                 }),
-                5_000,
+                startupTimeoutMs,
                 `Timed out while switching the Gemini ACP session model to ${modelId}`
               ),
               context.abortSignal,
@@ -359,7 +361,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 ?? optionsForUi[0];
               promptActivity.touch();
 
-              if (isReadOnlyGeminiCapability(capability) && isDisallowedReadOnlyToolCall(permissionRequest.toolCall)) {
+              if (isToolCallDisallowedForCapability(capability, permissionRequest.toolCall)) {
                 const decision: OrchestratorApprovalDecision = {
                   outcome: "cancelled"
                 };
@@ -547,7 +549,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
       };
 
       await withAbort(
-        withTimeout(
+        withOptionalTimeout(
           connection.initialize({
             protocolVersion: acpModule.PROTOCOL_VERSION,
             clientCapabilities: {
@@ -566,7 +568,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
       );
 
       const session = await withAbort(
-        withTimeout<GeminiNewSessionResponse>(
+        withOptionalTimeout<GeminiNewSessionResponse>(
           connection.newSession({
             cwd: workspaceRoot,
             mcpServers: []
@@ -590,12 +592,12 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
         ?? [];
       if (desiredModeId && availableModeIds.includes(desiredModeId) && connection.setSessionMode) {
         await withAbort(
-          withTimeout(
+          withOptionalTimeout(
             connection.setSessionMode({
               sessionId,
               modeId: desiredModeId
             }),
-            Math.min(startupTimeoutMs, 10_000),
+            startupTimeoutMs,
             `Timed out while switching the Gemini ACP session to ${desiredModeId} mode`
           ),
           abortSignal,
@@ -771,7 +773,50 @@ function isReadOnlyGeminiCapability(capability: OrchestratorCapability): boolean
   return capability !== "execute";
 }
 
-function isDisallowedReadOnlyToolCall(toolCall: {
+function disallowsExecuteToolCallsInCapability(capability: OrchestratorCapability): boolean {
+  return capability === "abstractPlan" || capability === "concretePlan" || capability === "review";
+}
+
+function isToolCallDisallowedForCapability(
+  capability: OrchestratorCapability,
+  toolCall: {
+    title?: string;
+    kind?: string;
+    content?: Array<
+      | {
+        type?: string;
+        path?: string;
+        oldText?: string;
+        newText?: string;
+      }
+      | {
+        type?: string;
+        content?: {
+          type?: string;
+          text?: string;
+        };
+      }
+    >;
+  } | undefined
+): boolean {
+  const kind = toolCall?.kind?.trim();
+  if (kind === "edit") {
+    return capability !== "execute";
+  }
+  if (kind !== "execute") {
+    return false;
+  }
+  if (disallowsExecuteToolCallsInCapability(capability)) {
+    return true;
+  }
+  if (!isReadOnlyGeminiCapability(capability)) {
+    return false;
+  }
+
+  return isDisallowedReadOnlyExecuteToolCall(toolCall);
+}
+
+function isDisallowedReadOnlyExecuteToolCall(toolCall: {
   title?: string;
   kind?: string;
   content?: Array<
@@ -790,14 +835,6 @@ function isDisallowedReadOnlyToolCall(toolCall: {
     }
   >;
 } | undefined): boolean {
-  const kind = toolCall?.kind?.trim();
-  if (kind === "edit") {
-    return true;
-  }
-  if (kind !== "execute") {
-    return false;
-  }
-
   const lowerText = [
     toolCall?.title ?? "",
     ...(toolCall?.content ?? []).map((entry) => {
@@ -839,7 +876,9 @@ const READ_ONLY_MUTATION_COMMAND_PATTERNS = [
   /\bchown\b/,
   /\bgit\s+(?:add|apply|am|checkout|clean|commit|merge|mv|rebase|reset|restore|revert|rm)\b/,
   /\bsed\s+-i\b/,
-  /\bperl\s+-i\b/
+  /\bperl\s+-i\b/,
+  /<<[-~]?\s*['"]?[a-z0-9_]+['"]?/,
+  /(^|[\s;&|])>>?\s*[^=\s][^\s]*/
 ] as const;
 
 function buildGeminiAttemptModels(
@@ -1094,6 +1133,14 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
       }
     );
   });
+}
+
+function withOptionalTimeout<T>(promise: Promise<T>, timeoutMs: number | null, message: string): Promise<T> {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return promise;
+  }
+
+  return withTimeout(promise, timeoutMs, message);
 }
 
 function withAbort<T>(

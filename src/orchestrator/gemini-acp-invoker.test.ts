@@ -705,12 +705,13 @@ test("gemini ACP invoker pauses inactivity timeout while awaiting approval and r
   );
 });
 
-test("gemini ACP invoker rejects edit and build tool calls during gather without prompting the user", async () => {
+test("gemini ACP invoker rejects edit, build, and heredoc write tool calls during gather without prompting the user", async () => {
   const fakeChild = new FakeChildProcess();
   const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
   let approvalRequestCount = 0;
   let editOutcome = "";
   let buildOutcome = "";
+  let heredocOutcome = "";
 
   const adapter = new CliModelAdapter({
     model: TEST_MODEL,
@@ -791,6 +792,15 @@ test("gemini ACP invoker rejects edit and build tool calls during gather without
               });
               buildOutcome = buildDecision.outcome.outcome;
 
+              const heredocDecision = await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "cat << 'EOF' > plan.json",
+                  kind: "execute"
+                }
+              });
+              heredocOutcome = heredocDecision.outcome.outcome;
+
               await this.client.sessionUpdate({
                 update: {
                   sessionUpdate: "agent_message_chunk",
@@ -832,12 +842,130 @@ test("gemini ACP invoker rejects edit and build tool calls during gather without
   assert.equal(result.summary, "Gather stayed read-only");
   assert.equal(editOutcome, "cancelled");
   assert.equal(buildOutcome, "cancelled");
+  assert.equal(heredocOutcome, "cancelled");
   assert.equal(approvalRequestCount, 0);
   assert.equal(
     progressMessages.filter((entry) => entry.message === "Rejected Gemini tool call because this phase is read-only")
       .length,
-    2
+    3
   );
+});
+
+test("gemini ACP invoker rejects execute tool calls during concrete planning without prompting the user", async () => {
+  const fakeChild = new FakeChildProcess();
+  let approvalRequestCount = 0;
+  let executeOutcome = "";
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      cwd: process.cwd(),
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return {
+                protocolVersion: 1
+              };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const executeDecision = await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "cat plan.json",
+                  kind: "execute"
+                }
+              });
+              executeOutcome = executeDecision.outcome.outcome;
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Concrete plan stayed tool-free",
+                      childTasks: [],
+                      executionNotes: [],
+                      needsMorePlanning: false
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["concretePlan"]
+  });
+
+  const result = await adapter.concretePlan!({
+    ...createContext(TEST_MODEL),
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    }
+  });
+
+  assert.equal(result.summary, "Concrete plan stayed tool-free");
+  assert.equal(executeOutcome, "cancelled");
+  assert.equal(approvalRequestCount, 0);
 });
 
 test("gemini ACP invoker blocks direct file writes outside execute", async () => {

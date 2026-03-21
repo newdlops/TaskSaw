@@ -146,12 +146,12 @@ export class ToolManager {
 
   private async getCodexUsage(): Promise<ManagedToolStatus["usage"]> {
     try {
-      const launchCommand = this.resolveInstalledLaunchCommand("codex");
-      if (!launchCommand) {
+      const helperPath = path.join(os.homedir(), ".codex", "bin", "codex-rate-limits");
+      if (!fs.existsSync(helperPath)) {
         return null;
       }
-      const child = spawn(launchCommand.command, [...launchCommand.args, "rate-limits", "--json"], {
-        env: this.buildManagedCommandEnv("codex", launchCommand.env),
+      const child = spawn(helperPath, ["--json"], {
+        env: process.env,
         stdio: ["ignore", "pipe", "pipe"]
       });
 
@@ -174,11 +174,12 @@ export class ToolManager {
           }
           try {
             const data = JSON.parse(stdout);
-            if (typeof data.remainingPercent === "number") {
-              resolve({ remainingPercent: data.remainingPercent });
-            } else {
-              resolve(null);
-            }
+            const remainingPercent = typeof data?.primary?.left === "number"
+              ? data.primary.left
+              : typeof data?.remainingPercent === "number"
+                ? data.remainingPercent
+                : null;
+            resolve(typeof remainingPercent === "number" ? { remainingPercent } : null);
           } catch {
             resolve(null);
           }
@@ -195,7 +196,7 @@ export class ToolManager {
   }
 
   private async getGeminiUsage(): Promise<ManagedToolStatus["usage"]> {
-    // Currently Gemini CLI/ACP does not provide a direct quota/usage API.
+    // The managed Gemini CLI currently exposes no quota/status command that returns a usable percentage.
     return null;
   }
 

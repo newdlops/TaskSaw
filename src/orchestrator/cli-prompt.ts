@@ -294,6 +294,7 @@ function buildStageInstructions(
       "Set needsProjectStructureInspection=true only for repository-structure gaps: contradictory file paths, entrypoints, modules, runtime boundaries, IPC/preload wiring, or renderer DOM locations that must be re-read from the workspace.",
       "Do not request projectStructure inspection for non-structural gaps such as unsupported product capabilities, missing external quota APIs, absent managed-tool features, auth limitations, or implementation tradeoffs. Treat those as execution-planning facts instead.",
       "If the key blocker is a missing or unsupported data source rather than ambiguous repository structure, keep needsProjectStructureInspection=false and explain the blocker or fallback in executionNotes or childTasks.",
+      "Do not call tools, create temp files, or run shell commands during concrete planning. Use only the provided memory and gathered evidence.",
       "Decide only at the current node level whether more planning is needed.",
       "Set needsMorePlanning=true only if this node must split into separately planned subproblems.",
       "If the current node is already execution-ready, set needsMorePlanning=false, keep childTasks empty when possible, and put the actionable execution detail into executionNotes.",
@@ -310,7 +311,7 @@ function buildStageInstructions(
       "Start from the provided evidence, workingMemory, and projectStructure before doing any new search.",
       "Turn the existing open questions, contradictions, keyFiles, entryPoints, relevantTargets, and recent memory decisions into 1-3 concrete inspection targets.",
       "If the current memory already names likely files, modules, entrypoints, or managed tool locations, inspect those first instead of widening the search.",
-      "Do not edit files, run builds, or execute other mutating commands during planning.",
+      "Do not edit files, call tools, create temp files, run builds, or execute shell commands during planning.",
       "Do not ask for broad repository or external tool exploration unless the current memory is insufficient to name a concrete next target."
     ].join(" ");
   }
@@ -321,6 +322,7 @@ function buildStageInstructions(
       "Gather only the minimum evidence needed to unblock the next concrete plan or execution step.",
       "Prefer confirming or disproving the current memory's open questions at the named files, entrypoints, modules, relevantTargets, or managed tool locations before running broader searches.",
       "If the current memory already suggests a likely absence or integration gap, confirm that directly and return compact evidence instead of expanding the search surface.",
+      "If an external CLI/API surface already appears absent or unsupported, stop after enough evidence to establish that fact. Do not keep probing undocumented alternative commands, slash commands, or ad hoc flags.",
       "Do not edit files, run builds, or execute other mutating commands in gather. This phase is read-only evidence collection.",
       "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node.",
       "Do not search outside the workspace or managed tool installation paths unless the current node explicitly requires it."
@@ -330,8 +332,19 @@ function buildStageInstructions(
   if (workflowStage === "task_orchestration" && capability === "execute") {
     return [
       "Carry out the requested implementation work instead of restating the plan.",
+      "Do not invent undocumented CLI flags, slash commands, APIs, or data sources.",
+      "If a required user-visible behavior still depends on placeholder/no-data fallback because the upstream source is missing or unsupported, set completed=false and explain the blocker instead of claiming success.",
       "Set completed=true only if the execution actually changed or completed the intended work.",
       "If execution was blocked, denied, or intentionally not performed, set completed=false and explain the concrete reason in blockedReason."
+    ].join(" ");
+  }
+
+  if (capability === "verify") {
+    return [
+      "Verify the requested user-visible behavior, not just the presence of code changes or lint/build success.",
+      "Set passed=false if any requested behavior still relies on placeholder, fallback, no-data, or unsupported upstream sources instead of the requested real result.",
+      "Do not modify files, create temp scripts or temp files, run builds, or attempt follow-up fixes during verify.",
+      "Use already captured evidence first and keep any additional inspection strictly read-only and minimal."
     ].join(" ");
   }
 
@@ -339,6 +352,7 @@ function buildStageInstructions(
     return [
       "This review happens after execution and verification.",
       "Do not approve, reject, or block work in this phase.",
+      "Do not call tools, run commands, or modify files in review.",
       "Use the review only to summarize the completed work, the verification outcome, and any remaining follow-up questions.",
       "Propose 0-3 concrete nextActions only when there is a meaningful follow-up task.",
       "Each nextAction should be execution-ready enough to become the next run goal.",

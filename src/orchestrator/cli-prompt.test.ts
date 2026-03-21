@@ -162,4 +162,25 @@ test("task orchestration concrete plan prompt distinguishes structural gaps from
     prompt,
     /If the key blocker is a missing or unsupported data source rather than ambiguous repository structure, keep needsProjectStructureInspection=false and explain the blocker or fallback in executionNotes or childTasks\./
   );
+  assert.match(
+    prompt,
+    /Do not call tools, create temp files, or run shell commands during concrete planning\./
+  );
+});
+
+test("task orchestration verify prompt rejects placeholder successes and follow-up fixes", () => {
+  const prompt = buildCliPrompt("verify", createContext(TEST_MODEL));
+
+  assert.match(
+    prompt,
+    /Verify the requested user-visible behavior, not just the presence of code changes or lint\/build success\./
+  );
+  assert.match(
+    prompt,
+    /Set passed=false if any requested behavior still relies on placeholder, fallback, no-data, or unsupported upstream sources instead of the requested real result\./
+  );
+  assert.match(
+    prompt,
+    /Do not modify files, create temp scripts or temp files, run builds, or attempt follow-up fixes during verify\./
+  );
 });

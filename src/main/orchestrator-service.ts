@@ -486,10 +486,10 @@ export class OrchestratorService {
         assignedModels: {
           abstractPlanner: geminiPlanningModel,
           gatherer: workerModel,
-          concretePlanner: geminiPlanningModel,
-          reviewer: geminiPlanningModel,
+          concretePlanner: workerModel,
+          reviewer: workerModel,
           executor: workerModel,
-          verifier: geminiPlanningModel
+          verifier: workerModel
         },
         toolModels: {
           gemini: this.uniqueModels([geminiPlanningModel, workerModel])
@@ -510,10 +510,10 @@ export class OrchestratorService {
         assignedModels: {
           abstractPlanner: codexPlanningModel,
           gatherer: workerModel,
-          concretePlanner: codexPlanningModel,
-          reviewer: codexPlanningModel,
+          concretePlanner: workerModel,
+          reviewer: workerModel,
           executor: workerModel,
-          verifier: codexPlanningModel
+          verifier: workerModel
         },
         toolModels: {
           codex: this.uniqueModels([codexPlanningModel, workerModel])
@@ -534,10 +534,10 @@ export class OrchestratorService {
       assignedModels: {
         abstractPlanner: codexPlanningModel,
         gatherer: geminiWorker,
-        concretePlanner: codexPlanningModel,
-        reviewer: geminiPlanningModel,
+        concretePlanner: codexWorker,
+        reviewer: geminiWorker,
         executor: codexWorker,
-        verifier: codexPlanningModel
+        verifier: codexWorker
       },
       toolModels: {
         codex: this.uniqueModels([codexPlanningModel, codexWorker]),
@@ -672,7 +672,6 @@ export class OrchestratorService {
         executableArgs: [cliRunnerPath, ...geminiCommand.args],
         acpModulePath: geminiAcpModulePath,
         cwd: workspacePath,
-        timeoutMs: 30_000,
         env: {
           ...geminiEnv,
           ...geminiCommand.env

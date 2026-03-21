@@ -52,11 +52,9 @@
     <button id="new-shell" type="button" disabled>+Shell</button>
     <div style="display: flex; align-items: center; gap: 4px;">
       <button id="new-codex" type="button" disabled>+Codex</button>
-      <span id="codex-usage" class="tool-usage" hidden></span>
     </div>
     <div style="display: flex; align-items: center; gap: 4px;">
       <button id="new-gemini" type="button" disabled>+Gemini</button>
-      <span id="gemini-usage" class="tool-usage" hidden></span>
     </div>
     <label style="display: flex; align-items: center; gap: 4px; font-size: 13px;">
       <input type="checkbox" id="auto-approve-checkbox">
@@ -306,7 +304,13 @@
 
 <div id="approval-toast-container" class="toast-container" aria-live="assertive" aria-atomic="false"></div>
 
-<div id="logbar"></div>
+<div id="logbar">
+  <div id="logbar-message"></div>
+  <div id="logbar-stats">
+    <span id="codex-usage" class="tool-usage" hidden></span>
+    <span id="gemini-usage" class="tool-usage" hidden></span>
+  </div>
+</div>
 
 <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
 <script src="../../dist/renderer/app.js"></script>

@@ -19,14 +19,19 @@ type SessionInfo = {
 type TerminalDataPayload = { sessionId: string; data: string };
 type TerminalExitPayload = { sessionId: string; exitCode: number; signal: number };
 type RunStatus = "pending" | "running" | "done" | "failed" | "paused" | "escalated";
+type ManagedToolUsage = {
+  remainingPercent?: number | null;
+  percentRemaining?: number | null;
+  used?: number | null;
+  max?: number | null;
+} | null;
+
 type ManagedToolStatus = {
   id: "codex" | "gemini";
   displayName: string;
   installed: boolean;
   version: string | null;
-  usage?: {
-    remainingPercent: number;
-  } | null;
+  usage?: ManagedToolUsage;
 };
 type DirectoryDialogOptions = {
   defaultPath?: string;
@@ -706,7 +711,7 @@ const approvalDialogActionsEl = document.getElementById("approval-dialog-actions
 const approvalToastContainerEl = document.getElementById("approval-toast-container") as HTMLDivElement;
 const mainSplitterEl = document.getElementById("main-splitter") as HTMLDivElement;
 const terminalRoot = document.getElementById("terminal-root") as HTMLDivElement;
-const logbar = document.getElementById("logbar") as HTMLDivElement;
+const logbarMessageEl = document.getElementById("logbar-message") as HTMLDivElement;
 const themeSwitcher = document.getElementById("theme-switcher") as HTMLDivElement;
 const languageSwitcher = document.getElementById("language-switcher") as HTMLDivElement;
 const themeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-theme-option]"));
@@ -870,16 +875,16 @@ function renderMessage(target: HTMLElement, message: UiMessage) {
 
 function logLocalized(key: string, params: Record<string, string> = {}) {
   lastLogMessage = { key, params };
-  renderMessage(logbar, lastLogMessage);
+  renderMessage(logbarMessageEl, lastLogMessage);
 }
 
 function logRaw(message: string) {
   lastLogMessage = { raw: message };
-  renderMessage(logbar, lastLogMessage);
+  renderMessage(logbarMessageEl, lastLogMessage);
 }
 
 function refreshLogbar() {
-  renderMessage(logbar, lastLogMessage);
+  renderMessage(logbarMessageEl, lastLogMessage);
 }
 
 function syncDialogBodyState() {
@@ -4495,6 +4500,7 @@ async function runOrchestrator(options?: {
     isOrchestratorStopRequested = false;
     liveOrchestratorRunId = null;
     updateOrchestratorControls();
+    refreshToolStatuses().catch((error) => console.error("Failed to refresh tool statuses after orchestrator run:", error));
   }
 }
 
@@ -4992,17 +4998,53 @@ async function createSession(kind: SessionKind) {
   attachSessionToUi(session);
 }
 
+function normalizeRemainingPercent(usage: ManagedToolUsage): number | null {
+  if (!usage) {
+    return null;
+  }
+
+  const directPercent = typeof usage.remainingPercent === "number"
+    ? usage.remainingPercent
+    : typeof usage.percentRemaining === "number"
+      ? usage.percentRemaining
+      : null;
+  if (typeof directPercent === "number" && Number.isFinite(directPercent)) {
+    return Math.max(0, Math.min(100, Math.round(directPercent)));
+  }
+
+  if (typeof usage.used === "number" && typeof usage.max === "number" && Number.isFinite(usage.used) && Number.isFinite(usage.max) && usage.max > 0) {
+    const remainingPercent = ((usage.max - usage.used) / usage.max) * 100;
+    return Math.max(0, Math.min(100, Math.round(remainingPercent)));
+  }
+
+  return null;
+}
+
+function renderToolUsageStatus(status: ManagedToolStatus) {
+  const usageEl = status.id === "codex" ? codexUsageEl : geminiUsageEl;
+  if (!status.installed) {
+    usageEl.hidden = true;
+    usageEl.textContent = "";
+    usageEl.removeAttribute("title");
+    return;
+  }
+
+  const remainingPercent = normalizeRemainingPercent(status.usage ?? null);
+  const fallbackReason = languagePreference === "ko" ? "데이터 없음" : "No data";
+  const suffix = remainingPercent === null
+    ? "--%"
+    : (languagePreference === "ko" ? `${remainingPercent}% 남음` : `${remainingPercent}% left`);
+
+  usageEl.textContent = `${status.displayName} ${suffix}`;
+  usageEl.title = remainingPercent === null ? fallbackReason : usageEl.textContent;
+  usageEl.hidden = false;
+}
+
 async function refreshToolStatuses() {
   try {
     const statuses = await appWindow.tasksaw.getManagedToolStatuses();
     for (const status of statuses) {
-      const usageEl = status.id === "codex" ? codexUsageEl : geminiUsageEl;
-      if (status.usage) {
-        usageEl.textContent = `${status.usage.remainingPercent}%`;
-        usageEl.hidden = false;
-      } else {
-        usageEl.hidden = true;
-      }
+      renderToolUsageStatus(status);
     }
   } catch (error) {
     console.error("Failed to refresh tool statuses:", error);
@@ -5357,6 +5399,10 @@ window.setInterval(() => {
     scheduleOrchestratorRender({ list: false, detail: true });
   }
 }, 1_000);
+
+window.setInterval(() => {
+  refreshToolStatuses().catch((error) => console.error("Failed to periodic refresh tool statuses:", error));
+}, 60_000);
 
 appWindow.addEventListener("resize", () => {
   syncMainSplitterLayout();

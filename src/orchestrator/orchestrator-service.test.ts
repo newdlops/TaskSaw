@@ -128,6 +128,9 @@ test("orchestrator service assigns the latest frontier Gemini model to planning 
       assignedModels: {
         abstractPlanner: { model: string };
         gatherer: { model: string };
+        concretePlanner: { model: string };
+        reviewer: { model: string };
+        verifier: { model: string };
       };
       toolModels: {
         gemini: Array<{ model: string }>;
@@ -136,6 +139,9 @@ test("orchestrator service assigns the latest frontier Gemini model to planning 
 
   assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gemini-3.1-pro-preview");
   assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-3-flash-preview");
+  assert.equal(modeConfig.assignedModels.concretePlanner.model, "gemini-3-flash-preview");
+  assert.equal(modeConfig.assignedModels.reviewer.model, "gemini-3-flash-preview");
+  assert.equal(modeConfig.assignedModels.verifier.model, "gemini-3-flash-preview");
   assert.deepEqual(modeConfig.toolModels.gemini.map((model) => model.model), [
     "gemini-3.1-pro-preview",
     "gemini-3-flash-preview"
@@ -289,6 +295,9 @@ test("orchestrator service assigns the strongest non-mini Codex model to plannin
       assignedModels: {
         abstractPlanner: { model: string };
         gatherer: { model: string };
+        concretePlanner: { model: string };
+        reviewer: { model: string };
+        verifier: { model: string };
       };
       toolModels: {
         codex: Array<{ model: string }>;
@@ -297,6 +306,9 @@ test("orchestrator service assigns the strongest non-mini Codex model to plannin
 
   assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gpt-5.4");
   assert.equal(modeConfig.assignedModels.gatherer.model, "gpt-5.4-mini");
+  assert.equal(modeConfig.assignedModels.concretePlanner.model, "gpt-5.4-mini");
+  assert.equal(modeConfig.assignedModels.reviewer.model, "gpt-5.4-mini");
+  assert.equal(modeConfig.assignedModels.verifier.model, "gpt-5.4-mini");
   assert.deepEqual(modeConfig.toolModels.codex.map((model) => model.model), [
     "gpt-5.4",
     "gpt-5.4-mini"
@@ -397,6 +409,33 @@ test("orchestrator service keeps higher reasoning for Codex planners and lighter
   assert.equal(modeConfig.assignedModels.gatherer.reasoningEffort, "low");
   assert.equal(modeConfig.assignedModels.executor.model, "gpt-5.4-mini");
   assert.equal(modeConfig.assignedModels.executor.reasoningEffort, "low");
+});
+
+test("orchestrator service keeps cross-review planning on Codex while using worker-grade models for gather, concrete planning, review, execute, and verify", async () => {
+  const toolManager = {
+    prepareWorkspaceContext: async () => undefined,
+    discoverModelCatalog: async (toolId: string) => toolId === "codex" ? createCodexCatalog() : createGeminiCatalog()
+  };
+  const service = new OrchestratorService("/tmp/tasksaw-app", "/tmp/tasksaw-user-data", toolManager as never);
+
+  const modeConfig = await (service as unknown as { resolveModeConfig(mode: string, workspacePath: string): Promise<unknown> })
+    .resolveModeConfig("cross_review", "/tmp/tasksaw-workspace") as {
+      assignedModels: {
+        abstractPlanner: { model: string };
+        gatherer: { model: string };
+        concretePlanner: { model: string };
+        reviewer: { model: string };
+        executor: { model: string };
+        verifier: { model: string };
+      };
+    };
+
+  assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gpt-5.4");
+  assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-3-flash-preview");
+  assert.equal(modeConfig.assignedModels.concretePlanner.model, "gpt-5.4-mini");
+  assert.equal(modeConfig.assignedModels.reviewer.model, "gemini-3-flash-preview");
+  assert.equal(modeConfig.assignedModels.executor.model, "gpt-5.4-mini");
+  assert.equal(modeConfig.assignedModels.verifier.model, "gpt-5.4-mini");
 });
 
 test("orchestrator service reset removes saved workspace .tasksaw caches", () => {
