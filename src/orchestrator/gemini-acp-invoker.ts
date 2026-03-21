@@ -985,10 +985,10 @@ const READ_ONLY_MUTATION_COMMAND_PATTERNS = [
 ] as const;
 
 const READ_ONLY_HYPOTHESIS_CUTOFF_BY_STAGE: Partial<Record<ModelInvocationContext["workflowStage"], number>> = {
-  bootstrap_sketch: 4,
-  project_structure_discovery: 5,
-  project_structure_inspection: 5,
-  task_orchestration: 6
+  bootstrap_sketch: 3,
+  project_structure_discovery: 4,
+  project_structure_inspection: 4,
+  task_orchestration: 4
 };
 
 const BOOTSTRAP_SKETCH_ALLOWED_READ_ONLY_COMMANDS = new Set([
@@ -1016,6 +1016,11 @@ const COMMAND_FAMILY_SKIP_SET = new Set([
   "file",
   "which",
   "stat"
+]);
+
+const EXTERNAL_TOOL_SURFACE_COMMANDS = new Set([
+  "gemini",
+  "codex"
 ]);
 
 const SHELL_WRAPPER_COMMANDS = new Set([
@@ -1221,6 +1226,10 @@ function buildExecuteToolCallFingerprint(toolCall: {
 
 function buildReadOnlyHypothesisKeys(commandText: string, workspaceRoot: string): string[] {
   const keys = new Set<string>();
+  const toolSurfaceKey = buildExternalToolSurfaceKey(commandText, workspaceRoot);
+  if (toolSurfaceKey) {
+    keys.add(toolSurfaceKey);
+  }
   const commandFamilyKey = buildCommandFamilyKey(commandText);
   if (commandFamilyKey) {
     keys.add(commandFamilyKey);
@@ -1229,6 +1238,37 @@ function buildReadOnlyHypothesisKeys(commandText: string, workspaceRoot: string)
     keys.add(key);
   }
   return [...keys];
+}
+
+function buildExternalToolSurfaceKey(commandText: string, workspaceRoot: string): string | null {
+  const tokens = tokenizeCommandText(commandText)
+    .map((token) => stripOuterQuotes(token).trim())
+    .filter(Boolean);
+  if (tokens.length === 0) {
+    return null;
+  }
+
+  const commandIndex = findPrimaryCommandIndex(tokens);
+  const commandToken = tokens[commandIndex];
+  if (!commandToken) {
+    return null;
+  }
+
+  const commandName = path.basename(commandToken).toLowerCase();
+  if (EXTERNAL_TOOL_SURFACE_COMMANDS.has(commandName)) {
+    return `surface:${commandName}`;
+  }
+
+  const normalizedCommandToken = commandToken.replace(/\\/g, "/");
+  if (!normalizedCommandToken.includes("/managed-tools/")) {
+    return null;
+  }
+
+  if (!looksLikePathToken(normalizedCommandToken) || isWorkspaceRelativePath(normalizedCommandToken, path.resolve(workspaceRoot))) {
+    return null;
+  }
+
+  return `surface:${commandName}`;
 }
 
 function buildCommandFamilyKey(commandText: string): string | null {

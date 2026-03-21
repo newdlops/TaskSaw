@@ -1015,8 +1015,139 @@ test("gemini ACP invoker cuts off repeated read-only probing for the same extern
   });
 
   assert.equal(result.summary, "Bootstrap sketch completed with cutoff");
-  assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "selected", "cancelled"]);
-  assert.equal(approvalRequestCount, 5);
+  assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "cancelled", "cancelled"]);
+  assert.equal(approvalRequestCount, 4);
+  assert.equal(
+    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because repeated probing hit the cutoff for this investigation thread"),
+    true
+  );
+});
+
+test("gemini ACP invoker cuts off repeated managed CLI variants earlier within the same external tool surface", async () => {
+  const fakeChild = new FakeChildProcess();
+  const outcomes: string[] = [];
+  let approvalRequestCount = 0;
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const commands = [
+                "\"/Users/test/managed-tools/bin/gemini\" --help",
+                "\"/Users/test/managed-tools/bin/gemini\" /stats model --json",
+                "\"/Users/test/managed-tools/bin/gemini\" -p \"/stats model\" -o json",
+                "\"/Users/test/managed-tools/bin/gemini\" --version",
+                "\"/Users/test/managed-tools/bin/gemini\" login status"
+              ];
+
+              for (const title of commands) {
+                const decision = await this.client.requestPermission({
+                  options: [{ optionId: "allow_once", kind: "allow_once" }],
+                  toolCall: {
+                    title,
+                    kind: "execute"
+                  }
+                });
+                outcomes.push(decision.outcome.outcome);
+              }
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Task orchestration gather stopped after CLI surface cutoff",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    workflowStage: "task_orchestration",
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Task orchestration gather stopped after CLI surface cutoff");
+  assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "cancelled"]);
+  assert.equal(approvalRequestCount, 4);
   assert.equal(
     progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because repeated probing hit the cutoff for this investigation thread"),
     true

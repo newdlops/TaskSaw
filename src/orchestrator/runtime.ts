@@ -58,6 +58,12 @@ const ASSIGNED_ROLE_CAPABILITY: Record<AssignedModelRole, OrchestratorCapability
   verifier: "verify"
 };
 
+const PRECISE_DATA_REQUEST_PATTERN = /\b(?:exact|actual|accurate|precise|real)\b|정확|실제|정확한|정확하게|실시간/i;
+const FALLBACK_EXECUTION_PATTERN = /\bn\/a\b|no data|data unavailable|placeholder|fallback|not tracked|not available|usage unavailable|quota unavailable|정보 없음|데이터 없음|추적 불가|지원하지 않|표시를 .* 변경/i;
+const DATA_SOURCE_BLOCKER_PATTERN = /\b(?:quota|usage|remaining|stats model|retrieveuserquota|unsupported|unavailable|not expose|not exposed|missing data source|blocked by missing source)\b|지원하지 않|노출하지 않|불가|제약|데이터 소스/i;
+const REPOSITORY_EVIDENCE_PATTERN = /\bsrc\/|tool-manager\.ts|renderer\/app\.ts|main\/types\.ts/i;
+const EXTERNAL_SURFACE_EVIDENCE_PATTERN = /managed-tools|gemini-cli|\/stats model|retrieveuserquota|codeassist|\.gemini|auth login status/i;
+
 type RootPhaseResults = {
   abstractPlan: AbstractPlanResult;
   gather: GatherResult;
@@ -523,6 +529,23 @@ export class OrchestratorRuntime {
       );
       currentNode = inspectedPlan.node;
       concretePlan = inspectedPlan.concretePlan;
+    }
+
+    if (!isProjectStructureInspection) {
+      const guardedConcretePlan = this.requireExplicitEvidenceBeforeFallback(
+        currentNode,
+        consolidatedEvidence,
+        concretePlan
+      );
+      if (guardedConcretePlan !== concretePlan) {
+        concretePlan = guardedConcretePlan;
+        this.recordDecision(
+          currentNode.runId,
+          concretePlanStage.stageNode.id,
+          "Concrete plan refined for evidence gap",
+          (concretePlan.additionalGatherObjectives ?? [concretePlan.summary]).join(" | ")
+        );
+      }
     }
 
     if (!isProjectStructureInspection) {
@@ -2332,6 +2355,83 @@ export class OrchestratorRuntime {
       sections.push(`Current gather contract:\n${contractCues.map((cue) => `- ${cue}`).join("\n")}`);
     }
     return sections.join("\n\n");
+  }
+
+  private requireExplicitEvidenceBeforeFallback(
+    node: PlanNode,
+    consolidatedEvidence: EvidenceBundle,
+    concretePlan: ConcretePlanResult
+  ): ConcretePlanResult {
+    if (concretePlan.needsAdditionalGather) {
+      return concretePlan;
+    }
+
+    if (!PRECISE_DATA_REQUEST_PATTERN.test(node.objective)) {
+      return concretePlan;
+    }
+
+    const planText = [
+      concretePlan.summary,
+      ...concretePlan.executionNotes,
+      ...concretePlan.childTasks.flatMap((task) => [task.title, task.objective])
+    ]
+      .filter((entry) => entry.length > 0)
+      .join("\n");
+
+    if (!FALLBACK_EXECUTION_PATTERN.test(planText)) {
+      return concretePlan;
+    }
+
+    const evidenceText = [
+      consolidatedEvidence.summary,
+      ...consolidatedEvidence.facts.map((fact) => fact.statement),
+      ...consolidatedEvidence.hypotheses.map((hypothesis) => hypothesis.statement),
+      ...consolidatedEvidence.unknowns.map((unknown) => unknown.question),
+      ...consolidatedEvidence.relevantTargets.flatMap((target) => [
+        target.filePath ?? "",
+        target.symbol ?? "",
+        target.note ?? ""
+      ]),
+      ...consolidatedEvidence.references.flatMap((reference) => [
+        reference.note ?? "",
+        reference.location?.filePath ?? "",
+        reference.location?.symbol ?? "",
+        reference.location?.label ?? "",
+        reference.location?.uri ?? ""
+      ]),
+      ...consolidatedEvidence.snippets.map((snippet) => snippet.content)
+    ]
+      .filter((entry) => entry.length > 0)
+      .join("\n");
+
+    const hasRepositoryEvidence = REPOSITORY_EVIDENCE_PATTERN.test(evidenceText);
+    const hasExternalSurfaceEvidence = EXTERNAL_SURFACE_EVIDENCE_PATTERN.test(evidenceText)
+      || consolidatedEvidence.references.some((reference) =>
+        reference.sourceType === "terminal" || reference.sourceType === "search" || reference.sourceType === "web"
+      )
+      || consolidatedEvidence.snippets.some((snippet) =>
+        snippet.kind === "terminal" || snippet.kind === "search_result"
+      );
+    const hasExplicitBlockerEvidence = DATA_SOURCE_BLOCKER_PATTERN.test(evidenceText);
+
+    if (hasRepositoryEvidence && hasExternalSurfaceEvidence && hasExplicitBlockerEvidence) {
+      return concretePlan;
+    }
+
+    return {
+      ...concretePlan,
+      needsAdditionalGather: true,
+      additionalGatherObjectives: this.dedupeTextEntries([
+        ...(concretePlan.additionalGatherObjectives ?? []),
+        "Confirm the narrowest backend data source that could satisfy the requested exact data before switching to a fallback label.",
+        "Collect one explicit piece of evidence about whether the relevant external Gemini surface exposes or blocks the requested usage or quota data.",
+        "Return blocker evidence, not just a UI fallback recommendation."
+      ]).slice(0, 3),
+      executionNotes: this.dedupeTextEntries([
+        ...concretePlan.executionNotes,
+        "Execution is deferred until the missing or unsupported data source is established with explicit evidence."
+      ])
+    };
   }
 
   private buildGatherContractCues(input: {

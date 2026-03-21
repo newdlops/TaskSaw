@@ -529,8 +529,12 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
       case "execute": {
         const summary = this.readString(record.summary, "No execution summary returned");
         const outputs = this.normalizeStringArray(record.outputs ?? record.results);
-        const completed = this.inferExecuteCompleted(record, summary, outputs);
-        const blockedReason = this.readOptionalString(record.blockedReason ?? record.failureReason ?? record.reason);
+        const missingExecutionSummary = summary === "No execution summary returned";
+        const completed = missingExecutionSummary
+          ? false
+          : this.inferExecuteCompleted(record, summary, outputs);
+        const blockedReason = this.readOptionalString(record.blockedReason ?? record.failureReason ?? record.reason)
+          ?? (missingExecutionSummary ? "Executor did not return the required execution summary." : undefined);
         return {
           summary,
           outputs: outputs.length > 0 ? outputs : (completed ? [summary] : []),

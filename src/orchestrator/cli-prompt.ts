@@ -297,6 +297,8 @@ function buildStageInstructions(
       "Set needsProjectStructureInspection=true only for repository-structure gaps: contradictory file paths, entrypoints, modules, runtime boundaries, IPC/preload wiring, or renderer DOM locations that must be re-read from the workspace.",
       "Do not request projectStructure inspection for non-structural gaps such as unsupported product capabilities, missing external quota APIs, absent managed-tool features, auth limitations, or implementation tradeoffs. Treat those as execution-planning facts instead.",
       "If the key blocker is a missing or unsupported data source rather than ambiguous repository structure, keep needsProjectStructureInspection=false and explain the blocker or fallback in executionNotes or childTasks.",
+      "Do not downgrade an exact-data request into a UI fallback, placeholder label, or 'n/a' plan unless the gathered evidence already contains explicit blocker facts about the missing or unsupported data source.",
+      "If the user asked for exact, actual, precise, or real data and that blocker evidence is still weak, set needsAdditionalGather=true and ask for the narrowest follow-up proof instead of declaring the fallback ready.",
       "Do not call tools, create temp files, or run shell commands during concrete planning. Use only the provided memory and gathered evidence.",
       "If the current evidence is still too broad for execution but one more focused plan/gather pass would materially narrow the scope, set needsAdditionalGather=true, keep childTasks empty when possible, and return 1-3 explicit additionalGatherObjectives.",
       "Use needsAdditionalGather only for narrow follow-up evidence collection. Do not punt broad discovery back to gather.",
@@ -318,6 +320,7 @@ function buildStageInstructions(
       "Inspection targets must be explicit file paths, modules, entrypoints, symbols, managed-tool locations, or clearly named external surfaces. Avoid generic targets like repository, codebase, current implementation, or relevant files.",
       "If the current memory is too weak to name a narrow target, identify the single most useful clue to gather next instead of delegating a broad search.",
       "If the current memory already names likely files, modules, entrypoints, or managed tool locations, inspect those first instead of widening the search.",
+      "If the user explicitly asked for exact or actual data, keep the plan centered on the concrete data source or blocker evidence first. Do not jump straight to a UI fallback or copy change.",
       "Do not edit files, call tools, create temp files, run builds, or execute shell commands during planning.",
       "Do not ask for broad repository or external tool exploration unless the current memory is insufficient to name a concrete next target."
     ].join(" ");
@@ -332,6 +335,8 @@ function buildStageInstructions(
       "Prefer confirming or disproving the current memory's open questions at the named files, entrypoints, modules, relevantTargets, or managed tool locations before running broader searches.",
       "If the current memory already suggests a likely absence or integration gap, confirm that directly and return compact evidence instead of expanding the search surface.",
       "If an external CLI/API surface already appears absent or unsupported, stop after enough evidence to establish that fact. Do not keep probing undocumented alternative commands, slash commands, or ad hoc flags.",
+      "If the user asked for exact or actual data, do not treat a UI fallback label as sufficient. Gather one direct proof about the narrowest missing or unsupported data source before recommending that fallback.",
+      "When probing an external CLI surface, prefer one documented help/usage check and one direct capability check. Do not spend gather budget on multiple synonymous command variants that test the same hypothesis.",
       "Do not ask the user for permission to continue planning, escape plan mode, or work around internal tool/runtime errors. Report those blockers directly in the JSON response instead.",
       "Do not edit files, run builds, or execute other mutating commands in gather. This phase is read-only evidence collection.",
       "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node.",

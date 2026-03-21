@@ -556,6 +556,232 @@ test("runtime runs a focused replan and regather loop when concrete planning req
   assert.match(gatherObjectives[1]!, /Inspection targets from abstract plan: src\/main\/gemini-quota\.ts/);
 });
 
+test("runtime forces a focused regather before accepting an exact-data fallback plan with weak blocker evidence", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+  let abstractCallCount = 0;
+  let concreteCallCount = 0;
+  let gatherCallCount = 0;
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const verifier: ModelRef = {
+    id: "verify-lower",
+    provider: "mock",
+    model: "verify-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan"]),
+      {
+        abstractPlan: () => {
+          abstractCallCount += 1;
+          trace.push(`abstract:${abstractCallCount}`);
+          if (abstractCallCount === 1) {
+            return {
+              summary: "Inspect the current backend usage path first",
+              targetsToInspect: ["src/main/tool-manager.ts"],
+              evidenceRequirements: ["Confirm what Gemini usage data TaskSaw currently exposes"]
+            };
+          }
+
+          return {
+            summary: "Inspect the narrowest managed Gemini surface that could expose quota data",
+            targetsToInspect: ["/Users/test/managed-tools/bin/gemini"],
+            evidenceRequirements: ["Confirm whether the managed Gemini surface exposes or blocks quota data"]
+          };
+        },
+        concretePlan: () => {
+          concreteCallCount += 1;
+          trace.push(`concrete:${concreteCallCount}`);
+          if (concreteCallCount === 1) {
+            return {
+              summary: "Since exact Gemini quota is unavailable, switch the UI to n/a instead of --%",
+              childTasks: [],
+              executionNotes: ["Fallback to an n/a label for unavailable Gemini usage data"]
+            };
+          }
+
+          return {
+            summary: "Explicit blocker evidence confirms the exact quota source is unavailable, so the fallback UI change is now justified",
+            childTasks: [],
+            executionNotes: ["Use the evidence-backed n/a fallback because the requested exact quota source is unsupported"]
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => {
+          gatherCallCount += 1;
+          trace.push(`gather:${gatherCallCount}`);
+          if (gatherCallCount === 1) {
+            return {
+              summary: "Initial gather only confirmed the current backend path returns null",
+              evidenceBundles: [
+                {
+                  id: "initial-usage-evidence",
+                  summary: "Current Gemini usage path",
+                  facts: [
+                    {
+                      id: "tool-manager-null",
+                      statement: "src/main/tool-manager.ts currently returns null remainingPercent for Gemini usage.",
+                      confidence: "high",
+                      referenceIds: []
+                    }
+                  ],
+                  hypotheses: [],
+                  unknowns: [],
+                  relevantTargets: [{ filePath: "src/main/tool-manager.ts" }],
+                  snippets: [],
+                  references: [],
+                  confidence: "medium"
+                }
+              ]
+            };
+          }
+
+          return {
+            summary: "Focused gather confirmed the managed Gemini surface does not expose quota data through the supported status path",
+            evidenceBundles: [
+              {
+                id: "focused-blocker-evidence",
+                summary: "Managed Gemini quota blocker evidence",
+                facts: [
+                  {
+                    id: "managed-surface-blocked",
+                    statement: "The managed-tools Gemini CLI surface does not expose quota data through the supported /stats model path.",
+                    confidence: "high",
+                    referenceIds: []
+                  }
+                ],
+                hypotheses: [],
+                unknowns: [],
+                relevantTargets: [{ note: "managed-tools Gemini CLI /stats model surface" }],
+                snippets: [
+                  {
+                    id: "terminal-proof",
+                    kind: "terminal",
+                    content: "gemini /stats model did not provide usable quota output",
+                    rationale: "Direct blocker evidence"
+                  }
+                ],
+                references: [
+                  {
+                    id: "managed-cli-surface",
+                    sourceType: "terminal",
+                    note: "Managed Gemini CLI capability check"
+                  }
+                ],
+                confidence: "high"
+              }
+            ]
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Executed the evidence-backed fallback change",
+          outputs: ["usage-label-fallback-updated"],
+          completed: true
+        })
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      verifier,
+      new Set(["verify"]),
+      {
+        verify: () => ({
+          summary: "Fallback change verified after explicit blocker evidence",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry);
+  const result = await runtime.executeHappyPath({
+    goal: "Gemini 사용량을 정확하게 보여주되 불가능하면 명확한 fallback만 허용하자",
+    language: "ko",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier
+    },
+    reviewPolicy: "none"
+  });
+
+  assert.equal(result.snapshot.run.status, "done");
+  assert.deepEqual(trace, [
+    "abstract:planner-upper",
+    "abstract:1",
+    "gather:gather-lower",
+    "gather:1",
+    "concrete:planner-upper",
+    "concrete:1",
+    "abstract:planner-upper",
+    "abstract:2",
+    "gather:gather-lower",
+    "gather:2",
+    "concrete:planner-upper",
+    "concrete:2",
+    "execute:execute-lower",
+    "verify:verify-lower"
+  ]);
+  assert.equal(gatherCallCount, 2);
+  assert.equal(concreteCallCount, 2);
+  assert.ok(result.snapshot.finalReport);
+  assert.match(
+    result.snapshot.finalReport.summary,
+    /Fallback change verified after explicit blocker evidence/
+  );
+});
+
 test("runtime runs review after verify and does not let review reject execution", async () => {
   const trace: string[] = [];
   const registry = new ModelAdapterRegistry();

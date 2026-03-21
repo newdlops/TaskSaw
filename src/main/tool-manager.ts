@@ -227,12 +227,12 @@ export class ToolManager {
           return {
             modelId: model.id,
             displayName,
-            remainingPercent: null // Placeholder as CLI doesn't support quota yet
+            remainingPercent: null // Managed Gemini CLI does not yet expose quota/limit info via /stats
           };
         });
 
       return {
-        remainingPercent: null,
+        remainingPercent: null, // Global remaining percent is also unavailable
         gemini: { models }
       };
     } catch {

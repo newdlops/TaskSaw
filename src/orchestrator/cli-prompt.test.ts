@@ -132,6 +132,10 @@ test("task orchestration abstract plan prompt prioritizes existing memory before
     prompt,
     /Inspection targets must be explicit file paths, modules, entrypoints, symbols, managed-tool locations, or clearly named external surfaces\./
   );
+  assert.match(
+    prompt,
+    /If the user explicitly asked for exact or actual data, keep the plan centered on the concrete data source or blocker evidence first\./
+  );
 });
 
 test("task orchestration gather prompt forbids broad search before checking memory-derived targets", () => {
@@ -160,6 +164,14 @@ test("task orchestration gather prompt forbids broad search before checking memo
   assert.match(
     prompt,
     /Stay within that contract unless each named target has been exhausted and you can justify widening the search in the returned evidence\./
+  );
+  assert.match(
+    prompt,
+    /If the user asked for exact or actual data, do not treat a UI fallback label as sufficient\./
+  );
+  assert.match(
+    prompt,
+    /When probing an external CLI surface, prefer one documented help\/usage check and one direct capability check\./
   );
 });
 
@@ -197,6 +209,14 @@ test("task orchestration concrete plan prompt distinguishes structural gaps from
   assert.match(
     prompt,
     /If the key blocker is a missing or unsupported data source rather than ambiguous repository structure, keep needsProjectStructureInspection=false and explain the blocker or fallback in executionNotes or childTasks\./
+  );
+  assert.match(
+    prompt,
+    /Do not downgrade an exact-data request into a UI fallback, placeholder label, or 'n\/a' plan unless the gathered evidence already contains explicit blocker facts/
+  );
+  assert.match(
+    prompt,
+    /If the user asked for exact, actual, precise, or real data and that blocker evidence is still weak, set needsAdditionalGather=true/
   );
   assert.match(
     prompt,

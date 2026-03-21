@@ -280,6 +280,25 @@ test("execute adapter rejects claimed success when unresolved blocker language r
   assert.equal(result.completed, false);
 });
 
+test("execute adapter marks missing execution summaries as incomplete", async () => {
+  const payload = {
+    outputs: ["Patched renderer label"]
+  };
+  const script = `process.stdout.write(${JSON.stringify(JSON.stringify(payload))});`;
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    buildInvocationArgs: () => ["-e", script],
+    supportedCapabilities: ["execute"]
+  });
+
+  const result = await adapter.execute!(createContext(TEST_MODEL));
+  assert.equal(result.summary, "No execution summary returned");
+  assert.equal(result.completed, false);
+  assert.equal(result.blockedReason, "Executor did not return the required execution summary.");
+});
+
 test("verify adapter rejects claimed success when unresolved blocker language remains", async () => {
   const payload = {
     summary: "Verification passed, but the requested behavior still relies on placeholder/no-data fallback.",
