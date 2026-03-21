@@ -24,6 +24,9 @@ type ManagedToolStatus = {
   displayName: string;
   installed: boolean;
   version: string | null;
+  usage?: {
+    remainingPercent: number;
+  } | null;
 };
 type DirectoryDialogOptions = {
   defaultPath?: string;
@@ -228,6 +231,7 @@ type TasksawApi = {
   }): Promise<SessionInfo | null>;
   listSessions(): Promise<SessionInfo[]>;
   updateManagedTools(): Promise<ManagedToolStatus[]>;
+  getManagedToolStatuses(): Promise<ManagedToolStatus[]>;
   resetAppState(): Promise<void>;
   runOrchestrator(input: {
     goal: string;
@@ -603,7 +607,9 @@ const workspaceOpenButton = document.getElementById("workspace-open") as HTMLBut
 const workspaceCreateButton = document.getElementById("workspace-create") as HTMLButtonElement;
 const newShellButton = document.getElementById("new-shell") as HTMLButtonElement;
 const newCodexButton = document.getElementById("new-codex") as HTMLButtonElement;
+const codexUsageEl = document.getElementById("codex-usage") as HTMLSpanElement;
 const newGeminiButton = document.getElementById("new-gemini") as HTMLButtonElement;
+const geminiUsageEl = document.getElementById("gemini-usage") as HTMLSpanElement;
 const autoApproveCheckbox = document.getElementById("auto-approve-checkbox") as HTMLInputElement;
 const approvalQueueButton = document.getElementById("approval-queue-button") as HTMLButtonElement;
 const toolsUpdateButton = document.getElementById("tools-update") as HTMLButtonElement;
@@ -4986,6 +4992,23 @@ async function createSession(kind: SessionKind) {
   attachSessionToUi(session);
 }
 
+async function refreshToolStatuses() {
+  try {
+    const statuses = await appWindow.tasksaw.getManagedToolStatuses();
+    for (const status of statuses) {
+      const usageEl = status.id === "codex" ? codexUsageEl : geminiUsageEl;
+      if (status.usage) {
+        usageEl.textContent = `${status.usage.remainingPercent}%`;
+        usageEl.hidden = false;
+      } else {
+        usageEl.hidden = true;
+      }
+    }
+  } catch (error) {
+    console.error("Failed to refresh tool statuses:", error);
+  }
+}
+
 async function updateManagedTools() {
   isToolUpdateRunning = true;
   updateSessionCreationState();
@@ -4998,6 +5021,7 @@ async function updateManagedTools() {
       .map((status) => `${status.displayName} ${status.version ?? "unknown"}`)
       .join(", ");
     logLocalized("logs.toolsUpdated", { details });
+    await refreshToolStatuses();
   } finally {
     isToolUpdateRunning = false;
     updateSessionCreationState();
@@ -5361,4 +5385,8 @@ restoreSessions().catch((error: unknown) => {
 loadOrchestratorRuns().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   logLocalized("errors.failedLoadOrchestratorRuns", { message });
+});
+
+refreshToolStatuses().catch((error: unknown) => {
+  console.error("Failed to refresh tool statuses on init:", error);
 });

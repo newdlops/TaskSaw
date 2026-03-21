@@ -121,20 +121,82 @@ export class ToolManager {
     return this.binDirectory;
   }
 
-  getStatus(toolId: ManagedToolId): ManagedToolStatus {
-    const definition = TOOL_DEFINITIONS[toolId];
-    const packageJson = this.readInstalledPackageJson(toolId);
+  async getStatus(toolId: ManagedToolId): Promise<ManagedToolStatus> {
+    const baseStatus = this.getInstalledStatus(toolId);
+
+    let usage: ManagedToolStatus["usage"] = null;
+    if (baseStatus.installed) {
+      if (toolId === "codex") {
+        usage = await this.getCodexUsage();
+      } else if (toolId === "gemini") {
+        usage = await this.getGeminiUsage();
+      }
+    }
 
     return {
-      id: definition.id,
-      displayName: definition.displayName,
-      installed: packageJson !== null,
-      version: packageJson?.version ?? null
+      ...baseStatus,
+      usage
     };
   }
 
-  getAllStatuses(): ManagedToolStatus[] {
-    return (Object.keys(TOOL_DEFINITIONS) as ManagedToolId[]).map((toolId) => this.getStatus(toolId));
+  async getAllStatuses(): Promise<ManagedToolStatus[]> {
+    const toolIds = Object.keys(TOOL_DEFINITIONS) as ManagedToolId[];
+    return Promise.all(toolIds.map((toolId) => this.getStatus(toolId)));
+  }
+
+  private async getCodexUsage(): Promise<ManagedToolStatus["usage"]> {
+    try {
+      const launchCommand = this.resolveInstalledLaunchCommand("codex");
+      if (!launchCommand) {
+        return null;
+      }
+      const child = spawn(launchCommand.command, [...launchCommand.args, "rate-limits", "--json"], {
+        env: this.buildManagedCommandEnv("codex", launchCommand.env),
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+
+      let stdout = "";
+      child.stdout?.on("data", (chunk) => {
+        stdout += chunk.toString();
+      });
+
+      return await new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+          child.kill();
+          resolve(null);
+        }, 5000);
+
+        child.on("close", (code) => {
+          clearTimeout(timeout);
+          if (code !== 0) {
+            resolve(null);
+            return;
+          }
+          try {
+            const data = JSON.parse(stdout);
+            if (typeof data.remainingPercent === "number") {
+              resolve({ remainingPercent: data.remainingPercent });
+            } else {
+              resolve(null);
+            }
+          } catch {
+            resolve(null);
+          }
+        });
+
+        child.on("error", () => {
+          clearTimeout(timeout);
+          resolve(null);
+        });
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private async getGeminiUsage(): Promise<ManagedToolStatus["usage"]> {
+    // Currently Gemini CLI/ACP does not provide a direct quota/usage API.
+    return null;
   }
 
   buildManagedExecutionEnvironment(toolId: ManagedToolId): Record<string, string> {
@@ -247,7 +309,7 @@ export class ToolManager {
   }
 
   async ensureInstalled(toolId: ManagedToolId): Promise<ManagedToolStatus> {
-    const currentStatus = this.getStatus(toolId);
+    const currentStatus = this.getInstalledStatus(toolId);
     if (currentStatus.installed) {
       this.ensureShim(toolId);
       return currentStatus;
@@ -283,17 +345,12 @@ export class ToolManager {
   ): Promise<ResolvedCommand> {
     await this.ensureInstalled(toolId);
 
-    const entryPath = this.resolveInstalledEntryPoint(toolId);
-    if (!entryPath) {
+    const launchCommand = this.resolveInstalledLaunchCommand(toolId);
+    if (!launchCommand) {
       throw new Error(`Managed ${TOOL_DEFINITIONS[toolId].displayName} entry point was not found after install`);
     }
 
-    const nodeRuntime = this.resolveNodeRuntime();
-    return {
-      command: nodeRuntime.command,
-      args: [entryPath],
-      env: nodeRuntime.env
-    };
+    return launchCommand;
   }
 
   getGeminiAcpModulePath(): string {
@@ -1289,7 +1346,7 @@ export class ToolManager {
 
     await this.runCommand(npmCommand.command, npmArgs, npmCommand.env);
 
-    const status = this.getStatus(toolId);
+    const status = await this.getStatus(toolId);
     if (!status.installed) {
       throw new Error(`${definition.displayName} install completed without producing an executable package`);
     }
@@ -1477,6 +1534,19 @@ export class ToolManager {
     return path.join(this.getInstallDirectory(toolId), "node_modules", ...definition.packageName.split("/"), "package.json");
   }
 
+  private getInstalledStatus(toolId: ManagedToolId): ManagedToolStatus {
+    const definition = TOOL_DEFINITIONS[toolId];
+    const packageJson = this.readInstalledPackageJson(toolId);
+
+    return {
+      id: definition.id,
+      displayName: definition.displayName,
+      installed: packageJson !== null,
+      version: packageJson?.version ?? null,
+      usage: null
+    };
+  }
+
   private resolveInstalledEntryPoint(toolId: ManagedToolId): string | null {
     const definition = TOOL_DEFINITIONS[toolId];
     const packageJson = this.readInstalledPackageJson(toolId);
@@ -1489,6 +1559,20 @@ export class ToolManager {
     if (!relativeEntry) return null;
 
     return path.resolve(path.dirname(this.getInstalledPackageJsonPath(toolId)), relativeEntry);
+  }
+
+  private resolveInstalledLaunchCommand(toolId: ManagedToolId): ResolvedCommand | null {
+    const entryPoint = this.resolveInstalledEntryPoint(toolId);
+    if (!entryPoint) {
+      return null;
+    }
+
+    const nodeRuntime = this.resolveNodeRuntime();
+    return {
+      command: nodeRuntime.command,
+      args: [entryPoint],
+      env: nodeRuntime.env
+    };
   }
 
   private ensureShim(toolId: ManagedToolId) {

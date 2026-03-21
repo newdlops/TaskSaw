@@ -82,6 +82,18 @@ body.dialog-open {
   flex-wrap: wrap;
 }
 
+.tool-usage {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--accent-soft);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
 #approval-queue-button {
   border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
   background:

@@ -23,6 +23,9 @@ contextBridge.exposeInMainWorld("tasksaw", {
   updateManagedTools: (): Promise<ManagedToolStatus[]> =>
       ipcRenderer.invoke("tools:update"),
 
+  getManagedToolStatuses: (): Promise<ManagedToolStatus[]> =>
+      ipcRenderer.invoke("tools:get-statuses"),
+
   resetAppState: (): Promise<void> =>
       ipcRenderer.invoke("app:reset"),
 

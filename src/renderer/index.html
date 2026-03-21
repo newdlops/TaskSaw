@@ -50,8 +50,14 @@
 
   <div class="topbar-group">
     <button id="new-shell" type="button" disabled>+Shell</button>
-    <button id="new-codex" type="button" disabled>+Codex</button>
-    <button id="new-gemini" type="button" disabled>+Gemini</button>
+    <div style="display: flex; align-items: center; gap: 4px;">
+      <button id="new-codex" type="button" disabled>+Codex</button>
+      <span id="codex-usage" class="tool-usage" hidden></span>
+    </div>
+    <div style="display: flex; align-items: center; gap: 4px;">
+      <button id="new-gemini" type="button" disabled>+Gemini</button>
+      <span id="gemini-usage" class="tool-usage" hidden></span>
+    </div>
     <label style="display: flex; align-items: center; gap: 4px; font-size: 13px;">
       <input type="checkbox" id="auto-approve-checkbox">
       <span id="auto-approve-label">Auto Approve</span>

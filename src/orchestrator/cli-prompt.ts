@@ -310,6 +310,7 @@ function buildStageInstructions(
       "Start from the provided evidence, workingMemory, and projectStructure before doing any new search.",
       "Turn the existing open questions, contradictions, keyFiles, entryPoints, relevantTargets, and recent memory decisions into 1-3 concrete inspection targets.",
       "If the current memory already names likely files, modules, entrypoints, or managed tool locations, inspect those first instead of widening the search.",
+      "Do not edit files, run builds, or execute other mutating commands during planning.",
       "Do not ask for broad repository or external tool exploration unless the current memory is insufficient to name a concrete next target."
     ].join(" ");
   }
@@ -320,6 +321,7 @@ function buildStageInstructions(
       "Gather only the minimum evidence needed to unblock the next concrete plan or execution step.",
       "Prefer confirming or disproving the current memory's open questions at the named files, entrypoints, modules, relevantTargets, or managed tool locations before running broader searches.",
       "If the current memory already suggests a likely absence or integration gap, confirm that directly and return compact evidence instead of expanding the search surface.",
+      "Do not edit files, run builds, or execute other mutating commands in gather. This phase is read-only evidence collection.",
       "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node.",
       "Do not search outside the workspace or managed tool installation paths unless the current node explicitly requires it."
     ].join(" ");

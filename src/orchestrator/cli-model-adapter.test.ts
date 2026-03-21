@@ -154,6 +154,50 @@ test("gemini adapter unwraps json formatter response payloads", async () => {
   assert.deepEqual(result.evidenceBundles, payload.evidenceBundles);
 });
 
+test("gemini adapter retries once with a JSON-only repair prompt after prose output", async () => {
+  const payload = {
+    summary: "gathered evidence after repair",
+    evidenceBundles: []
+  };
+  const prompts: string[] = [];
+  let invocationCount = 0;
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: async (_capability, prompt) => {
+      prompts.push(prompt);
+      invocationCount += 1;
+
+      if (invocationCount === 1) {
+        return {
+          stdout: [
+            "핵심 파일을 먼저 점검하겠습니다.",
+            "이제 사용량 조회 가능성을 확인하겠습니다."
+          ].join("\n\n"),
+          stderr: "",
+          command: ["gemini", "--acp"]
+        };
+      }
+
+      return {
+        stdout: JSON.stringify(payload),
+        stderr: "",
+        command: ["gemini", "--acp"]
+      };
+    },
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!(createContext(TEST_MODEL));
+  assert.equal(result.summary, payload.summary);
+  assert.deepEqual(result.evidenceBundles, payload.evidenceBundles);
+  assert.equal(invocationCount, 2);
+  assert.match(prompts[1] ?? "", /Return exactly one JSON object and nothing else\./);
+  assert.match(prompts[1] ?? "", /Do not call tools or edit files\./);
+});
+
 test("codex adapter parses fenced JSON inside assistant message output", async () => {
   const payload = {
     summary: "concrete plan ready",

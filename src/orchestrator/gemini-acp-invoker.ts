@@ -79,6 +79,7 @@ type GeminiPromptResponse = {
 };
 
 type GeminiPromptRuntime = {
+  capability: OrchestratorCapability;
   agentMessageChunks: string[];
   workspaceRoot: string;
   touchActivity: () => void;
@@ -206,6 +207,14 @@ class TasksawGeminiAcpClient {
   }
 
   async writeTextFile(params: { path?: string; content?: string }) {
+    const runtime = this.runtimeProvider();
+    if (!runtime) {
+      throw new Error("Gemini ACP file write was requested without an active prompt runtime");
+    }
+    if (runtime.capability !== "execute") {
+      throw new Error(`Gemini ACP file writes are only allowed during execute; current capability=${runtime.capability}`);
+    }
+
     const filePath = this.resolveWorkspacePath(params.path);
     const content = typeof params.content === "string" ? params.content : "";
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -330,6 +339,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
             `Timed out while waiting for Gemini ACP prompt activity for ${capability} with ${modelId}`
           );
           const runtime: GeminiPromptRuntime = {
+            capability,
             agentMessageChunks,
             workspaceRoot,
             touchActivity: () => promptActivity.touch(),
@@ -348,6 +358,22 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 ?? optionsForUi.find((option) => option.kind?.startsWith("allow"))
                 ?? optionsForUi[0];
               promptActivity.touch();
+
+              if (isReadOnlyGeminiCapability(capability) && isDisallowedReadOnlyToolCall(permissionRequest.toolCall)) {
+                const decision: OrchestratorApprovalDecision = {
+                  outcome: "cancelled"
+                };
+                context.reportProgress?.(
+                  "Rejected Gemini tool call because this phase is read-only",
+                  {
+                    capability,
+                    model: modelId,
+                    toolCall: toolCallSummary ?? null
+                  }
+                );
+                promptActivity.touch();
+                return decision;
+              }
 
               if (!context.requestUserApproval) {
                 const decision: OrchestratorApprovalDecision = allowOption
@@ -740,6 +766,81 @@ function extractPermissionRequestLocations(toolCall: {
     .map((value) => value.trim())
     .filter((value) => value.length > 0);
 }
+
+function isReadOnlyGeminiCapability(capability: OrchestratorCapability): boolean {
+  return capability !== "execute";
+}
+
+function isDisallowedReadOnlyToolCall(toolCall: {
+  title?: string;
+  kind?: string;
+  content?: Array<
+    | {
+      type?: string;
+      path?: string;
+      oldText?: string;
+      newText?: string;
+    }
+    | {
+      type?: string;
+      content?: {
+        type?: string;
+        text?: string;
+      };
+    }
+  >;
+} | undefined): boolean {
+  const kind = toolCall?.kind?.trim();
+  if (kind === "edit") {
+    return true;
+  }
+  if (kind !== "execute") {
+    return false;
+  }
+
+  const lowerText = [
+    toolCall?.title ?? "",
+    ...(toolCall?.content ?? []).map((entry) => {
+      if ("content" in entry && entry.content?.type === "text" && typeof entry.content.text === "string") {
+        return entry.content.text;
+      }
+      return "";
+    })
+  ]
+    .join("\n")
+    .toLowerCase();
+
+  return READ_ONLY_MUTATION_COMMAND_PATTERNS.some((pattern) => pattern.test(lowerText));
+}
+
+const READ_ONLY_MUTATION_COMMAND_PATTERNS = [
+  /\bnpm\s+(?:run\s+)?build\b/,
+  /\bpnpm\s+build\b/,
+  /\byarn\s+build\b/,
+  /\bbun\s+run\s+build\b/,
+  /\bnext\s+build\b/,
+  /\bvite\s+build\b/,
+  /\bwebpack\b/,
+  /\btsc\b/,
+  /\bcargo\s+build\b/,
+  /\bgradle(?:\s|$)/,
+  /\bmvn(?:\s|$)/,
+  /\bmake(?:\s|$)/,
+  /\bcmake(?:\s|$)/,
+  /\bnpm\s+(?:run\s+)?test\b/,
+  /\bpnpm\s+test\b/,
+  /\byarn\s+test\b/,
+  /\brm\b/,
+  /\bmv\b/,
+  /\bcp\b/,
+  /\bmkdir\b/,
+  /\btouch\b/,
+  /\bchmod\b/,
+  /\bchown\b/,
+  /\bgit\s+(?:add|apply|am|checkout|clean|commit|merge|mv|rebase|reset|restore|revert|rm)\b/,
+  /\bsed\s+-i\b/,
+  /\bperl\s+-i\b/
+] as const;
 
 function buildGeminiAttemptModels(
   primaryModelId: string,

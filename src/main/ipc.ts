@@ -79,7 +79,8 @@ export function registerIpc(
     toolIds: ManagedToolId[],
     openedSessionCount: number
   ) => {
-    const toolNames = toolIds.map((toolId) => toolManager.getStatus(toolId).displayName);
+    const toolStatuses = await Promise.all(toolIds.map((toolId) => toolManager.getStatus(toolId)));
+    const toolNames = toolStatuses.map((status) => status.displayName);
     const title = toolNames.length === 1
       ? `${toolNames[0]} login required`
       : "Gemini/Codex login required";
@@ -182,6 +183,10 @@ export function registerIpc(
 
   ipcMain.handle("tools:update", async () => {
     return toolManager.updateAll();
+  });
+
+  ipcMain.handle("tools:get-statuses", async () => {
+    return toolManager.getAllStatuses();
   });
 
   ipcMain.handle("orchestrator:run", async (_event, input: RunOrchestratorInput) => {

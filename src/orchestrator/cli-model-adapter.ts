@@ -123,62 +123,137 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
     context: ModelInvocationContext
   ): Promise<TResult> {
     const prompt = buildCliPrompt(capability, context);
+    let activePrompt = prompt;
     let stdout = "";
     let stderr = "";
     let command = [this.executablePath];
-
-    if (this.customInvoke) {
-      const result = await this.customInvoke(capability, prompt, context);
-      stdout = result.stdout;
-      stderr = result.stderr;
-      command = result.command ?? command;
-    } else {
-      const { args, env } = this.buildCommand(capability, prompt, context);
-      command = [this.executablePath, ...args];
-      const result = await execFileWithSignal(this.executablePath, args, {
-        cwd: this.cwd,
-        env: {
-          ...process.env,
-          ...env
-        },
-        signal: context.abortSignal,
-        timeout: this.timeoutMs,
-        maxBuffer: 1024 * 1024 * 8
-      });
-      stdout = result.stdout;
-      stderr = result.stderr;
-    }
+    let didRetryForJsonRepair = false;
 
     let parsed: TResult;
-    try {
-      parsed = this.normalizeResult(capability, this.parseOutput(stdout)) as TResult;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const stdoutPreview = stdout.trim().slice(0, 4_000);
-      const stderrPreview = stderr.trim().slice(0, 2_000);
-      const outputSummary = stdoutPreview.length > 0
-        ? `stdout preview:\n${stdoutPreview}`
-        : "stdout preview:\n<empty>";
-      throw new Error(
-        [
-          `Failed to parse ${this.flavor} output for ${capability}: ${message}`,
-          `command:\n${command.join(" ")}`,
-          outputSummary,
-          stderrPreview.length > 0 ? `stderr preview:\n${stderrPreview}` : null
-        ]
-          .filter(Boolean)
-          .join("\n\n")
-      );
+    while (true) {
+      const result = await this.invokeRaw(capability, activePrompt, context);
+      stdout = result.stdout;
+      stderr = result.stderr;
+      command = result.command;
+
+      try {
+        parsed = this.normalizeResult(capability, this.parseOutput(stdout)) as TResult;
+        break;
+      } catch (error) {
+        if (!didRetryForJsonRepair && this.shouldRetryGeminiJsonRepair(error)) {
+          didRetryForJsonRepair = true;
+          context.reportProgress?.("Gemini returned non-JSON output; requesting a JSON-only repair", {
+            capability,
+            model: context.assignedModel.model
+          });
+          activePrompt = this.buildGeminiJsonRepairPrompt(capability, prompt, stdout);
+          continue;
+        }
+
+        throw this.buildParseError(capability, error, stdout, stderr, command);
+      }
     }
 
     parsed.debug = {
       executable: this.executablePath,
       command,
-      prompt,
+      prompt: activePrompt,
       rawStdout: stdout,
       rawStderr: stderr
     };
     return parsed;
+  }
+
+  private async invokeRaw(
+    capability: OrchestratorCapability,
+    prompt: string,
+    context: ModelInvocationContext
+  ): Promise<{
+    stdout: string;
+    stderr: string;
+    command: string[];
+  }> {
+    if (this.customInvoke) {
+      const result = await this.customInvoke(capability, prompt, context);
+      return {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        command: result.command ?? [this.executablePath]
+      };
+    }
+
+    const { args, env } = this.buildCommand(capability, prompt, context);
+    const command = [this.executablePath, ...args];
+    const result = await execFileWithSignal(this.executablePath, args, {
+      cwd: this.cwd,
+      env: {
+        ...process.env,
+        ...env
+      },
+      signal: context.abortSignal,
+      timeout: this.timeoutMs,
+      maxBuffer: 1024 * 1024 * 8
+    });
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      command
+    };
+  }
+
+  private buildParseError(
+    capability: OrchestratorCapability,
+    error: unknown,
+    stdout: string,
+    stderr: string,
+    command: string[]
+  ): Error {
+    const message = error instanceof Error ? error.message : String(error);
+    const stdoutPreview = stdout.trim().slice(0, 4_000);
+    const stderrPreview = stderr.trim().slice(0, 2_000);
+    const outputSummary = stdoutPreview.length > 0
+      ? `stdout preview:\n${stdoutPreview}`
+      : "stdout preview:\n<empty>";
+    return new Error(
+      [
+        `Failed to parse ${this.flavor} output for ${capability}: ${message}`,
+        `command:\n${command.join(" ")}`,
+        outputSummary,
+        stderrPreview.length > 0 ? `stderr preview:\n${stderrPreview}` : null
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    );
+  }
+
+  private shouldRetryGeminiJsonRepair(error: unknown): boolean {
+    if (this.flavor !== "gemini") {
+      return false;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes("No valid JSON object was found in CLI output")
+      || message.includes("Gemini CLI exited without writing any JSON to stdout");
+  }
+
+  private buildGeminiJsonRepairPrompt(
+    capability: OrchestratorCapability,
+    originalPrompt: string,
+    invalidOutput: string
+  ): string {
+    return [
+      "Your previous response for this TaskSaw turn was invalid because it was not a single JSON object.",
+      "Return exactly one JSON object and nothing else.",
+      "Do not wrap the JSON in markdown fences.",
+      "Do not explain the JSON before or after the object.",
+      "Do not call tools or edit files. This is a formatting repair only.",
+      `Capability: ${capability}`,
+      "Use the same schema and instructions from the original prompt below.",
+      "Original prompt:",
+      originalPrompt,
+      "Previous invalid output:",
+      invalidOutput.trim().slice(0, 6_000)
+    ].join("\n\n");
   }
 
   private buildCommand(
