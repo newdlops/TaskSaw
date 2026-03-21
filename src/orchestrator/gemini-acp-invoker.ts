@@ -60,6 +60,7 @@ type GeminiAcpInvokerOptions = {
   timeoutMs?: number;
   promptInactivityTimeoutMs?: number;
   modeId?: string;
+  modeByCapability?: Partial<Record<OrchestratorCapability, string>>;
   fallbackModelIds?: string[];
   invalidStreamRetryCount?: number;
   dependencies?: GeminiAcpInvokerDependencies;
@@ -121,8 +122,14 @@ type GeminiLiveSession = {
     prompt(params: Record<string, unknown>): Promise<GeminiPromptResponse>;
   };
   sessionId: string;
+  availableModeIds: string[];
+  currentModeId: string | null;
   currentModelId: string | null;
   stderrBuffer: () => string;
+};
+
+const DEFAULT_GEMINI_MODE_BY_CAPABILITY: Partial<Record<OrchestratorCapability, string>> = {
+  execute: "default"
 };
 
 class TasksawGeminiAcpClient {
@@ -271,7 +278,12 @@ class TasksawGeminiAcpClient {
 export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const loadAcpModule = options.dependencies?.loadAcpModule ?? defaultLoadAcpModule;
   const spawnProcess = options.dependencies?.spawnProcess ?? defaultSpawnProcess;
-  const desiredModeId = options.modeId?.trim();
+  const configuredModeId = options.modeId?.trim();
+  const configuredModeByCapability = Object.fromEntries(
+    Object.entries(options.modeByCapability ?? {})
+      .map(([capability, modeId]) => [capability, modeId?.trim() ?? ""])
+      .filter(([, modeId]) => modeId.length > 0)
+  ) as Partial<Record<OrchestratorCapability, string>>;
   const startupTimeoutMs = typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
     ? Math.max(1_000, Math.trunc(options.timeoutMs))
     : null;
@@ -302,9 +314,11 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
 
       for (let attemptIndex = 0; attemptIndex < attemptModels.length; attemptIndex += 1) {
         const modelId = attemptModels[attemptIndex]!;
+        const desiredModeId = resolveDesiredModeId(capability);
 
         try {
           const session = await ensureSession(context.abortSignal);
+          await ensureSessionMode(session, desiredModeId, context.abortSignal, capability, context.workflowStage);
           const stderrStartIndex = session.stderrBuffer().length;
 
           if (!session.connection.unstable_setSessionModel) {
@@ -510,6 +524,48 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
     return runInvocation;
   };
 
+  function resolveDesiredModeId(capability: OrchestratorCapability): string | undefined {
+    return configuredModeByCapability[capability]
+      ?? configuredModeId
+      ?? DEFAULT_GEMINI_MODE_BY_CAPABILITY[capability];
+  }
+
+  async function ensureSessionMode(
+    session: GeminiLiveSession,
+    desiredModeId: string | undefined,
+    abortSignal: AbortSignal,
+    capability: OrchestratorCapability,
+    workflowStage: ModelInvocationContext["workflowStage"]
+  ): Promise<void> {
+    if (!desiredModeId || session.currentModeId === desiredModeId || !session.connection.setSessionMode) {
+      return;
+    }
+    if (!session.availableModeIds.includes(desiredModeId)) {
+      return;
+    }
+
+    await withAbort(
+      withOptionalTimeout(
+        session.connection.setSessionMode({
+          sessionId: session.sessionId,
+          modeId: desiredModeId
+        }),
+        startupTimeoutMs,
+        `Timed out while switching the Gemini ACP session to ${desiredModeId} mode`
+      ),
+      abortSignal,
+      async () => {
+        await invalidateSession(session);
+      },
+      [
+        `Gemini ACP mode switching to ${desiredModeId} was aborted`,
+        `capability=${capability}`,
+        `workflowStage=${workflowStage}`
+      ].join(" · ")
+    );
+    session.currentModeId = desiredModeId;
+  }
+
   async function ensureSession(abortSignal: AbortSignal): Promise<GeminiLiveSession> {
     if (activeSession && activeSession.child.exitCode === null && activeSession.child.signalCode === null) {
       return activeSession;
@@ -590,21 +646,6 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
         ?.map((mode) => mode.id?.trim())
         .filter((modeId): modeId is string => Boolean(modeId))
         ?? [];
-      if (desiredModeId && availableModeIds.includes(desiredModeId) && connection.setSessionMode) {
-        await withAbort(
-          withOptionalTimeout(
-            connection.setSessionMode({
-              sessionId,
-              modeId: desiredModeId
-            }),
-            startupTimeoutMs,
-            `Timed out while switching the Gemini ACP session to ${desiredModeId} mode`
-          ),
-          abortSignal,
-          onAbort,
-          `Gemini ACP mode switching to ${desiredModeId} was aborted`
-        );
-      }
 
       const nextSession: GeminiLiveSession = {
         child,
@@ -614,6 +655,8 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
           prompt: (params) => connection.prompt(params) as Promise<GeminiPromptResponse>
         },
         sessionId,
+        availableModeIds,
+        currentModeId: null,
         currentModelId: null,
         stderrBuffer: () => stderrBuffer
       };

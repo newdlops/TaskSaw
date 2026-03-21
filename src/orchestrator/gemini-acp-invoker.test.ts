@@ -361,6 +361,157 @@ test("gemini ACP invoker switches the session mode only when explicitly requeste
   });
 });
 
+test("gemini ACP invoker switches execute sessions to default approval mode and surfaces edit approvals", async () => {
+  const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+  const fakeChild = new FakeChildProcess();
+  let approvalRequestCount = 0;
+  let editOutcome = "";
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{
+                    optionId?: string;
+                    kind?: string;
+                  }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return {
+                protocolVersion: 1
+              };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }, { id: "default" }]
+                }
+              };
+            }
+
+            async setSessionMode(params: Record<string, unknown>) {
+              calls.push({
+                method: "setSessionMode",
+                params
+              });
+              return {};
+            }
+
+            async unstable_setSessionModel(params: Record<string, unknown>) {
+              calls.push({
+                method: "unstable_setSessionModel",
+                params
+              });
+              return {};
+            }
+
+            async prompt(params: Record<string, unknown>) {
+              calls.push({
+                method: "prompt",
+                params
+              });
+              const permissionDecision = await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "src/main/tool-manager.ts: old => new",
+                  kind: "edit"
+                }
+              });
+              editOutcome = permissionDecision.outcome.outcome;
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Execute completed after approval",
+                      outputs: [],
+                      completed: true
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["execute"]
+  });
+
+  const result = await adapter.execute!({
+    ...createContext(TEST_MODEL),
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Execute completed after approval");
+  assert.equal(result.completed, true);
+  assert.equal(editOutcome, "selected");
+  assert.equal(approvalRequestCount, 1);
+  assert.deepEqual(
+    calls.map((entry) => entry.method),
+    ["setSessionMode", "unstable_setSessionModel", "prompt"]
+  );
+  assert.deepEqual(calls[0]?.params, {
+    sessionId: "session-1",
+    modeId: "default"
+  });
+  assert.equal(
+    progressMessages.some((entry) =>
+      entry.message === "Gemini tool call approved and waiting for result"
+      && entry.details?.toolCall === "src/main/tool-manager.ts: old => new"
+    ),
+    true
+  );
+});
+
 test("gemini ACP invoker waits for prompt completion instead of timing out", async () => {
   const fakeChild = new FakeChildProcess();
 
