@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { OrchestratorEngine, OrchestratorEventListener } from "./engine";
 import { EvidenceStore } from "./evidence-store";
+import { findUnresolvedSuccessSignal } from "./execution-guardrails";
 import {
   AbstractPlanResult,
   ConcretePlanResult,
@@ -731,17 +732,47 @@ export class OrchestratorRuntime {
     if (review) {
       phaseResults.review = review;
     }
+    let verificationPassed = verify.passed;
+    let verificationSummary = verify.summary;
+    const unresolvedSuccessSignal = verificationPassed
+      ? findUnresolvedSuccessSignal([
+          execute.summary,
+          ...execute.outputs,
+          verify.summary,
+          ...verify.findings,
+          review?.summary,
+          ...(review?.followUpQuestions ?? []),
+          ...((review?.nextActions ?? []).flatMap((nextAction) => [
+            nextAction.title,
+            nextAction.objective,
+            nextAction.rationale
+          ]))
+        ])
+      : null;
+    if (unresolvedSuccessSignal) {
+      verificationPassed = false;
+      verificationSummary = `Verification reported success but the model output still includes an unresolved blocker signal (${unresolvedSuccessSignal}).`;
+      this.recordDecision(
+        currentNode.runId,
+        verifyStage.stageNode.id,
+        "Verification flagged unresolved blocker",
+        verificationSummary
+      );
+      this.recordExecutionStatus(currentNode, "verification_failed", verificationSummary, {
+        signal: unresolvedSuccessSignal
+      });
+    }
 
     this.resolveCoveredQuestions(currentNode, {
       reviewSummary: review?.summary,
       executeSummary: execute.summary,
       outputs: execute.outputs,
-      verifySummaries: [verify.summary, ...verify.findings],
+      verifySummaries: [verificationSummary, ...verify.findings],
       evidenceBundles: executionEvidence
     });
 
-    if (!verify.passed) {
-      throw new VerificationFailedError(currentNode.id, verify.summary);
+    if (!verificationPassed) {
+      throw new VerificationFailedError(currentNode.id, verificationSummary);
     }
 
     this.markPendingAcceptanceCriteriaMet(currentNode.id);
@@ -752,8 +783,8 @@ export class OrchestratorRuntime {
       node: currentNode,
       phaseResults,
       outputs: execute.outputs.length > 0 ? execute.outputs : [execute.summary],
-      verifySummaries: [verify.summary],
-      verificationPassed: verify.passed
+      verifySummaries: [verificationSummary],
+      verificationPassed
     };
   }
 

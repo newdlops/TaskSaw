@@ -145,6 +145,10 @@ test("task orchestration gather prompt forbids broad search before checking memo
     prompt,
     /Do not search outside the workspace or managed tool installation paths unless the current node explicitly requires it\./
   );
+  assert.match(
+    prompt,
+    /Do not ask the user for permission to continue planning, escape plan mode, or work around internal tool\/runtime errors\./
+  );
 });
 
 test("task orchestration concrete plan prompt distinguishes structural gaps from missing external capabilities", () => {
@@ -174,6 +178,10 @@ test("task orchestration verify prompt rejects placeholder successes and follow-
   assert.match(
     prompt,
     /Verify the requested user-visible behavior, not just the presence of code changes or lint\/build success\./
+  );
+  assert.match(
+    prompt,
+    /A generic success claim is insufficient\. State the concrete observed behavior or the concrete blocker that justifies the verdict\./
   );
   assert.match(
     prompt,

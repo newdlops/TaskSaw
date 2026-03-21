@@ -323,6 +323,7 @@ function buildStageInstructions(
       "Prefer confirming or disproving the current memory's open questions at the named files, entrypoints, modules, relevantTargets, or managed tool locations before running broader searches.",
       "If the current memory already suggests a likely absence or integration gap, confirm that directly and return compact evidence instead of expanding the search surface.",
       "If an external CLI/API surface already appears absent or unsupported, stop after enough evidence to establish that fact. Do not keep probing undocumented alternative commands, slash commands, or ad hoc flags.",
+      "Do not ask the user for permission to continue planning, escape plan mode, or work around internal tool/runtime errors. Report those blockers directly in the JSON response instead.",
       "Do not edit files, run builds, or execute other mutating commands in gather. This phase is read-only evidence collection.",
       "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node.",
       "Do not search outside the workspace or managed tool installation paths unless the current node explicitly requires it."
@@ -342,6 +343,7 @@ function buildStageInstructions(
   if (capability === "verify") {
     return [
       "Verify the requested user-visible behavior, not just the presence of code changes or lint/build success.",
+      "A generic success claim is insufficient. State the concrete observed behavior or the concrete blocker that justifies the verdict.",
       "Set passed=false if any requested behavior still relies on placeholder, fallback, no-data, or unsupported upstream sources instead of the requested real result.",
       "Do not modify files, create temp scripts or temp files, run builds, or attempt follow-up fixes during verify.",
       "Use already captured evidence first and keep any additional inspection strictly read-only and minimal."

@@ -375,12 +375,13 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 ?? optionsForUi[0];
               promptActivity.touch();
 
-              if (isToolCallDisallowedForCapability(capability, permissionRequest.toolCall)) {
+              const disallowedReason = getDisallowedToolCallReasonForCapability(capability, permissionRequest.toolCall);
+              if (disallowedReason) {
                 const decision: OrchestratorApprovalDecision = {
                   outcome: "cancelled"
                 };
                 context.reportProgress?.(
-                  "Rejected Gemini tool call because this phase is read-only",
+                  disallowedReason,
                   {
                     capability,
                     model: modelId,
@@ -820,7 +821,7 @@ function disallowsExecuteToolCallsInCapability(capability: OrchestratorCapabilit
   return capability === "abstractPlan" || capability === "concretePlan" || capability === "review";
 }
 
-function isToolCallDisallowedForCapability(
+function getDisallowedToolCallReasonForCapability(
   capability: OrchestratorCapability,
   toolCall: {
     title?: string;
@@ -841,22 +842,27 @@ function isToolCallDisallowedForCapability(
       }
     >;
   } | undefined
-): boolean {
+): string | null {
   const kind = toolCall?.kind?.trim();
+  if (kind === "other") {
+    return "Rejected Gemini tool call because generic approval requests are not supported";
+  }
   if (kind === "edit") {
-    return capability !== "execute";
+    return capability !== "execute" ? "Rejected Gemini tool call because this phase is read-only" : null;
   }
   if (kind !== "execute") {
-    return false;
+    return null;
   }
   if (disallowsExecuteToolCallsInCapability(capability)) {
-    return true;
+    return "Rejected Gemini tool call because this phase is read-only";
   }
   if (!isReadOnlyGeminiCapability(capability)) {
-    return false;
+    return null;
   }
 
-  return isDisallowedReadOnlyExecuteToolCall(toolCall);
+  return isDisallowedReadOnlyExecuteToolCall(toolCall)
+    ? "Rejected Gemini tool call because this phase is read-only"
+    : null;
 }
 
 function isDisallowedReadOnlyExecuteToolCall(toolCall: {

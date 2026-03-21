@@ -179,7 +179,19 @@ export class ToolManager {
               : typeof data?.remainingPercent === "number"
                 ? data.remainingPercent
                 : null;
-            resolve(typeof remainingPercent === "number" ? { remainingPercent } : null);
+
+            if (typeof remainingPercent !== "number") {
+              resolve(null);
+              return;
+            }
+
+            resolve({
+              remainingPercent,
+              codex: {
+                fiveHourRemainingPercent: typeof data?.fiveHour?.left === "number" ? data.fiveHour.left : null,
+                weeklyRemainingPercent: typeof data?.weekly?.left === "number" ? data.weekly.left : null
+              }
+            });
           } catch {
             resolve(null);
           }
@@ -196,8 +208,36 @@ export class ToolManager {
   }
 
   private async getGeminiUsage(): Promise<ManagedToolStatus["usage"]> {
-    // The managed Gemini CLI currently exposes no quota/status command that returns a usable percentage.
-    return null;
+    try {
+      // Use the cached catalog if available to avoid expensive CLI calls during status checks
+      const catalog = this.resolvedModelCatalogs.get("gemini:")
+        ?? await this.discoverModelCatalog("gemini").catch(() => null);
+
+      if (!catalog || !catalog.models) {
+        return null;
+      }
+
+      const models = catalog.models
+        .filter((model) => !model.hidden)
+        .map((model) => {
+          let displayName = model.displayName;
+          if (displayName.toLowerCase().startsWith("gemini ")) {
+            displayName = displayName.slice(7);
+          }
+          return {
+            modelId: model.id,
+            displayName,
+            remainingPercent: null // Placeholder as CLI doesn't support quota yet
+          };
+        });
+
+      return {
+        remainingPercent: null,
+        gemini: { models }
+      };
+    } catch {
+      return null;
+    }
   }
 
   buildManagedExecutionEnvironment(toolId: ManagedToolId): Record<string, string> {
@@ -1124,11 +1164,11 @@ export class ToolManager {
 
   private listKnownGeminiModelIds(modelsModule: GeminiModelsModule): string[] {
     return [
-      modelsModule.PREVIEW_GEMINI_MODEL,
       modelsModule.PREVIEW_GEMINI_3_1_MODEL,
       modelsModule.PREVIEW_GEMINI_3_1_CUSTOM_TOOLS_MODEL,
-      modelsModule.PREVIEW_GEMINI_FLASH_MODEL,
       modelsModule.PREVIEW_GEMINI_3_1_FLASH_LITE_MODEL,
+      modelsModule.PREVIEW_GEMINI_MODEL,
+      modelsModule.PREVIEW_GEMINI_FLASH_MODEL,
       modelsModule.DEFAULT_GEMINI_MODEL,
       modelsModule.DEFAULT_GEMINI_FLASH_MODEL,
       modelsModule.DEFAULT_GEMINI_FLASH_LITE_MODEL

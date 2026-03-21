@@ -1642,6 +1642,115 @@ test("runtime fails fast when execute reports that work was not completed", asyn
   );
 });
 
+test("runtime rejects claimed verification success when model output still contains unresolved blocker signals", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        concretePlan: () => ({
+          summary: "Execution is ready",
+          childTasks: [],
+          executionNotes: []
+        }),
+        verify: () => ({
+          summary: "Verification passed, but the requested behavior still relies on placeholder/no-data fallback.",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => ({
+          summary: "Gather complete",
+          evidenceBundles: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execute complete",
+          outputs: ["Updated the relevant UI"],
+          completed: true
+        })
+      },
+      trace
+    )
+  );
+
+  let capturedSnapshot: RunSnapshot | undefined;
+  const runtime = new OrchestratorRuntime(registry, {
+    persistence: {
+      saveSnapshot(snapshot: RunSnapshot) {
+        capturedSnapshot = snapshot;
+      }
+    } as never
+  });
+
+  await assert.rejects(
+    runtime.executeScheduledRun({
+      goal: "Reject unresolved placeholder-style verification success",
+      assignedModels: {
+        abstractPlanner: planner,
+        gatherer,
+        concretePlanner: planner,
+        executor,
+        verifier: planner
+      },
+      reviewPolicy: "none"
+    }),
+    /unresolved blocker signal/
+  );
+
+  assert.ok(capturedSnapshot);
+  const snapshot = capturedSnapshot as RunSnapshot;
+  assert.equal(snapshot.run.status, "escalated");
+  assert.equal(
+    snapshot.events.some((event) =>
+      event.type === "run_failed"
+      && String(event.payload.error).includes("unresolved blocker signal")
+    ),
+    true
+  );
+});
+
 test("runtime records failure events when a node invocation throws", async () => {
   const trace: string[] = [];
   const registry = new ModelAdapterRegistry();

@@ -261,6 +261,44 @@ test("execute adapter marks blocked executions as incomplete", async () => {
   assert.deepEqual(result.outputs, []);
 });
 
+test("execute adapter rejects claimed success when unresolved blocker language remains", async () => {
+  const payload = {
+    summary: "Execution completed, but the requested behavior still relies on placeholder/no-data fallback.",
+    outputs: ["UI wiring updated"],
+    completed: true
+  };
+  const script = `process.stdout.write(${JSON.stringify(JSON.stringify(payload))});`;
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    buildInvocationArgs: () => ["-e", script],
+    supportedCapabilities: ["execute"]
+  });
+
+  const result = await adapter.execute!(createContext(TEST_MODEL));
+  assert.equal(result.completed, false);
+});
+
+test("verify adapter rejects claimed success when unresolved blocker language remains", async () => {
+  const payload = {
+    summary: "Verification passed, but the requested behavior still relies on placeholder/no-data fallback.",
+    passed: true,
+    findings: []
+  };
+  const script = `process.stdout.write(${JSON.stringify(JSON.stringify(payload))});`;
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    buildInvocationArgs: () => ["-e", script],
+    supportedCapabilities: ["verify"]
+  });
+
+  const result = await adapter.verify!(createContext(TEST_MODEL));
+  assert.equal(result.passed, false);
+});
+
 test("codex adapter parses item.completed agent_message output", async () => {
   const payload = {
     summary: "abstract plan ready",

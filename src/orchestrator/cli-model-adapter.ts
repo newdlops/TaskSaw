@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { buildCliPrompt } from "./cli-prompt";
+import { findUnresolvedSuccessSignal } from "./execution-guardrails";
 import {
   AbstractPlanResult,
   ConcretePlanResult,
@@ -535,7 +536,7 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
         const findings = this.normalizeStringArray(record.findings ?? record.issues);
         return {
           summary: this.readString(record.summary, "No verification summary returned"),
-          passed: this.readBoolean(record.passed, findings.length === 0),
+          passed: this.inferVerifyPassed(record, findings),
           findings
         } satisfies VerifyResult;
       }
@@ -629,21 +630,26 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
   }
 
   private inferExecuteCompleted(record: Record<string, unknown>, summary: string, outputs: string[]): boolean {
-    if (typeof record.completed === "boolean") {
-      return record.completed;
-    }
+    const explicitCompleted = typeof record.completed === "boolean"
+      ? record.completed
+      : typeof record.executed === "boolean"
+        ? record.executed
+        : undefined;
 
-    if (typeof record.executed === "boolean") {
-      return record.executed;
-    }
-
-    const normalizedSummary = summary.toLowerCase();
-    const looksBlocked = /denied by policy|not been completed|was not completed|did not complete|could not complete|unable to complete|not executed|execution was denied|execution has not been completed/.test(normalizedSummary);
-    if (looksBlocked && outputs.length === 0) {
+    if (findUnresolvedSuccessSignal([summary, ...outputs])) {
       return false;
     }
 
-    return true;
+    return explicitCompleted ?? true;
+  }
+
+  private inferVerifyPassed(record: Record<string, unknown>, findings: string[]): boolean {
+    const summary = this.readString(record.summary, "No verification summary returned");
+    if (findUnresolvedSuccessSignal([summary, ...findings])) {
+      return false;
+    }
+
+    return this.readBoolean(record.passed, findings.length === 0);
   }
 
   private normalizeEvidenceBundles(record: Record<string, unknown>): EvidenceBundleDraft[] {

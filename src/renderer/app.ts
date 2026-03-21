@@ -24,6 +24,17 @@ type ManagedToolUsage = {
   percentRemaining?: number | null;
   used?: number | null;
   max?: number | null;
+  codex?: {
+    fiveHourRemainingPercent: number | null;
+    weeklyRemainingPercent: number | null;
+  } | null;
+  gemini?: {
+    models?: Array<{
+      modelId: string;
+      displayName: string;
+      remainingPercent: number;
+    }> | null;
+  } | null;
 } | null;
 
 type ManagedToolStatus = {
@@ -5029,13 +5040,39 @@ function renderToolUsageStatus(status: ManagedToolStatus) {
     return;
   }
 
-  const remainingPercent = normalizeRemainingPercent(status.usage ?? null);
+  const usage = status.usage ?? null;
+  const remainingPercent = normalizeRemainingPercent(usage);
   const fallbackReason = languagePreference === "ko" ? "데이터 없음" : "No data";
-  const suffix = remainingPercent === null
-    ? "--%"
-    : (languagePreference === "ko" ? `${remainingPercent}% 남음` : `${remainingPercent}% left`);
+  const leftLabel = languagePreference === "ko" ? "남음" : "left";
+  const percentLabel = remainingPercent === null ? "--%" : `${remainingPercent}%`;
 
-  usageEl.textContent = `${status.displayName} ${suffix}`;
+  let label = status.displayName;
+
+  if (status.id === "codex") {
+    label = `Codex ${percentLabel}`;
+    if (usage?.codex) {
+      const fiveHour = usage.codex.fiveHourRemainingPercent;
+      const weekly = usage.codex.weeklyRemainingPercent;
+      const details = [];
+      if (fiveHour !== null) details.push(`5h:${fiveHour}%`);
+      if (weekly !== null) details.push(`1w:${weekly}%`);
+      if (details.length > 0) {
+        label += ` (${details.join(" ")})`;
+      }
+    }
+    label += ` ${leftLabel}`;
+  } else if (status.id === "gemini") {
+    if (usage?.gemini?.models && usage.gemini.models.length > 0) {
+      const modelLabels = usage.gemini.models.map(m => `${m.displayName}:${m.remainingPercent}%`);
+      label = `Gemini ${modelLabels.join(" ")} ${leftLabel}`;
+    } else {
+      label = `Gemini ${percentLabel} ${leftLabel}`;
+    }
+  } else {
+    label = `${status.displayName} ${percentLabel} ${leftLabel}`;
+  }
+
+  usageEl.textContent = label;
   usageEl.title = remainingPercent === null ? fallbackReason : usageEl.textContent;
   usageEl.hidden = false;
 }

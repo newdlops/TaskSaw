@@ -12,14 +12,27 @@ export type DirectoryDialogOptions = {
   message?: string;
 };
 
+export type ManagedToolUsage = {
+  remainingPercent: number | null;
+  codex?: {
+    fiveHourRemainingPercent: number | null;
+    weeklyRemainingPercent: number | null;
+  } | null;
+  gemini?: {
+    models?: Array<{
+      modelId: string;
+      displayName: string;
+      remainingPercent: number | null;
+    }> | null;
+  } | null;
+};
+
 export type ManagedToolStatus = {
   id: ManagedToolId;
   displayName: string;
   installed: boolean;
   version: string | null;
-  usage?: {
-    remainingPercent: number;
-  } | null;
+  usage?: ManagedToolUsage | null;
 };
 
 export type ManagedToolModel = {
