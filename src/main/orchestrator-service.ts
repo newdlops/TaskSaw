@@ -486,7 +486,7 @@ export class OrchestratorService {
         assignedModels: {
           abstractPlanner: geminiPlanningModel,
           gatherer: workerModel,
-          concretePlanner: workerModel,
+          concretePlanner: geminiPlanningModel,
           reviewer: workerModel,
           executor: workerModel,
           verifier: workerModel
@@ -510,7 +510,7 @@ export class OrchestratorService {
         assignedModels: {
           abstractPlanner: codexPlanningModel,
           gatherer: workerModel,
-          concretePlanner: workerModel,
+          concretePlanner: codexPlanningModel,
           reviewer: workerModel,
           executor: workerModel,
           verifier: workerModel
@@ -534,7 +534,7 @@ export class OrchestratorService {
       assignedModels: {
         abstractPlanner: codexPlanningModel,
         gatherer: geminiWorker,
-        concretePlanner: codexWorker,
+        concretePlanner: codexPlanningModel,
         reviewer: geminiWorker,
         executor: codexWorker,
         verifier: codexWorker

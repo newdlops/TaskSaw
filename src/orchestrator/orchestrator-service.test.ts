@@ -115,7 +115,7 @@ function createGeminiCatalog(overrides: Partial<ManagedToolModelCatalog> = {}): 
   };
 }
 
-test("orchestrator service assigns the latest frontier Gemini model to planning while preferring a lightweight Gemini model for worker roles", async () => {
+test("orchestrator service keeps Gemini concrete planning on the planner model while preferring lightweight worker roles elsewhere", async () => {
   const catalog = createGeminiCatalog();
   const toolManager = {
     prepareWorkspaceContext: async () => undefined,
@@ -139,7 +139,7 @@ test("orchestrator service assigns the latest frontier Gemini model to planning 
 
   assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gemini-3.1-pro-preview");
   assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-3-flash-preview");
-  assert.equal(modeConfig.assignedModels.concretePlanner.model, "gemini-3-flash-preview");
+  assert.equal(modeConfig.assignedModels.concretePlanner.model, "gemini-3.1-pro-preview");
   assert.equal(modeConfig.assignedModels.reviewer.model, "gemini-3-flash-preview");
   assert.equal(modeConfig.assignedModels.verifier.model, "gemini-3-flash-preview");
   assert.deepEqual(modeConfig.toolModels.gemini.map((model) => model.model), [
@@ -282,7 +282,7 @@ test("orchestrator service falls back to the latest concrete Gemini model for wo
   assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-3.1-pro-preview");
 });
 
-test("orchestrator service assigns the strongest non-mini Codex model to planning while keeping the default model for worker roles", async () => {
+test("orchestrator service keeps Codex concrete planning on the strongest planner model while keeping worker roles lightweight", async () => {
   const catalog = createCodexCatalog();
   const toolManager = {
     prepareWorkspaceContext: async () => undefined,
@@ -306,7 +306,7 @@ test("orchestrator service assigns the strongest non-mini Codex model to plannin
 
   assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gpt-5.4");
   assert.equal(modeConfig.assignedModels.gatherer.model, "gpt-5.4-mini");
-  assert.equal(modeConfig.assignedModels.concretePlanner.model, "gpt-5.4-mini");
+  assert.equal(modeConfig.assignedModels.concretePlanner.model, "gpt-5.4");
   assert.equal(modeConfig.assignedModels.reviewer.model, "gpt-5.4-mini");
   assert.equal(modeConfig.assignedModels.verifier.model, "gpt-5.4-mini");
   assert.deepEqual(modeConfig.toolModels.codex.map((model) => model.model), [
@@ -411,7 +411,7 @@ test("orchestrator service keeps higher reasoning for Codex planners and lighter
   assert.equal(modeConfig.assignedModels.executor.reasoningEffort, "low");
 });
 
-test("orchestrator service keeps cross-review planning on Codex while using worker-grade models for gather, concrete planning, review, execute, and verify", async () => {
+test("orchestrator service keeps cross-review concrete planning on Codex planner models while using worker-grade models for gather, review, execute, and verify", async () => {
   const toolManager = {
     prepareWorkspaceContext: async () => undefined,
     discoverModelCatalog: async (toolId: string) => toolId === "codex" ? createCodexCatalog() : createGeminiCatalog()
@@ -432,7 +432,7 @@ test("orchestrator service keeps cross-review planning on Codex while using work
 
   assert.equal(modeConfig.assignedModels.abstractPlanner.model, "gpt-5.4");
   assert.equal(modeConfig.assignedModels.gatherer.model, "gemini-3-flash-preview");
-  assert.equal(modeConfig.assignedModels.concretePlanner.model, "gpt-5.4-mini");
+  assert.equal(modeConfig.assignedModels.concretePlanner.model, "gpt-5.4");
   assert.equal(modeConfig.assignedModels.reviewer.model, "gemini-3-flash-preview");
   assert.equal(modeConfig.assignedModels.executor.model, "gpt-5.4-mini");
   assert.equal(modeConfig.assignedModels.verifier.model, "gpt-5.4-mini");

@@ -32,7 +32,7 @@ type ManagedToolUsage = {
     models?: Array<{
       modelId: string;
       displayName: string;
-      remainingPercent: number;
+      remainingPercent: number | null;
     }> | null;
   } | null;
 } | null;
@@ -5063,8 +5063,10 @@ function renderToolUsageStatus(status: ManagedToolStatus) {
     label += ` ${leftLabel}`;
   } else if (status.id === "gemini") {
     if (usage?.gemini?.models && usage.gemini.models.length > 0) {
-      const modelLabels = usage.gemini.models.map(m => `${m.displayName}:${m.remainingPercent}%`);
-      label = `Gemini ${modelLabels.join(" ")} ${leftLabel}`;
+      const displayModels = usage.gemini.models.slice(0, 3);
+      const modelLabels = displayModels.map(m => `${m.displayName}:${m.remainingPercent ?? "--"}%`);
+      const suffix = usage.gemini.models.length > 3 ? "..." : "";
+      label = `Gemini ${modelLabels.join(" ")}${suffix} ${leftLabel}`;
     } else {
       label = `Gemini ${percentLabel} ${leftLabel}`;
     }
