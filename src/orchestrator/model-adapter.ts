@@ -135,6 +135,8 @@ export type ConcretePlanResult = {
   childTasks: OrchestratorChildTask[];
   executionNotes: string[];
   needsMorePlanning?: boolean;
+  needsAdditionalGather?: boolean;
+  additionalGatherObjectives?: string[];
   needsProjectStructureInspection?: boolean;
   inspectionObjectives?: string[];
   projectStructureContradictions?: string[];

@@ -128,6 +128,10 @@ test("task orchestration abstract plan prompt prioritizes existing memory before
     prompt,
     /Turn the existing open questions, contradictions, keyFiles, entryPoints, relevantTargets, and recent memory decisions into 1-3 concrete inspection targets\./
   );
+  assert.match(
+    prompt,
+    /Inspection targets must be explicit file paths, modules, entrypoints, symbols, managed-tool locations, or clearly named external surfaces\./
+  );
 });
 
 test("task orchestration gather prompt forbids broad search before checking memory-derived targets", () => {
@@ -149,6 +153,34 @@ test("task orchestration gather prompt forbids broad search before checking memo
     prompt,
     /Do not ask the user for permission to continue planning, escape plan mode, or work around internal tool\/runtime errors\./
   );
+  assert.match(
+    prompt,
+    /Treat the abstract plan's inspection targets and evidence requirements as the current gather contract\./
+  );
+  assert.match(
+    prompt,
+    /Stay within that contract unless each named target has been exhausted and you can justify widening the search in the returned evidence\./
+  );
+});
+
+test("bootstrap sketch gather prompt stays at seed level and defers deep probing", () => {
+  const prompt = buildCliPrompt("gather", {
+    ...createContext(TEST_MODEL),
+    workflowStage: "bootstrap_sketch"
+  });
+
+  assert.match(
+    prompt,
+    /Stay at seed level only: capture clues and open questions, then defer any detailed inspection to the later planning and gather stages\./
+  );
+  assert.match(
+    prompt,
+    /Do not probe external CLIs, managed-tool installations, package internals, auth state, quota surfaces, or home-directory files during bootstrap sketch\./
+  );
+  assert.match(
+    prompt,
+    /If deeper exploration seems necessary, record that it is needed instead of performing it now\./
+  );
 });
 
 test("task orchestration concrete plan prompt distinguishes structural gaps from missing external capabilities", () => {
@@ -165,6 +197,14 @@ test("task orchestration concrete plan prompt distinguishes structural gaps from
   assert.match(
     prompt,
     /If the key blocker is a missing or unsupported data source rather than ambiguous repository structure, keep needsProjectStructureInspection=false and explain the blocker or fallback in executionNotes or childTasks\./
+  );
+  assert.match(
+    prompt,
+    /If the current evidence is still too broad for execution but one more focused plan\/gather pass would materially narrow the scope, set needsAdditionalGather=true, keep childTasks empty when possible, and return 1-3 explicit additionalGatherObjectives\./
+  );
+  assert.match(
+    prompt,
+    /Use needsAdditionalGather only for narrow follow-up evidence collection\. Do not punt broad discovery back to gather\./
   );
   assert.match(
     prompt,

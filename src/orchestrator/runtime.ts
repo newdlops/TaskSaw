@@ -173,6 +173,7 @@ export class OrchestratorRuntime {
   private readonly projectStructureByRun = new Map<string, ProjectStructureMemoryStore>();
   private readonly projectStructureInspectionNodeIdsByRun = new Map<string, Set<string>>();
   private readonly projectStructureInspectionAttemptsByNode = new Map<string, number>();
+  private readonly focusedGatherAttemptsByNode = new Map<string, number>();
   private readonly finalReports = new Map<string, OrchestratorFinalReport>();
   private readonly abortController = new AbortController();
   private cancellationReason: string | null = null;
@@ -298,6 +299,7 @@ export class OrchestratorRuntime {
     );
     this.projectStructureInspectionNodeIdsByRun.set(run.id, new Set());
     this.projectStructureInspectionAttemptsByNode.set(rootNode.id, 0);
+    this.focusedGatherAttemptsByNode.set(rootNode.id, 0);
     const seededEvidenceCount = this.seedContinuationContext(rootNode, input.continuation);
     this.persistence?.saveSnapshot(this.getSnapshot(run.id));
     this.engine.appendEvent(run.id, rootNode.id, "scheduler_progress", {
@@ -443,7 +445,7 @@ export class OrchestratorRuntime {
       capability: "abstractPlan",
       evidenceBundles: planningEvidence
     });
-    const abstractPlan = abstractPlanStage.result;
+    let abstractPlan = abstractPlanStage.result;
     this.recordAbstractPlanning(abstractPlanStage.stageNode, abstractPlan);
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
@@ -455,14 +457,18 @@ export class OrchestratorRuntime {
         currentNode,
         "gather",
         `Gather file, symbol, and evidence findings for:\n${currentNode.objective}`,
-        planningEvidence
+        planningEvidence,
+        {
+          targetsToInspect: abstractPlan.targetsToInspect,
+          evidenceRequirements: abstractPlan.evidenceRequirements
+        }
       ),
       kind: "planning",
       role: "gatherer",
       capability: "gather",
       evidenceBundles: planningEvidence
     });
-    const gather = gatherStage.result;
+    let gather = gatherStage.result;
     this.mergeProjectStructureReport(gatherStage.stageNode, gather.projectStructure);
     const gatheredBundles = gather.evidenceBundles.map((bundleDraft) =>
       this.materializeEvidenceBundle(gatherStage.stageNode, bundleDraft)
@@ -481,7 +487,7 @@ export class OrchestratorRuntime {
       ...planningEvidence.map((bundle) => bundle.id),
       ...gatheredBundles.map((bundle) => bundle.id)
     ];
-    const consolidatedEvidence = this.evidenceStore.mergeBundles({
+    let consolidatedEvidence = this.evidenceStore.mergeBundles({
       runId: currentNode.runId,
       nodeId: currentNode.id,
       bundleIds: bundleIdsForConsolidation,
@@ -517,6 +523,24 @@ export class OrchestratorRuntime {
       );
       currentNode = inspectedPlan.node;
       concretePlan = inspectedPlan.concretePlan;
+    }
+
+    if (!isProjectStructureInspection) {
+      const refinedPlan = await this.resolveFocusedGatherLoop({
+        node: currentNode,
+        planningEvidence,
+        abstractPlan,
+        gather,
+        consolidatedEvidence,
+        concretePlan
+      });
+      currentNode = refinedPlan.node;
+      planningEvidence = refinedPlan.planningEvidence;
+      abstractPlan = refinedPlan.abstractPlan;
+      gather = refinedPlan.gather;
+      consolidatedEvidence = refinedPlan.consolidatedEvidence;
+      concretePlan = refinedPlan.concretePlan;
+      concretePlanStage = refinedPlan.concretePlanStage;
     }
 
     const phaseResults: NodePhaseResults = {
@@ -1393,6 +1417,161 @@ export class OrchestratorRuntime {
     };
   }
 
+  private async resolveFocusedGatherLoop(input: {
+    node: PlanNode;
+    planningEvidence: EvidenceBundle[];
+    abstractPlan: AbstractPlanResult;
+    gather: GatherResult;
+    consolidatedEvidence: EvidenceBundle;
+    concretePlan: ConcretePlanResult;
+  }): Promise<{
+    node: PlanNode;
+    planningEvidence: EvidenceBundle[];
+    abstractPlan: AbstractPlanResult;
+    gather: GatherResult;
+    consolidatedEvidence: EvidenceBundle;
+    concretePlan: ConcretePlanResult;
+    concretePlanStage: { stageNode: PlanNode; result: ConcretePlanResult };
+  }> {
+    let currentNode = input.node;
+    let planningEvidence = input.planningEvidence;
+    let abstractPlan = input.abstractPlan;
+    let gather = input.gather;
+    let consolidatedEvidence = input.consolidatedEvidence;
+    let concretePlan = input.concretePlan;
+    let concretePlanStage: { stageNode: PlanNode; result: ConcretePlanResult } = {
+      stageNode: currentNode,
+      result: concretePlan
+    };
+
+    while (concretePlan.needsAdditionalGather) {
+      const attempt = (this.focusedGatherAttemptsByNode.get(currentNode.id) ?? 0) + 1;
+      if (attempt > currentNode.executionBudget.rereadBudget) {
+        throw new Error(
+          `Focused gather refinement budget exhausted for node ${currentNode.id} after ${attempt - 1} attempts`
+        );
+      }
+      this.focusedGatherAttemptsByNode.set(currentNode.id, attempt);
+
+      const focusedObjectives = this.dedupeTextEntries(
+        concretePlan.additionalGatherObjectives?.length
+          ? concretePlan.additionalGatherObjectives
+          : [concretePlan.summary]
+      );
+      this.recordDecision(
+        currentNode.runId,
+        currentNode.id,
+        "Focused gather refinement requested",
+        focusedObjectives.join(" | ")
+      );
+
+      currentNode = this.engine.transitionNode(currentNode.id, "replan");
+      const focusedReplanStage = await this.executeStageCapability<AbstractPlanResult>(currentNode, {
+        phase: "abstract_plan",
+        title: "Focused Replan",
+        objective: this.buildPlanningStageObjective(
+          currentNode,
+          "abstractPlan",
+          [
+            `Narrow the next gather pass for:\n${currentNode.objective}`,
+            focusedObjectives.length > 0
+              ? `Focused refinement objectives:\n${focusedObjectives.map((objective, index) => `${index + 1}. ${objective}`).join("\n")}`
+              : ""
+          ].filter((value) => value.length > 0).join("\n\n"),
+          [consolidatedEvidence]
+        ),
+        kind: "planning",
+        role: "abstractPlanner",
+        capability: "abstractPlan",
+        evidenceBundles: [consolidatedEvidence]
+      });
+      abstractPlan = focusedReplanStage.result;
+      this.recordAbstractPlanning(focusedReplanStage.stageNode, abstractPlan);
+
+      this.throwIfCancelled(currentNode.runId, currentNode.id);
+      currentNode = this.engine.transitionNode(currentNode.id, "gather");
+      const focusedGatherStage = await this.executeStageCapability<GatherResult>(currentNode, {
+        phase: "gather",
+        title: "Focused Gather",
+        objective: this.buildPlanningStageObjective(
+          currentNode,
+          "gather",
+          `Gather only the targeted follow-up evidence for:\n${currentNode.objective}`,
+          [consolidatedEvidence],
+          {
+            targetsToInspect: abstractPlan.targetsToInspect,
+            evidenceRequirements: abstractPlan.evidenceRequirements,
+            additionalObjectives: focusedObjectives
+          }
+        ),
+        kind: "planning",
+        role: "gatherer",
+        capability: "gather",
+        evidenceBundles: [consolidatedEvidence]
+      });
+      gather = focusedGatherStage.result;
+      this.mergeProjectStructureReport(focusedGatherStage.stageNode, gather.projectStructure);
+      const focusedBundles = gather.evidenceBundles.map((bundleDraft) =>
+        this.materializeEvidenceBundle(focusedGatherStage.stageNode, bundleDraft)
+      );
+
+      for (const bundle of focusedBundles) {
+        this.evidenceStore.upsertBundle(bundle);
+        const storedBundle = this.evidenceStore.getBundle(bundle.id) ?? bundle;
+        this.engine.attachEvidenceBundle(focusedGatherStage.stageNode.id, bundle.id);
+        this.ingestEvidenceBundle(focusedGatherStage.stageNode.id, storedBundle);
+      }
+
+      planningEvidence = [...planningEvidence, ...focusedBundles];
+
+      this.throwIfCancelled(currentNode.runId, currentNode.id);
+      currentNode = this.engine.transitionNode(currentNode.id, "evidence_consolidation");
+      consolidatedEvidence = this.evidenceStore.mergeBundles({
+        runId: currentNode.runId,
+        nodeId: currentNode.id,
+        bundleIds: [consolidatedEvidence.id, ...focusedBundles.map((bundle) => bundle.id)],
+        summary: gather.summary
+      });
+      this.evidenceStore.upsertBundle(consolidatedEvidence);
+      const consolidationStage = this.createCompletedStageNode(currentNode, {
+        phase: "evidence_consolidation",
+        title: "Evidence Consolidation",
+        objective: `Consolidate the focused evidence into a compact bundle for:\n${currentNode.objective}`,
+        kind: "planning"
+      });
+      this.engine.attachEvidenceBundle(consolidationStage.id, consolidatedEvidence.id);
+
+      this.throwIfCancelled(currentNode.runId, currentNode.id);
+      currentNode = this.engine.transitionNode(currentNode.id, "concrete_plan");
+      concretePlanStage = await this.executeStageCapability<ConcretePlanResult>(currentNode, {
+        phase: "concrete_plan",
+        title: "Concrete Plan",
+        objective: `Turn the refined evidence into an execution plan for:\n${currentNode.objective}`,
+        kind: "planning",
+        role: "concretePlanner",
+        capability: "concretePlan",
+        evidenceBundles: [consolidatedEvidence]
+      });
+      concretePlan = concretePlanStage.result;
+      this.recordDecision(
+        currentNode.runId,
+        concretePlanStage.stageNode.id,
+        "Concrete plan updated after focused gather",
+        concretePlan.summary
+      );
+    }
+
+    return {
+      node: currentNode,
+      planningEvidence,
+      abstractPlan,
+      gather,
+      consolidatedEvidence,
+      concretePlan,
+      concretePlanStage
+    };
+  }
+
   private recordProjectStructureInspectionRequest(
     node: PlanNode,
     request: ProjectStructureInspectionRequest,
@@ -2126,18 +2305,61 @@ export class OrchestratorRuntime {
     node: PlanNode,
     capability: "abstractPlan" | "gather",
     baseObjective: string,
-    evidenceBundles: EvidenceBundle[]
+    evidenceBundles: EvidenceBundle[],
+    gatherContract?: {
+      targetsToInspect?: string[];
+      evidenceRequirements?: string[];
+      additionalObjectives?: string[];
+    }
   ): string {
     if (this.getWorkflowStage(node, capability) !== "task_orchestration") {
       return baseObjective;
     }
 
     const memoryCues = this.buildTaskOrchestrationMemoryCues(node.runId, evidenceBundles);
-    if (memoryCues.length === 0) {
+    const contractCues = capability === "gather"
+      ? this.buildGatherContractCues(gatherContract)
+      : [];
+    if (memoryCues.length === 0 && contractCues.length === 0) {
       return baseObjective;
     }
 
-    return `${baseObjective}\n\nPriority memory cues:\n${memoryCues.map((cue) => `- ${cue}`).join("\n")}`;
+    const sections = [baseObjective];
+    if (memoryCues.length > 0) {
+      sections.push(`Priority memory cues:\n${memoryCues.map((cue) => `- ${cue}`).join("\n")}`);
+    }
+    if (contractCues.length > 0) {
+      sections.push(`Current gather contract:\n${contractCues.map((cue) => `- ${cue}`).join("\n")}`);
+    }
+    return sections.join("\n\n");
+  }
+
+  private buildGatherContractCues(input: {
+    targetsToInspect?: string[];
+    evidenceRequirements?: string[];
+    additionalObjectives?: string[];
+  } | undefined): string[] {
+    if (!input) {
+      return [];
+    }
+
+    const targets = this.dedupeTextEntries(input.targetsToInspect ?? []).slice(0, 3);
+    const requirements = this.dedupeTextEntries(input.evidenceRequirements ?? []).slice(0, 3);
+    const additionalObjectives = this.dedupeTextEntries(input.additionalObjectives ?? []).slice(0, 3);
+    const cues: string[] = [];
+    if (targets.length > 0) {
+      cues.push(`Inspection targets from abstract plan: ${targets.join(" | ")}`);
+    }
+    if (requirements.length > 0) {
+      cues.push(`Evidence requirements from abstract plan: ${requirements.join(" | ")}`);
+    }
+    if (additionalObjectives.length > 0) {
+      cues.push(`Focused gather objectives from concrete plan: ${additionalObjectives.join(" | ")}`);
+    }
+    if (cues.length > 0) {
+      cues.push("Do not widen beyond this contract unless each item has been exhausted and the returned evidence explains why widening was necessary.");
+    }
+    return cues;
   }
 
   private buildTaskOrchestrationMemoryCues(runId: string, evidenceBundles: EvidenceBundle[]): string[] {

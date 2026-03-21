@@ -616,6 +616,7 @@ test("gemini ACP invoker rejects generic approval requests without prompting the
 
   const result = await adapter.gather!({
     ...createContext(TEST_MODEL),
+    workflowStage: "project_structure_discovery",
     requestUserApproval: async () => {
       approvalRequestCount += 1;
       return {
@@ -633,6 +634,391 @@ test("gemini ACP invoker rejects generic approval requests without prompting the
   assert.equal(approvalRequestCount, 0);
   assert.equal(
     progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because generic approval requests are not supported"),
+    true
+  );
+});
+
+test("gemini ACP invoker deduplicates repeated read-only execute commands within the same stage", async () => {
+  const fakeChild = new FakeChildProcess();
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+  let approvalRequestCount = 0;
+  let firstOutcome = "";
+  let secondOutcome = "";
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const firstDecision = await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "gemini --help",
+                  kind: "execute"
+                }
+              });
+              firstOutcome = firstDecision.outcome.outcome;
+
+              const secondDecision = await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "gemini --help",
+                  kind: "execute"
+                }
+              });
+              secondOutcome = secondDecision.outcome.outcome;
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Gather completed with dedupe",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    workflowStage: "project_structure_discovery",
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Gather completed with dedupe");
+  assert.equal(firstOutcome, "selected");
+  assert.equal(secondOutcome, "cancelled");
+  assert.equal(approvalRequestCount, 1);
+  assert.equal(
+    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because this command was already attempted in this phase"),
+    true
+  );
+});
+
+test("gemini ACP invoker rejects bootstrap sketch probing outside the workspace before asking for approval", async () => {
+  const fakeChild = new FakeChildProcess();
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+  let approvalRequestCount = 0;
+  let outcome = "";
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const decision = await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "gemini --help",
+                  kind: "execute"
+                }
+              });
+              outcome = decision.outcome.outcome;
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Bootstrap sketch stayed shallow",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    workflowStage: "bootstrap_sketch",
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Bootstrap sketch stayed shallow");
+  assert.equal(outcome, "cancelled");
+  assert.equal(approvalRequestCount, 0);
+  assert.equal(
+    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because bootstrap sketch must stay workspace-local and low-cost"),
+    true
+  );
+});
+
+test("gemini ACP invoker cuts off repeated read-only probing for the same external investigation thread", async () => {
+  const fakeChild = new FakeChildProcess();
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+  let approvalRequestCount = 0;
+  const outcomes: string[] = [];
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const commands = [
+                "cat \"/tmp/probe/node_modules/@google/gemini-cli-core/dist/src/a.js\"",
+                "grep -r \"quota\" \"/tmp/probe/node_modules/@google/gemini-cli-core/dist/src/\"",
+                "ls \"/tmp/probe/node_modules/@google/gemini-cli-core/dist/src/\"",
+                "find \"/tmp/probe/node_modules/@google/gemini-cli-core/dist/src/\" -name \"*.js\"",
+                "cat \"/tmp/probe/node_modules/@google/gemini-cli-core/dist/src/b.js\"",
+                "grep -r \"billing\" \"/tmp/probe/node_modules/@google/gemini-cli-core/dist/src/\""
+              ];
+
+              for (const title of commands) {
+                const decision = await this.client.requestPermission({
+                  options: [{ optionId: "allow_once", kind: "allow_once" }],
+                  toolCall: {
+                    title,
+                    kind: "execute"
+                  }
+                });
+                outcomes.push(decision.outcome.outcome);
+              }
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Bootstrap sketch completed with cutoff",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    workflowStage: "project_structure_discovery",
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Bootstrap sketch completed with cutoff");
+  assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "selected", "cancelled"]);
+  assert.equal(approvalRequestCount, 5);
+  assert.equal(
+    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because repeated probing hit the cutoff for this investigation thread"),
     true
   );
 });

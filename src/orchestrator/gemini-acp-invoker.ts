@@ -128,6 +128,11 @@ type GeminiLiveSession = {
   stderrBuffer: () => string;
 };
 
+type ReadOnlyProbeGuardState = {
+  attemptedCommandFingerprints: Set<string>;
+  hypothesisCounts: Map<string, number>;
+};
+
 const DEFAULT_GEMINI_MODE_BY_CAPABILITY: Partial<Record<OrchestratorCapability, string>> = {
   execute: "default"
 };
@@ -309,6 +314,10 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
         fallbackModelIds,
         invalidStreamRetryCount
       );
+      const readOnlyProbeGuardState: ReadOnlyProbeGuardState = {
+        attemptedCommandFingerprints: new Set(),
+        hypothesisCounts: new Map()
+      };
       const retryNotes: string[] = [];
       let lastError: unknown;
 
@@ -382,6 +391,51 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 };
                 context.reportProgress?.(
                   disallowedReason,
+                  {
+                    capability,
+                    model: modelId,
+                    toolCall: toolCallSummary ?? null
+                  }
+                );
+                promptActivity.touch();
+                return decision;
+              }
+
+              const bootstrapSketchReason = getBootstrapSketchExecuteRejectionReason({
+                capability,
+                workflowStage: context.workflowStage,
+                toolCall: permissionRequest.toolCall,
+                workspaceRoot
+              });
+              if (bootstrapSketchReason) {
+                const decision: OrchestratorApprovalDecision = {
+                  outcome: "cancelled"
+                };
+                context.reportProgress?.(
+                  bootstrapSketchReason,
+                  {
+                    capability,
+                    model: modelId,
+                    toolCall: toolCallSummary ?? null
+                  }
+                );
+                promptActivity.touch();
+                return decision;
+              }
+
+              const repeatedProbeReason = getReadOnlyProbeGuardRejectionReason({
+                capability,
+                workflowStage: context.workflowStage,
+                toolCall: permissionRequest.toolCall,
+                workspaceRoot,
+                state: readOnlyProbeGuardState
+              });
+              if (repeatedProbeReason) {
+                const decision: OrchestratorApprovalDecision = {
+                  outcome: "cancelled"
+                };
+                context.reportProgress?.(
+                  repeatedProbeReason,
                   {
                     capability,
                     model: modelId,
@@ -930,6 +984,53 @@ const READ_ONLY_MUTATION_COMMAND_PATTERNS = [
   /(^|[\s;&|])>>?\s*[^=\s][^\s]*/
 ] as const;
 
+const READ_ONLY_HYPOTHESIS_CUTOFF_BY_STAGE: Partial<Record<ModelInvocationContext["workflowStage"], number>> = {
+  bootstrap_sketch: 4,
+  project_structure_discovery: 5,
+  project_structure_inspection: 5,
+  task_orchestration: 6
+};
+
+const BOOTSTRAP_SKETCH_ALLOWED_READ_ONLY_COMMANDS = new Set([
+  "ls",
+  "find",
+  "rg",
+  "grep",
+  "sed",
+  "cat",
+  "head",
+  "tail",
+  "file",
+  "pwd"
+]);
+
+const COMMAND_FAMILY_SKIP_SET = new Set([
+  "cat",
+  "ls",
+  "find",
+  "grep",
+  "rg",
+  "sed",
+  "head",
+  "tail",
+  "file",
+  "which",
+  "stat"
+]);
+
+const SHELL_WRAPPER_COMMANDS = new Set([
+  "env",
+  "command",
+  "timeout",
+  "nohup",
+  "sh",
+  "bash",
+  "zsh",
+  "/bin/sh",
+  "/bin/bash",
+  "/bin/zsh"
+]);
+
 function buildGeminiAttemptModels(
   primaryModelId: string,
   fallbackModelIds: string[],
@@ -983,6 +1084,382 @@ function formatGeminiAcpError(error: unknown): string {
 
   return String(error);
 }
+
+function getReadOnlyProbeGuardRejectionReason(params: {
+  capability: OrchestratorCapability;
+  workflowStage: ModelInvocationContext["workflowStage"];
+  toolCall: {
+    title?: string;
+    kind?: string;
+    content?: Array<
+      | {
+        type?: string;
+        path?: string;
+        oldText?: string;
+        newText?: string;
+      }
+      | {
+        type?: string;
+        content?: {
+          type?: string;
+          text?: string;
+        };
+      }
+    >;
+  } | undefined;
+  workspaceRoot: string;
+  state: ReadOnlyProbeGuardState;
+}): string | null {
+  const kind = params.toolCall?.kind?.trim();
+  if (kind !== "execute" || !isReadOnlyGeminiCapability(params.capability) || disallowsExecuteToolCallsInCapability(params.capability)) {
+    return null;
+  }
+
+  const commandFingerprint = buildExecuteToolCallFingerprint(params.toolCall);
+  if (commandFingerprint && params.state.attemptedCommandFingerprints.has(commandFingerprint)) {
+    return "Rejected Gemini tool call because this command was already attempted in this phase";
+  }
+
+  const hypothesisKeys = buildReadOnlyHypothesisKeys(params.toolCall?.title ?? "", params.workspaceRoot);
+  const cutoff = READ_ONLY_HYPOTHESIS_CUTOFF_BY_STAGE[params.workflowStage] ?? 6;
+  for (const key of hypothesisKeys) {
+    const count = params.state.hypothesisCounts.get(key) ?? 0;
+    if (count >= cutoff) {
+      return "Rejected Gemini tool call because repeated probing hit the cutoff for this investigation thread";
+    }
+  }
+
+  if (commandFingerprint) {
+    params.state.attemptedCommandFingerprints.add(commandFingerprint);
+  }
+  for (const key of hypothesisKeys) {
+    params.state.hypothesisCounts.set(key, (params.state.hypothesisCounts.get(key) ?? 0) + 1);
+  }
+
+  return null;
+}
+
+function getBootstrapSketchExecuteRejectionReason(params: {
+  capability: OrchestratorCapability;
+  workflowStage: ModelInvocationContext["workflowStage"];
+  toolCall: {
+    title?: string;
+    kind?: string;
+    content?: Array<
+      | {
+        type?: string;
+        path?: string;
+        oldText?: string;
+        newText?: string;
+      }
+      | {
+        type?: string;
+        content?: {
+          type?: string;
+          text?: string;
+        };
+      }
+    >;
+  } | undefined;
+  workspaceRoot: string;
+}): string | null {
+  const kind = params.toolCall?.kind?.trim();
+  if (params.workflowStage !== "bootstrap_sketch" || kind !== "execute" || !isReadOnlyGeminiCapability(params.capability)) {
+    return null;
+  }
+
+  const commandText = buildExecuteToolCallFingerprint(params.toolCall);
+  if (!commandText) {
+    return null;
+  }
+
+  if (tokenizeCommandText(commandText).some((token) => isShellOperatorToken(token))) {
+    return "Rejected Gemini tool call because bootstrap sketch must stay shallow; defer multi-step CLI probing to later stages";
+  }
+
+  const commandName = extractPrimaryCommandName(commandText);
+  if (!commandName || !BOOTSTRAP_SKETCH_ALLOWED_READ_ONLY_COMMANDS.has(commandName)) {
+    return "Rejected Gemini tool call because bootstrap sketch must stay workspace-local and low-cost";
+  }
+
+  if (extractExternalResourceKeys(commandText, params.workspaceRoot).length > 0) {
+    return "Rejected Gemini tool call because bootstrap sketch must stay workspace-local and low-cost";
+  }
+
+  return null;
+}
+
+function buildExecuteToolCallFingerprint(toolCall: {
+  title?: string;
+  content?: Array<
+    | {
+      type?: string;
+      path?: string;
+      oldText?: string;
+      newText?: string;
+    }
+    | {
+      type?: string;
+      content?: {
+        type?: string;
+        text?: string;
+      };
+    }
+  >;
+} | undefined): string | null {
+  const textParts = [
+    toolCall?.title ?? "",
+    ...(toolCall?.content ?? []).map((entry) =>
+      "content" in entry && entry.content?.type === "text" && typeof entry.content.text === "string"
+        ? entry.content.text
+        : ""
+    )
+  ];
+  const normalized = normalizeShellLikeText(textParts.join("\n"));
+  return normalized.length > 0 ? normalized : null;
+}
+
+function buildReadOnlyHypothesisKeys(commandText: string, workspaceRoot: string): string[] {
+  const keys = new Set<string>();
+  const commandFamilyKey = buildCommandFamilyKey(commandText);
+  if (commandFamilyKey) {
+    keys.add(commandFamilyKey);
+  }
+  for (const key of extractExternalResourceKeys(commandText, workspaceRoot)) {
+    keys.add(key);
+  }
+  return [...keys];
+}
+
+function buildCommandFamilyKey(commandText: string): string | null {
+  const commandName = extractPrimaryCommandName(commandText);
+  if (!commandName) {
+    return null;
+  }
+  if (COMMAND_FAMILY_SKIP_SET.has(commandName)) {
+    return null;
+  }
+
+  const tokens = tokenizeCommandText(commandText)
+    .map((token) => stripOuterQuotes(token).trim())
+    .filter(Boolean);
+  const commandIndex = findPrimaryCommandIndex(tokens);
+  const argumentTerms: string[] = [];
+  for (const token of tokens.slice(commandIndex + 1)) {
+    if (token.startsWith("-") || isShellOperatorToken(token) || isEnvironmentAssignmentToken(token)) {
+      continue;
+    }
+
+    const normalizedToken = normalizeHypothesisToken(token);
+    if (!normalizedToken) {
+      continue;
+    }
+
+    for (const part of normalizedToken.split(/\s+/).filter((entry) => entry.length > 0)) {
+      if (part.length < 3 || COMMON_HYPOTHESIS_STOP_WORDS.has(part)) {
+        continue;
+      }
+      argumentTerms.push(part);
+      if (argumentTerms.length >= 2) {
+        break;
+      }
+    }
+
+    if (argumentTerms.length >= 2) {
+      break;
+    }
+  }
+
+  return normalizeShellLikeText([commandName, ...argumentTerms].join(" "));
+}
+
+function extractPrimaryCommandName(commandText: string): string | null {
+  const tokens = tokenizeCommandText(commandText)
+    .map((token) => stripOuterQuotes(token).trim())
+    .filter(Boolean);
+  if (tokens.length === 0) {
+    return null;
+  }
+
+  const commandIndex = findPrimaryCommandIndex(tokens);
+  const commandToken = tokens[commandIndex];
+  if (!commandToken) {
+    return null;
+  }
+
+  return path.basename(commandToken).toLowerCase();
+}
+
+function findPrimaryCommandIndex(tokens: string[]): number {
+  let commandIndex = 0;
+  while (commandIndex < tokens.length) {
+    const token = tokens[commandIndex]!;
+    if (isShellOperatorToken(token) || isEnvironmentAssignmentToken(token) || token.startsWith("-")) {
+      commandIndex += 1;
+      continue;
+    }
+    if (SHELL_WRAPPER_COMMANDS.has(token.toLowerCase()) && commandIndex < tokens.length - 1) {
+      commandIndex += 1;
+      continue;
+    }
+    break;
+  }
+  return commandIndex;
+}
+
+function extractExternalResourceKeys(commandText: string, workspaceRoot: string): string[] {
+  const workspaceRootPath = path.resolve(workspaceRoot);
+  const keys = new Set<string>();
+
+  for (const rawToken of tokenizeCommandText(commandText)) {
+    const token = stripOuterQuotes(rawToken).trim();
+    if (!token || isShellOperatorToken(token) || token.startsWith("-")) {
+      continue;
+    }
+
+    const normalizedToken = token.replace(/\\/g, "/");
+    const packageName = extractNodeModulePackageName(normalizedToken);
+    if (packageName) {
+      keys.add(`package:${packageName}`);
+      continue;
+    }
+
+    const homeDotdir = extractHomeDotdirKey(normalizedToken);
+    if (homeDotdir) {
+      keys.add(homeDotdir);
+      continue;
+    }
+
+    if (!looksLikePathToken(normalizedToken)) {
+      continue;
+    }
+
+    if (isWorkspaceRelativePath(normalizedToken, workspaceRootPath)) {
+      continue;
+    }
+
+    const externalPathKey = buildExternalPathKey(normalizedToken);
+    if (externalPathKey) {
+      keys.add(externalPathKey);
+    }
+  }
+
+  return [...keys];
+}
+
+function tokenizeCommandText(commandText: string): string[] {
+  return [...commandText.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`|(\S+)/g)]
+    .map((match) => match[1] ?? match[2] ?? match[3] ?? match[4] ?? "")
+    .filter((token) => token.length > 0);
+}
+
+function stripOuterQuotes(value: string): string {
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === "\"" || first === "'" || first === "`") && first === last) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
+function isShellOperatorToken(value: string): boolean {
+  return value === "|" || value === "||" || value === "&&" || value === ";" || value === ">" || value === ">>" || value === "<";
+}
+
+function isEnvironmentAssignmentToken(value: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(value);
+}
+
+function normalizeShellLikeText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeHypothesisToken(value: string): string {
+  return value
+    .replace(/^\/+/, "")
+    .replace(/\\/g, "/")
+    .replace(/\.[a-z0-9]+$/i, "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[@]/g, "")
+    .replace(/[^a-z0-9/._ -]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractNodeModulePackageName(value: string): string | null {
+  const normalized = value.replace(/\\/g, "/");
+  const match = normalized.match(/\/node_modules\/((?:@[^/]+\/[^/]+)|(?:[^/]+))/);
+  return match?.[1]?.trim() ?? null;
+}
+
+function extractHomeDotdirKey(value: string): string | null {
+  const normalized = value.replace(/\\/g, "/");
+  if (normalized.startsWith("~/.")) {
+    const [dotdir] = normalized.slice(2).split("/").filter(Boolean);
+    return dotdir ? `home:${dotdir}` : null;
+  }
+
+  const homeDirectory = process.env.HOME?.replace(/\\/g, "/");
+  if (homeDirectory && normalized.startsWith(`${homeDirectory}/.`)) {
+    const relative = normalized.slice(homeDirectory.length + 1);
+    const [dotdir] = relative.split("/").filter(Boolean);
+    return dotdir ? `home:${dotdir}` : null;
+  }
+
+  return null;
+}
+
+function looksLikePathToken(value: string): boolean {
+  return value.startsWith("/")
+    || value.startsWith("~/")
+    || value.startsWith("./")
+    || value.startsWith("../")
+    || value.includes("/");
+}
+
+function isWorkspaceRelativePath(value: string, workspaceRoot: string): boolean {
+  if (value.startsWith("~/")) {
+    return false;
+  }
+
+  const candidatePath = path.isAbsolute(value)
+    ? path.resolve(value)
+    : path.resolve(workspaceRoot, value);
+  return candidatePath === workspaceRoot || candidatePath.startsWith(`${workspaceRoot}${path.sep}`);
+}
+
+function buildExternalPathKey(value: string): string | null {
+  const normalized = value.replace(/\\/g, "/");
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length === 0) {
+    return null;
+  }
+
+  const trimmedSegments = normalized.endsWith("/") || !segments[segments.length - 1]?.includes(".")
+    ? segments.slice(0, 3)
+    : segments.slice(0, 3 + Math.max(0, segments.length - 4));
+  const family = trimmedSegments.slice(0, 3).join("/");
+  return family.length > 0 ? `external:${family}` : null;
+}
+
+const COMMON_HYPOTHESIS_STOP_WORDS = new Set([
+  "json",
+  "text",
+  "with",
+  "from",
+  "that",
+  "this",
+  "help",
+  "version",
+  "status"
+]);
 
 type InactivityController = {
   wrap: <T>(promise: Promise<T>) => Promise<T>;

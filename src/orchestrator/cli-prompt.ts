@@ -115,7 +115,7 @@ const PHASE_RESPONSE_SCHEMAS: Record<OrchestratorCapability, string> = {
   gather:
     '{"summary": string, "evidenceBundles": EvidenceBundleDraft[], "projectStructure"?: ProjectStructureReport}',
   concretePlan:
-    '{"summary": string, "childTasks": Array<{"title": string, "objective": string, "importance": "critical" | "high" | "medium" | "low", "assignedModels": ModelAssignment, "reviewPolicy"?: ReviewPolicy, "acceptanceCriteria"?: AcceptanceCriteria, "executionBudget"?: Partial<ExecutionBudget>}>, "executionNotes": string[], "needsMorePlanning"?: boolean, "needsProjectStructureInspection"?: boolean, "inspectionObjectives"?: string[], "projectStructureContradictions"?: string[]}',
+    '{"summary": string, "childTasks": Array<{"title": string, "objective": string, "importance": "critical" | "high" | "medium" | "low", "assignedModels": ModelAssignment, "reviewPolicy"?: ReviewPolicy, "acceptanceCriteria"?: AcceptanceCriteria, "executionBudget"?: Partial<ExecutionBudget>}>, "executionNotes": string[], "needsMorePlanning"?: boolean, "needsAdditionalGather"?: boolean, "additionalGatherObjectives"?: string[], "needsProjectStructureInspection"?: boolean, "inspectionObjectives"?: string[], "projectStructureContradictions"?: string[]}',
   review:
     '{"summary": string, "followUpQuestions": string[], "approved"?: boolean, "nextActions"?: Array<{"title": string, "objective": string, "rationale": string, "priority": "critical" | "high" | "medium" | "low"}>, "carryForward"?: {"facts": string[], "openQuestions": string[], "projectPaths": string[], "evidenceSummaries": string[]}}',
   execute:
@@ -243,6 +243,9 @@ function buildStageInstructions(
     return [
       "Produce a low-cost, approximate sketch of the repository before deeper planning starts.",
       "Limit yourself to top-level structure, likely entrypoints, main runtime boundaries, and a few anchor files or directories.",
+      "Stay at seed level only: capture clues and open questions, then defer any detailed inspection to the later planning and gather stages.",
+      "Do not probe external CLIs, managed-tool installations, package internals, auth state, quota surfaces, or home-directory files during bootstrap sketch.",
+      "If deeper exploration seems necessary, record that it is needed instead of performing it now.",
       "Do not over-explore or speculate in detail.",
       "Return only compact clues that reduce future search cost."
     ].join(" ");
@@ -295,6 +298,8 @@ function buildStageInstructions(
       "Do not request projectStructure inspection for non-structural gaps such as unsupported product capabilities, missing external quota APIs, absent managed-tool features, auth limitations, or implementation tradeoffs. Treat those as execution-planning facts instead.",
       "If the key blocker is a missing or unsupported data source rather than ambiguous repository structure, keep needsProjectStructureInspection=false and explain the blocker or fallback in executionNotes or childTasks.",
       "Do not call tools, create temp files, or run shell commands during concrete planning. Use only the provided memory and gathered evidence.",
+      "If the current evidence is still too broad for execution but one more focused plan/gather pass would materially narrow the scope, set needsAdditionalGather=true, keep childTasks empty when possible, and return 1-3 explicit additionalGatherObjectives.",
+      "Use needsAdditionalGather only for narrow follow-up evidence collection. Do not punt broad discovery back to gather.",
       "Decide only at the current node level whether more planning is needed.",
       "Set needsMorePlanning=true only if this node must split into separately planned subproblems.",
       "If the current node is already execution-ready, set needsMorePlanning=false, keep childTasks empty when possible, and put the actionable execution detail into executionNotes.",
@@ -310,6 +315,8 @@ function buildStageInstructions(
     return [
       "Start from the provided evidence, workingMemory, and projectStructure before doing any new search.",
       "Turn the existing open questions, contradictions, keyFiles, entryPoints, relevantTargets, and recent memory decisions into 1-3 concrete inspection targets.",
+      "Inspection targets must be explicit file paths, modules, entrypoints, symbols, managed-tool locations, or clearly named external surfaces. Avoid generic targets like repository, codebase, current implementation, or relevant files.",
+      "If the current memory is too weak to name a narrow target, identify the single most useful clue to gather next instead of delegating a broad search.",
       "If the current memory already names likely files, modules, entrypoints, or managed tool locations, inspect those first instead of widening the search.",
       "Do not edit files, call tools, create temp files, run builds, or execute shell commands during planning.",
       "Do not ask for broad repository or external tool exploration unless the current memory is insufficient to name a concrete next target."
@@ -320,6 +327,8 @@ function buildStageInstructions(
     return [
       "Start from the provided evidence, workingMemory, and projectStructure before doing any new search.",
       "Gather only the minimum evidence needed to unblock the next concrete plan or execution step.",
+      "Treat the abstract plan's inspection targets and evidence requirements as the current gather contract.",
+      "Stay within that contract unless each named target has been exhausted and you can justify widening the search in the returned evidence.",
       "Prefer confirming or disproving the current memory's open questions at the named files, entrypoints, modules, relevantTargets, or managed tool locations before running broader searches.",
       "If the current memory already suggests a likely absence or integration gap, confirm that directly and return compact evidence instead of expanding the search surface.",
       "If an external CLI/API surface already appears absent or unsupported, stop after enough evidence to establish that fact. Do not keep probing undocumented alternative commands, slash commands, or ad hoc flags.",

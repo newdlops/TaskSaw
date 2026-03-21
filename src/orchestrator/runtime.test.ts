@@ -340,6 +340,222 @@ test("runtime executes the minimal happy path and propagates evidence into plann
   ]);
 });
 
+test("runtime runs a focused replan and regather loop when concrete planning requests narrower evidence", async () => {
+  const trace: string[] = [];
+  const gatherObjectives: string[] = [];
+  const registry = new ModelAdapterRegistry();
+  let abstractCallCount = 0;
+  let concreteCallCount = 0;
+  let gatherCallCount = 0;
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const verifier: ModelRef = {
+    id: "verify-lower",
+    provider: "mock",
+    model: "verify-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan"]),
+      {
+        abstractPlan: (context) => {
+          abstractCallCount += 1;
+          trace.push(`abstract:${abstractCallCount}:${context.node.title}`);
+          if (abstractCallCount === 1) {
+            return {
+              summary: "Inspect the existing Gemini quota entrypoint first",
+              targetsToInspect: ["src/main/tool-manager.ts"],
+              evidenceRequirements: ["Confirm which Gemini quota retrieval path currently exists"]
+            };
+          }
+
+          return {
+            summary: "Narrow the follow-up inspection to the concrete Gemini quota surface",
+            targetsToInspect: ["src/main/gemini-quota.ts"],
+            evidenceRequirements: ["Confirm the concrete quota API and returned fields"]
+          };
+        },
+        concretePlan: () => {
+          concreteCallCount += 1;
+          trace.push(`concrete:${concreteCallCount}:Concrete Plan`);
+          if (concreteCallCount === 1) {
+            return {
+              summary: "The evidence is still too broad; narrow the next gather pass before execution",
+              childTasks: [],
+              executionNotes: [],
+              needsAdditionalGather: true,
+              additionalGatherObjectives: ["Inspect the concrete Gemini quota function and its returned schema"]
+            };
+          }
+
+          return {
+            summary: "The quota integration path is now specific enough to execute",
+            childTasks: [],
+            executionNotes: ["Implement against the confirmed Gemini quota API"],
+            needsAdditionalGather: false
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: (context) => {
+          gatherCallCount += 1;
+          gatherObjectives.push(context.node.objective);
+          trace.push(`gather:${gatherCallCount}:${context.node.title}`);
+          if (gatherCallCount === 1) {
+            return {
+              summary: "Initial gather found multiple possible Gemini quota codepaths",
+              evidenceBundles: [
+                {
+                  id: "broad-quota-evidence",
+                  summary: "Broad Gemini quota candidates",
+                  facts: [],
+                  hypotheses: [],
+                  unknowns: [
+                    {
+                      id: "quota-surface",
+                      question: "Which Gemini quota function is the real integration target?",
+                      impact: "high",
+                      referenceIds: []
+                    }
+                  ],
+                  relevantTargets: [{ filePath: "src/main/tool-manager.ts" }],
+                  snippets: [],
+                  references: [],
+                  confidence: "medium"
+                }
+              ]
+            };
+          }
+
+          return {
+            summary: "Focused gather confirmed the concrete Gemini quota module and schema",
+            evidenceBundles: [
+              {
+                id: "focused-quota-evidence",
+                summary: "Focused Gemini quota evidence",
+                facts: [
+                  {
+                    id: "quota-api",
+                    statement: "The Gemini quota integration should use src/main/gemini-quota.ts",
+                    confidence: "high",
+                    referenceIds: []
+                  }
+                ],
+                hypotheses: [],
+                unknowns: [],
+                relevantTargets: [{ filePath: "src/main/gemini-quota.ts" }],
+                snippets: [],
+                references: [],
+                confidence: "high"
+              }
+            ]
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execution completed after focused regather",
+          outputs: ["focused-regather-output"],
+          completed: true
+        })
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      verifier,
+      new Set(["verify"]),
+      {
+        verify: () => ({
+          summary: "Focused regather output verified",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry);
+  const result = await runtime.executeHappyPath({
+    goal: "Make Gemini quota gathering precise before execution",
+    language: "en",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier
+    },
+    reviewPolicy: "none"
+  });
+
+  assert.equal(result.snapshot.run.status, "done");
+  assert.deepEqual(trace, [
+    "abstract:planner-upper",
+    "abstract:1:Abstract Plan",
+    "gather:gather-lower",
+    "gather:1:Gather",
+    "concrete:planner-upper",
+    "concrete:1:Concrete Plan",
+    "abstract:planner-upper",
+    "abstract:2:Focused Replan",
+    "gather:gather-lower",
+    "gather:2:Focused Gather",
+    "concrete:planner-upper",
+    "concrete:2:Concrete Plan",
+    "execute:execute-lower",
+    "verify:verify-lower"
+  ]);
+  assert.equal(gatherObjectives.length, 2);
+  assert.match(gatherObjectives[0]!, /Current gather contract:/);
+  assert.match(gatherObjectives[0]!, /Inspection targets from abstract plan: src\/main\/tool-manager\.ts/);
+  assert.match(gatherObjectives[1]!, /Focused gather objectives from concrete plan: Inspect the concrete Gemini quota function and its returned schema/);
+  assert.match(gatherObjectives[1]!, /Inspection targets from abstract plan: src\/main\/gemini-quota\.ts/);
+});
+
 test("runtime runs review after verify and does not let review reject execution", async () => {
   const trace: string[] = [];
   const registry = new ModelAdapterRegistry();

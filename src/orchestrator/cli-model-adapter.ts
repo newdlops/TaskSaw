@@ -496,6 +496,13 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
             record.needsMorePlanning ?? record.requiresMorePlanning ?? record.shouldDecompose ?? record.needsDecomposition,
             false
           ),
+          needsAdditionalGather: this.readBoolean(
+            record.needsAdditionalGather ?? record.requiresAdditionalGather ?? record.needsRefinedGather,
+            false
+          ),
+          additionalGatherObjectives: this.normalizeStringArray(
+            record.additionalGatherObjectives ?? record.followUpGatherObjectives ?? record.refinedGatherObjectives
+          ),
           needsProjectStructureInspection: this.readBoolean(
             record.needsProjectStructureInspection ?? record.needsInspection,
             false
