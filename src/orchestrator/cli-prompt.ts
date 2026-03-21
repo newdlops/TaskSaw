@@ -320,6 +320,7 @@ function buildStageInstructions(
       "Inspection targets must be explicit file paths, modules, entrypoints, symbols, managed-tool locations, or clearly named external surfaces. Avoid generic targets like repository, codebase, current implementation, or relevant files.",
       "If the current memory is too weak to name a narrow target, identify the single most useful clue to gather next instead of delegating a broad search.",
       "If the current memory already names likely files, modules, entrypoints, or managed tool locations, inspect those first instead of widening the search.",
+      "If the current memory already names a concrete external surface such as a CLI command, API route, or managed-tool capability check, inspect that surface before pivoting to local caches, log files, temp files, or home-directory state.",
       "If the user explicitly asked for exact or actual data, keep the plan centered on the concrete data source or blocker evidence first. Do not jump straight to a UI fallback or copy change.",
       "Do not edit files, call tools, create temp files, run builds, or execute shell commands during planning.",
       "Do not ask for broad repository or external tool exploration unless the current memory is insufficient to name a concrete next target."
@@ -335,6 +336,7 @@ function buildStageInstructions(
       "Prefer confirming or disproving the current memory's open questions at the named files, entrypoints, modules, relevantTargets, or managed tool locations before running broader searches.",
       "If the current memory already suggests a likely absence or integration gap, confirm that directly and return compact evidence instead of expanding the search surface.",
       "If an external CLI/API surface already appears absent or unsupported, stop after enough evidence to establish that fact. Do not keep probing undocumented alternative commands, slash commands, or ad hoc flags.",
+      "Do not pivot from a named external surface to local cache, log, temp, or home-directory files until one direct capability check against that named surface has failed or returned explicit blocker evidence.",
       "If the user asked for exact or actual data, do not treat a UI fallback label as sufficient. Gather one direct proof about the narrowest missing or unsupported data source before recommending that fallback.",
       "When probing an external CLI surface, prefer one documented help/usage check and one direct capability check. Do not spend gather budget on multiple synonymous command variants that test the same hypothesis.",
       "In a focused follow-up gather pass, inspect named files, symbols, or managed-tool surfaces directly instead of rediscovering whether they exist.",

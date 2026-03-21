@@ -907,11 +907,13 @@ export class OrchestratorService {
       const geminiCommand = await this.toolManager.resolveLaunchCommand("gemini");
       const geminiEnv = this.toolManager.buildManagedExecutionEnvironment("gemini");
       const geminiAcpModulePath = this.toolManager.getGeminiAcpModulePath();
+      const geminiFallbackModelIds = this.uniqueModels(geminiModels).map((model) => model.model);
       const sharedGeminiInvoke = createGeminiAcpInvoker({
         executablePath: geminiCommand.command,
         executableArgs: [cliRunnerPath, ...geminiCommand.args],
         acpModulePath: geminiAcpModulePath,
         cwd: workspacePath,
+        fallbackModelIds: geminiFallbackModelIds,
         env: {
           ...geminiEnv,
           ...geminiCommand.env

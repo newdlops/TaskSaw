@@ -1154,7 +1154,7 @@ test("gemini ACP invoker cuts off repeated managed CLI variants earlier within t
   );
 });
 
-test("gemini ACP invoker hands interactive managed CLI commands off to a modal session instead of approving them", async () => {
+test("gemini ACP invoker hands prompt-driven managed CLI commands off to a modal session instead of approving them", async () => {
   const fakeChild = new FakeChildProcess();
   const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
   let approvalRequestCount = 0;
@@ -1223,7 +1223,7 @@ test("gemini ACP invoker hands interactive managed CLI commands off to a modal s
               const decision = await this.client.requestPermission({
                 options: [{ optionId: "allow_once", kind: "allow_once" }],
                 toolCall: {
-                  title: "/Users/Test/TaskSaw/managed-tools/bin/gemini /stats model --json [current working directory /Users/Test/TaskSaw] (Gemini CLI quota output 확인)",
+                  title: "/Users/Test/TaskSaw/managed-tools/bin/gemini -p \"/stats model\" -o json [current working directory /Users/Test/TaskSaw] (Gemini CLI quota output 확인)",
                   kind: "execute"
                 }
               });
@@ -1283,7 +1283,7 @@ test("gemini ACP invoker hands interactive managed CLI commands off to a modal s
   assert.equal(outcome, "cancelled");
   assert.equal(approvalRequestCount, 0);
   assert.equal(interactiveSessionCount, 1);
-  assert.equal(handedOffCommand, "/Users/Test/TaskSaw/managed-tools/bin/gemini /stats model --json");
+  assert.equal(handedOffCommand, "/Users/Test/TaskSaw/managed-tools/bin/gemini -p \"/stats model\" -o json");
   assert.equal(
     progressMessages.some((entry) => entry.message === "Opening modal interactive session for CLI tool call"),
     true
@@ -1405,6 +1405,126 @@ test("gemini ACP invoker keeps plain managed CLI help probes on the normal appro
   });
 
   assert.equal(result.summary, "Managed CLI help stayed on approval path");
+  assert.equal(outcome, "selected");
+  assert.equal(approvalRequestCount, 1);
+  assert.equal(interactiveSessionCount, 0);
+});
+
+test("gemini ACP invoker keeps bare slash-command probes on the normal approval path when no prompt flag is present", async () => {
+  const fakeChild = new FakeChildProcess();
+  let approvalRequestCount = 0;
+  let interactiveSessionCount = 0;
+  let outcome = "";
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const decision = await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "\"/Users/Test/TaskSaw/managed-tools/bin/gemini\" /stats model --json [current working directory /Users/Test/TaskSaw]",
+                  kind: "execute"
+                }
+              });
+              outcome = decision.outcome.outcome;
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Bare slash command stayed on approval path",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    requestInteractiveSession: async () => {
+      interactiveSessionCount += 1;
+      return {
+        outcome: "cancelled"
+      };
+    }
+  });
+
+  assert.equal(result.summary, "Bare slash command stayed on approval path");
   assert.equal(outcome, "selected");
   assert.equal(approvalRequestCount, 1);
   assert.equal(interactiveSessionCount, 0);
@@ -1539,6 +1659,422 @@ test("gemini ACP invoker rejects low-signal rediscovery commands during focused 
   assert.equal(approvalRequestCount, 1);
   assert.equal(
     progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because focused gather must inspect named targets directly instead of rediscovering files or paths"),
+    true
+  );
+});
+
+test("gemini ACP invoker rejects low-signal rediscovery commands during root gather", async () => {
+  const fakeChild = new FakeChildProcess();
+  const outcomes: string[] = [];
+  let approvalRequestCount = 0;
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const commands = [
+                "ls -R \"/Users/test/managed-tools/home/.gemini\"",
+                "find . -name \"gemini\" -type f -perm +111",
+                "sed -n '1,40p' src/main/tool-manager.ts"
+              ];
+
+              for (const title of commands) {
+                const decision = await this.client.requestPermission({
+                  options: [{ optionId: "allow_once", kind: "allow_once" }],
+                  toolCall: {
+                    title,
+                    kind: "execute"
+                  }
+                });
+                outcomes.push(decision.outcome.outcome);
+              }
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Root gather stayed on concrete target inspection",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Root gather stayed on concrete target inspection");
+  assert.deepEqual(outcomes, ["cancelled", "cancelled", "selected"]);
+  assert.equal(approvalRequestCount, 1);
+  assert.equal(
+    progressMessages.some(
+      (entry) => entry.message === "Rejected Gemini tool call because task-orchestration gather must inspect concrete targets directly instead of rediscovering paths or directory contents"
+    ),
+    true
+  );
+});
+
+test("gemini ACP invoker promotes interactive transcript blockers onto the same investigation thread", async () => {
+  const fakeChild = new FakeChildProcess();
+  const outcomes: string[] = [];
+  let approvalRequestCount = 0;
+  let interactiveSessionCount = 0;
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const commands = [
+                "\"/Users/Test/TaskSaw/managed-tools/bin/gemini\" -p \"/stats model\" -o json [current working directory /Users/Test/TaskSaw]",
+                "\"/Users/Test/TaskSaw/managed-tools/bin/gemini\" /stats model --json [current working directory /Users/Test/TaskSaw]",
+                "sed -n '1,20p' src/main/tool-manager.ts"
+              ];
+
+              for (const title of commands) {
+                const decision = await this.client.requestPermission({
+                  options: [{ optionId: "allow_once", kind: "allow_once" }],
+                  toolCall: {
+                    title,
+                    kind: "execute"
+                  }
+                });
+                outcomes.push(decision.outcome.outcome);
+              }
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Interactive transcript blocker was reused",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    requestInteractiveSession: async () => {
+      interactiveSessionCount += 1;
+      return {
+        outcome: "terminated",
+        sessionId: "interactive-session-1",
+        exitCode: 0,
+        signal: 0,
+        transcript: "Loaded cached credentials.\n[LocalAgentExecutor] Blocked call: Unauthorized tool call: 'get_internal_docs' is not available to this agent.\n"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Interactive transcript blocker was reused");
+  assert.deepEqual(outcomes, ["cancelled", "cancelled", "selected"]);
+  assert.equal(approvalRequestCount, 1);
+  assert.equal(interactiveSessionCount, 1);
+  assert.equal(
+    progressMessages.some((entry) => entry.message === "Interactive CLI transcript established blocker evidence for this investigation thread"),
+    true
+  );
+  assert.equal(
+    progressMessages.some((entry) => entry.message.includes("prior evidence already established this investigation thread as blocked")),
+    true
+  );
+});
+
+test("gemini ACP invoker closes stale permission callbacks after probe-loop abort", async () => {
+  const fakeChild = new FakeChildProcess();
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+  const outcomes: string[] = [];
+  let approvalRequestCount = 0;
+  let caughtAbortMessage = "";
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              try {
+                for (const title of [
+                  "ls -R \"/Users/test/managed-tools/bin\"",
+                  "find . -name \"managed-tools\" -type d",
+                  "pwd"
+                ]) {
+                  const decision = await this.client.requestPermission({
+                    options: [{ optionId: "allow_once", kind: "allow_once" }],
+                    toolCall: {
+                      title,
+                      kind: "execute"
+                    }
+                  });
+                  outcomes.push(decision.outcome.outcome);
+                }
+              } catch (error) {
+                caughtAbortMessage = error instanceof Error ? error.message : String(error);
+              }
+
+              const staleDecision = await this.client.requestPermission({
+                options: [{ optionId: "allow_once", kind: "allow_once" }],
+                toolCall: {
+                  title: "grep -r \"stats\" \"/Users/test/managed-tools/packages/gemini\" | head -n 20",
+                  kind: "execute"
+                }
+              });
+              outcomes.push(staleDecision.outcome.outcome);
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Abort latch ignored stale permission callback",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!({
+    ...createContext(TEST_MODEL),
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Abort latch ignored stale permission callback");
+  assert.equal(caughtAbortMessage, "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget");
+  assert.deepEqual(outcomes, ["cancelled", "cancelled", "cancelled"]);
+  assert.equal(approvalRequestCount, 0);
+  assert.equal(
+    progressMessages.some((entry) => entry.message === "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget"),
     true
   );
 });
@@ -2460,6 +2996,108 @@ test("gemini ACP invoker retries invalid streams and falls back to another Gemin
   assert.equal(promptAttemptCount, 3);
   assert.deepEqual(sessionModelIds, [
     "gemini-2.5-pro",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash"
+  ]);
+});
+
+test("gemini ACP invoker falls back to another Gemini model when the assigned model has no capacity", async () => {
+  const sessionModelIds: string[] = [];
+  let currentModelId = "";
+  let promptAttemptCount = 0;
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      fallbackModelIds: [TEST_MODEL.model, "gemini-2.5-flash"],
+      invalidStreamRetryCount: 0,
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return {
+                protocolVersion: 1
+              };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel(params: Record<string, unknown>) {
+              currentModelId = String(params.modelId ?? "");
+              sessionModelIds.push(currentModelId);
+              return {};
+            }
+
+            async prompt() {
+              promptAttemptCount += 1;
+              if (currentModelId !== "gemini-2.5-flash") {
+                throw new Error("No capacity available for model gemini-2.5-pro on the server");
+              }
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Recovered after Gemini capacity fallback",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => new FakeChildProcess()
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!(createContext(TEST_MODEL));
+
+  assert.equal(result.summary, "Recovered after Gemini capacity fallback");
+  assert.equal(promptAttemptCount, 2);
+  assert.deepEqual(sessionModelIds, [
     "gemini-2.5-pro",
     "gemini-2.5-flash"
   ]);

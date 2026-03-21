@@ -134,6 +134,10 @@ test("task orchestration abstract plan prompt prioritizes existing memory before
   );
   assert.match(
     prompt,
+    /If the current memory already names a concrete external surface such as a CLI command, API route, or managed-tool capability check, inspect that surface before pivoting to local caches, log files, temp files, or home-directory state\./
+  );
+  assert.match(
+    prompt,
     /If the user explicitly asked for exact or actual data, keep the plan centered on the concrete data source or blocker evidence first\./
   );
 });
@@ -172,6 +176,10 @@ test("task orchestration gather prompt forbids broad search before checking memo
   assert.match(
     prompt,
     /When probing an external CLI surface, prefer one documented help\/usage check and one direct capability check\./
+  );
+  assert.match(
+    prompt,
+    /Do not pivot from a named external surface to local cache, log, temp, or home-directory files until one direct capability check against that named surface has failed or returned explicit blocker evidence\./
   );
   assert.match(
     prompt,

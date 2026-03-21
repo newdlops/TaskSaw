@@ -132,7 +132,9 @@ type GeminiLiveSession = {
 type ReadOnlyProbeGuardState = {
   attemptedCommandFingerprints: Set<string>;
   hypothesisCounts: Map<string, number>;
+  blockedHypothesisReasons: Map<string, string>;
   consecutiveRejections: number;
+  permissionCallbacksClosed: boolean;
 };
 
 const DEFAULT_GEMINI_MODE_BY_CAPABILITY: Partial<Record<OrchestratorCapability, string>> = {
@@ -320,7 +322,9 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
       const readOnlyProbeGuardState: ReadOnlyProbeGuardState = {
         attemptedCommandFingerprints: new Set(),
         hypothesisCounts: new Map(),
-        consecutiveRejections: 0
+        blockedHypothesisReasons: new Map(),
+        consecutiveRejections: 0,
+        permissionCallbacksClosed: false
       };
       const retryNotes: string[] = [];
       let lastError: unknown;
@@ -385,6 +389,13 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
             pauseActivity: () => promptActivity.pause(),
             resumeActivity: () => promptActivity.resume(),
             requestPermissionHandler: async (permissionRequest) => {
+              if (readOnlyProbeGuardState.permissionCallbacksClosed) {
+                promptActivity.touch();
+                return {
+                  outcome: "cancelled"
+                };
+              }
+
               const toolCallSummary = summarizePermissionToolCall(permissionRequest.toolCall);
               const optionsForUi: OrchestratorApprovalOption[] = (permissionRequest.options ?? [])
                 .map((option) => ({
@@ -449,6 +460,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                   workflowStage: context.workflowStage,
                   state: readOnlyProbeGuardState
                 })) {
+                  readOnlyProbeGuardState.permissionCallbacksClosed = true;
                   const abortMessage = "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget";
                   context.reportProgress?.(
                     abortMessage,
@@ -488,6 +500,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                   workflowStage: context.workflowStage,
                   state: readOnlyProbeGuardState
                 })) {
+                  readOnlyProbeGuardState.permissionCallbacksClosed = true;
                   const abortMessage = "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget";
                   context.reportProgress?.(
                     abortMessage,
@@ -535,6 +548,24 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                     commandText: interactiveSessionCommand,
                     cwd: workspaceRoot
                   });
+                  const transcriptBlockerReason = extractInteractiveTranscriptBlockerReason(response.transcript);
+                  if (transcriptBlockerReason) {
+                    registerInteractiveTranscriptBlocker({
+                      commandText: interactiveSessionCommand,
+                      workspaceRoot,
+                      reason: transcriptBlockerReason,
+                      state: readOnlyProbeGuardState
+                    });
+                    context.reportProgress?.(
+                      "Interactive CLI transcript established blocker evidence for this investigation thread",
+                      {
+                        capability,
+                        model: modelId,
+                        toolCall: toolCallSummary ?? null,
+                        blockerReason: transcriptBlockerReason
+                      }
+                    );
+                  }
                   context.reportProgress?.(
                     response.outcome === "completed"
                       ? "Interactive CLI session completed; original Gemini tool call was cancelled to avoid hanging the ACP run"
@@ -677,7 +708,10 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
           const message = formatGeminiAcpError(error);
           const shouldRetry = !context.abortSignal.aborted
             && attemptIndex < attemptModels.length - 1
-            && isRetryableGeminiInvalidStreamMessage(message);
+            && (
+              isRetryableGeminiInvalidStreamMessage(message)
+              || isRetryableGeminiCapacityMessage(message)
+            );
 
           if (!shouldRetry) {
             break;
@@ -1219,6 +1253,14 @@ function isRetryableGeminiInvalidStreamMessage(message: string): boolean {
     || normalized.includes("without any text output");
 }
 
+function isRetryableGeminiCapacityMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes("no capacity available for model")
+    || normalized.includes("resource exhausted")
+    || normalized.includes("server is overloaded")
+    || normalized.includes("capacity available");
+}
+
 function formatGeminiAcpError(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -1283,6 +1325,12 @@ function getReadOnlyProbeGuardRejectionReason(params: {
     ?? buildExecuteToolCallFingerprint(params.toolCall)
     ?? "";
   const hypothesisKeys = buildReadOnlyHypothesisKeys(commandText, params.workspaceRoot);
+  for (const key of hypothesisKeys) {
+    const blockerReason = params.state.blockedHypothesisReasons.get(key);
+    if (blockerReason) {
+      return `Rejected Gemini tool call because prior evidence already established this investigation thread as blocked (${blockerReason})`;
+    }
+  }
   const cutoff = READ_ONLY_HYPOTHESIS_CUTOFF_BY_STAGE[params.workflowStage] ?? 6;
   for (const key of hypothesisKeys) {
     const count = params.state.hypothesisCounts.get(key) ?? 0;
@@ -1329,7 +1377,6 @@ function getFocusedGatherLowSignalRejectionReason(params: {
     params.capability !== "gather"
     || params.workflowStage !== "task_orchestration"
     || params.toolCall?.kind?.trim() !== "execute"
-    || !/focused gather/i.test(params.nodeTitle)
   ) {
     return null;
   }
@@ -1340,9 +1387,13 @@ function getFocusedGatherLowSignalRejectionReason(params: {
     return null;
   }
 
-  return isFocusedGatherLowSignalReadOnlyCommand(commandText)
+  if (!isFocusedGatherLowSignalReadOnlyCommand(commandText)) {
+    return null;
+  }
+
+  return /focused gather/i.test(params.nodeTitle)
     ? "Rejected Gemini tool call because focused gather must inspect named targets directly instead of rediscovering files or paths"
-    : null;
+    : "Rejected Gemini tool call because task-orchestration gather must inspect concrete targets directly instead of rediscovering paths or directory contents";
 }
 
 function shouldAbortReadOnlyProbeLoop(params: {
@@ -1618,6 +1669,45 @@ function buildReadOnlyHypothesisKeys(commandText: string, workspaceRoot: string)
   return [...keys];
 }
 
+function registerInteractiveTranscriptBlocker(params: {
+  commandText: string;
+  workspaceRoot: string;
+  reason: string;
+  state: ReadOnlyProbeGuardState;
+}): void {
+  const hypothesisKeys = buildReadOnlyHypothesisKeys(params.commandText, params.workspaceRoot);
+  const scopedKeys = hypothesisKeys.filter((key) => !key.startsWith("surface:"));
+  for (const key of scopedKeys.length > 0 ? scopedKeys : hypothesisKeys) {
+    params.state.blockedHypothesisReasons.set(key, params.reason);
+  }
+}
+
+function extractInteractiveTranscriptBlockerReason(transcript: string | undefined): string | null {
+  if (!transcript || transcript.trim().length === 0) {
+    return null;
+  }
+
+  const normalized = transcript.toLowerCase();
+  if (
+    normalized.includes("unauthorized tool call")
+    || normalized.includes("not available to this agent")
+    || normalized.includes("blocked call: unauthorized tool call")
+  ) {
+    return "interactive Gemini CLI path is unauthorized for this agent";
+  }
+
+  if (
+    normalized.includes("unknown command")
+    || normalized.includes("unsupported")
+    || normalized.includes("not supported")
+    || normalized.includes("invalid command")
+  ) {
+    return "interactive Gemini CLI path is unsupported by this agent surface";
+  }
+
+  return null;
+}
+
 function buildExternalToolSurfaceKey(commandText: string, workspaceRoot: string): string | null {
   const tokens = tokenizeCommandText(commandText)
     .map((token) => stripOuterQuotes(token).trim())
@@ -1741,6 +1831,8 @@ function looksLikeInteractiveCliCommand(commandText: string): boolean {
     return false;
   }
 
+  let sawHeadlessPromptFlag = false;
+
   for (let index = commandIndex + 1; index < tokens.length; index += 1) {
     const token = tokens[index]!;
     const normalizedToken = token.toLowerCase();
@@ -1750,11 +1842,16 @@ function looksLikeInteractiveCliCommand(commandText: string): boolean {
     }
 
     if (normalizedToken === "-p" || normalizedToken === "--prompt") {
+      sawHeadlessPromptFlag = true;
+      continue;
+    }
+
+    if (normalizedToken === "-i" || normalizedToken === "--prompt-interactive") {
       return true;
     }
 
-    if (isSlashCommandToken(token)) {
-      return true;
+    if (isSlashCommandToken(token) || (sawHeadlessPromptFlag && token.trim().startsWith("/"))) {
+      return sawHeadlessPromptFlag;
     }
 
     if (normalizedToken === "login" || normalizedToken === "auth") {
