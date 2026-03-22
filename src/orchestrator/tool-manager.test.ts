@@ -365,6 +365,7 @@ test("tool manager maps Gemini /stats model remaining percent onto the selected 
       queryGeminiModelUsageStats: () => Promise<unknown>;
       getGeminiUsage: () => Promise<{
         remainingPercent: number | null;
+        statusMessage: string | null;
         gemini: {
           models: Array<{ modelId: string; displayName: string; remainingPercent: number | null }>;
         };
@@ -389,6 +390,7 @@ test("tool manager maps Gemini /stats model remaining percent onto the selected 
 
     assert.deepEqual(usage, {
       remainingPercent: 62,
+      statusMessage: null,
       gemini: {
         models: [
           { modelId: "gemini-2.5-pro", displayName: "2.5 Pro", remainingPercent: 62 },
@@ -463,6 +465,7 @@ test("tool manager computes Gemini remaining percent from quota and usage fields
       queryGeminiModelUsageStats: () => Promise<unknown>;
       getGeminiUsage: () => Promise<{
         remainingPercent: number | null;
+        statusMessage: string | null;
         gemini: {
           models: Array<{ modelId: string; displayName: string; remainingPercent: number | null }>;
         };
@@ -487,6 +490,7 @@ test("tool manager computes Gemini remaining percent from quota and usage fields
 
     assert.deepEqual(usage, {
       remainingPercent: 58,
+      statusMessage: null,
       gemini: {
         models: [
           { modelId: "gemini-2.5-pro", displayName: "2.5 Pro", remainingPercent: 58 },
@@ -512,6 +516,7 @@ test("tool manager falls back to generic usage when model-specific data is missi
       queryGeminiModelUsageStats: () => Promise<unknown>;
       getGeminiUsage: () => Promise<{
         remainingPercent: number | null;
+        statusMessage: string | null;
         gemini: {
           models: Array<{ modelId: string; displayName: string; remainingPercent: number | null }>;
         };
@@ -533,6 +538,7 @@ test("tool manager falls back to generic usage when model-specific data is missi
 
     assert.deepEqual(usage, {
       remainingPercent: 75,
+      statusMessage: null,
       gemini: {
         models: [
           { modelId: "gemini-2.5-pro", displayName: "2.5 Pro", remainingPercent: 75 }

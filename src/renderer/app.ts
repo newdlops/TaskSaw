@@ -22,6 +22,7 @@ type TerminalExitPayload = { sessionId: string; exitCode: number; signal: number
 type RunStatus = "pending" | "running" | "done" | "failed" | "paused" | "escalated";
 type ManagedToolUsage = {
   remainingPercent?: number | null;
+  statusMessage?: string | null;
   percentRemaining?: number | null;
   used?: number | null;
   max?: number | null;
@@ -5672,6 +5673,10 @@ function renderToolUsageStatus(status: ManagedToolStatus) {
     } else {
       const p = remainingPercent === null ? "n/a" : `${remainingPercent}%`;
       label = `Gemini ${p} ${leftLabel}`;
+    }
+
+    if (usage?.statusMessage) {
+      label += ` (${usage.statusMessage})`;
     }
   } else {
     label = `${status.displayName} ${percentLabel} ${leftLabel}`;

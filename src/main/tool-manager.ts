@@ -70,6 +70,7 @@ type InstructionSource = {
 type GeminiUsageRecord = {
   modelId: string | null;
   remainingPercent: number | null;
+  statusMessage?: string | null;
 };
 
 const dynamicImport = new Function("specifier", "return import(specifier);") as (specifier: string) => Promise<unknown>;
@@ -101,6 +102,8 @@ export class ToolManager {
   private readonly installPromises = new Map<ManagedToolId, Promise<ManagedToolStatus>>();
   private readonly modelCatalogPromises = new Map<string, Promise<ManagedToolModelCatalog>>();
   private readonly resolvedModelCatalogs = new Map<string, ManagedToolModelCatalog>();
+  private observedGeminiRemainingPercent: number | null = null;
+  private observedGeminiStatusMessage: string | null = null;
 
   constructor(private userDataDirectory: string) {
     this.toolingRoot = path.join(userDataDirectory, "managed-tools");
@@ -109,6 +112,11 @@ export class ToolManager {
     this.homeDirectory = path.join(this.toolingRoot, "home");
     this.runtimeDirectory = path.join(this.toolingRoot, "runtime");
     this.ensureBaseDirectories();
+  }
+
+  updateObservedGeminiUsage(percent: number, message: string | null = null) {
+    this.observedGeminiRemainingPercent = this.clampPercentage(percent);
+    this.observedGeminiStatusMessage = message;
   }
 
   getHomeDirectory(): string {
@@ -239,12 +247,22 @@ export class ToolManager {
         });
 
       const selectedModelId = catalog.currentModelId ?? models[0]?.modelId ?? null;
-      const remainingPercent = selectedModelId
+      let remainingPercent = selectedModelId
         ? this.findGeminiRemainingPercentForModel(selectedModelId, usageRecords)
         : null;
 
+      let statusMessage = this.observedGeminiStatusMessage;
+      if (!statusMessage) {
+        statusMessage = usageRecords.find(r => r.statusMessage)?.statusMessage ?? null;
+      }
+
+      if (remainingPercent === null && this.observedGeminiRemainingPercent !== null) {
+        remainingPercent = this.observedGeminiRemainingPercent;
+      }
+
       return {
         remainingPercent,
+        statusMessage,
         gemini: { models }
       };
     } catch {
@@ -260,16 +278,31 @@ export class ToolManager {
 
     const env = this.buildManagedCommandEnv("gemini", launchCommand.env);
     const commandAttempts = [
-      ["/stats", "model", "--json"],
-      ["/stats", "session", "--json"],
-      ["retrieveuserquota", "--json"],
+      ["/stats", "session", "-o", "json"],
+      ["/stats", "model", "-o", "json"],
+      ["retrieveuserquota", "-o", "json"],
       ["-p", "/stats model", "-o", "json"]
     ];
 
     for (const args of commandAttempts) {
       const result = await this.runJsonCommand(launchCommand.command, [...launchCommand.args, ...args], env, 5_000);
-      if (result !== null) {
-        return result;
+      
+      if (result && typeof result === "object") {
+        if (!("code" in result)) {
+          return result;
+        }
+
+        const raw = result as { stdout: string; stderr: string; code: number | null; error?: string };
+        
+        // If it's a JSON parse error but we have output, check for quota messages
+        if (raw.error === "json_parse_failed" || raw.code !== 0) {
+          const combined = `${raw.stdout}\n${raw.stderr}`.toLowerCase();
+          if (combined.includes("exhausted your capacity") || combined.includes("quota will reset after") || combined.includes("quota_exhausted")) {
+            const resetMatch = combined.match(/quota will reset after ([^\s.]+)/);
+            const statusMessage = resetMatch ? `Quota exhausted (resets after ${resetMatch[1]})` : "Quota exhausted";
+            return [{ modelId: "unknown", remainingPercent: null, statusMessage }];
+          }
+        }
       }
     }
 
@@ -301,7 +334,7 @@ export class ToolManager {
     return await new Promise((resolve) => {
       const timeout = setTimeout(() => {
         child.kill();
-        resolve(null);
+        resolve({ stdout, stderr, code: null, error: "timeout" });
       }, timeoutMs);
 
       const logExecution = (code: number | null, error?: Error) => {
@@ -329,21 +362,21 @@ export class ToolManager {
         clearTimeout(timeout);
         logExecution(code);
         if (code !== 0) {
-          resolve(null);
+          resolve({ stdout, stderr, code });
           return;
         }
 
         try {
           resolve(JSON.parse(stdout));
         } catch {
-          resolve(null);
+          resolve({ stdout, stderr, code, error: "json_parse_failed" });
         }
       });
 
       child.on("error", (err) => {
         clearTimeout(timeout);
         logExecution(null, err);
-        resolve(null);
+        resolve({ stdout, stderr, code: null, error: err.message });
       });
     });
   }
@@ -384,6 +417,7 @@ export class ToolManager {
       "modelName"
     ]);
     const remainingPercent = this.readGeminiRemainingPercent(value);
+    const statusMessage = typeof value.statusMessage === "string" ? value.statusMessage : null;
 
     if (remainingPercent === null) {
       return null;
@@ -391,7 +425,8 @@ export class ToolManager {
 
     return {
       modelId: modelId ?? "unknown",
-      remainingPercent
+      remainingPercent,
+      statusMessage
     };
   }
 
@@ -456,8 +491,18 @@ export class ToolManager {
     }
 
     const used = this.readFirstNumber(value, ["used", "usage", "usedQuota", "used_quota", "consumed", "count"]);
+    const usedPercentage = this.readFirstNumber(value, ["usedPercentage", "used_percentage", "usedPercent", "used_percent", "consumption_percentage"]);
+    
+    if (usedPercentage !== null) {
+      return this.clampPercentage(100 - usedPercentage);
+    }
+
     if (used !== null && quota !== null && quota > 0) {
       return this.clampPercentage(((quota - used) / quota) * 100);
+    }
+
+    if (used !== null && (quota === null || quota === 0)) {
+      return this.clampPercentage(100 - used);
     }
 
     return null;

@@ -875,6 +875,7 @@ body[data-has-sessions="false"] #sidebar {
 }
 
 .orchestrator-node-live-grid {
+  width: 100%;
   display: grid;
   grid-column: 1 / -1;
   gap: 10px;
@@ -1153,7 +1154,6 @@ body[data-has-sessions="false"] #sidebar {
 
 #orchestrator-node-terminal {
   min-height: 280px;
-  width: 100%;
   max-width: 100%;
   box-sizing: border-box;
   padding: 10px 12px;

@@ -14,6 +14,7 @@ export type DirectoryDialogOptions = {
 
 export type ManagedToolUsage = {
   remainingPercent: number | null;
+  statusMessage?: string | null;
   codex?: {
     fiveHourRemainingPercent: number | null;
     weeklyRemainingPercent: number | null;

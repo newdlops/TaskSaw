@@ -461,6 +461,10 @@ export class PtyManager {
   }
 
   private async handleSessionOutput(session: SessionRecord, data: string) {
+    if (session.info.kind === "gemini") {
+      this.detectGeminiUsageFromOutput(session, data);
+    }
+
     if (session.info.kind !== "codex") return;
 
     const rawWindow = `${session.rawOutputCarryover}${data}`;
@@ -873,6 +877,34 @@ export class PtyManager {
 
       fs.chmodSync(helperPath, helperStats.mode | 0o111);
       return;
+    }
+  }
+
+  private detectGeminiUsageFromOutput(session: SessionRecord, data: string) {
+    const text = data.toLowerCase();
+    
+    // Detect quota exhausted
+    if (text.includes("exhausted your capacity") || text.includes("quota will reset after")) {
+      const resetMatch = text.match(/quota will reset after ([^\s.]+)/);
+      const statusMessage = resetMatch ? `Quota exhausted (resets after ${resetMatch[1]})` : "Quota exhausted";
+      this.toolManager.updateObservedGeminiUsage(0, statusMessage);
+      return;
+    }
+
+    // Detect numeric patterns like 10/100 or 90% remaining
+    const remainingMatch = text.match(/(\d+)%\s*remaining/);
+    if (remainingMatch?.[1]) {
+      this.toolManager.updateObservedGeminiUsage(parseInt(remainingMatch[1], 10), null);
+      return;
+    }
+
+    const quotaMatch = text.match(/usage:\s*(\d+)\s*\/\s*(\d+)/);
+    if (quotaMatch?.[1] && quotaMatch?.[2]) {
+      const used = parseInt(quotaMatch[1], 10);
+      const total = parseInt(quotaMatch[2], 10);
+      if (total > 0) {
+        this.toolManager.updateObservedGeminiUsage(((total - used) / total) * 100, null);
+      }
     }
   }
 }
