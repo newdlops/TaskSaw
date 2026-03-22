@@ -5826,6 +5826,8 @@ appWindow.tasksaw.onTerminalData(({ sessionId, data }: TerminalDataPayload) => {
   }
 });
 
+const autoApprovedRequestIds = new Set<string>();
+
 appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
   if (event.type === "approval_resolved" && typeof event.payload.requestId === "string") {
     resolveApprovalToast(event.payload.requestId);
@@ -5887,12 +5889,13 @@ appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
     const nodeEvents = liveDetail.events.filter((entry) => entry.nodeId === event.nodeId);
     const pendingApproval = getPendingApproval(nodeEvents);
     if (pendingApproval) {
-      if (autoApproveCheckbox.checked) {
+      if (autoApproveCheckbox.checked && !autoApprovedRequestIds.has(pendingApproval.requestId)) {
+        autoApprovedRequestIds.add(pendingApproval.requestId);
         const allowOption = pendingApproval.options.find((opt) => opt.kind === "allow_once")
           ?? pendingApproval.options.find((opt) => typeof opt.kind === "string" && opt.kind.startsWith("allow"))
           ?? pendingApproval.options[0];
         void respondToPendingApproval(pendingApproval.requestId, true, allowOption?.optionId);
-      } else {
+      } else if (!autoApproveCheckbox.checked) {
         showApprovalToast(pendingApproval);
         openApprovalDialog(pendingApproval.requestId);
       }

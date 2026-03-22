@@ -887,7 +887,7 @@ export class PtyManager {
     if (text.includes("exhausted your capacity") || text.includes("quota will reset after")) {
       const resetMatch = text.match(/quota will reset after ([^\s.]+)/);
       const statusMessage = resetMatch ? `Quota exhausted (resets after ${resetMatch[1]})` : "Quota exhausted";
-      this.toolManager.updateObservedGeminiUsage(0, statusMessage);
+      this.toolManager.updateObservedGeminiUsage(null, statusMessage);
       return;
     }
 

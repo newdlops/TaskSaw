@@ -114,8 +114,8 @@ export class ToolManager {
     this.ensureBaseDirectories();
   }
 
-  updateObservedGeminiUsage(percent: number, message: string | null = null) {
-    this.observedGeminiRemainingPercent = this.clampPercentage(percent);
+  updateObservedGeminiUsage(percent: number | null, message: string | null = null) {
+    this.observedGeminiRemainingPercent = percent !== null ? this.clampPercentage(percent) : null;
     this.observedGeminiStatusMessage = message;
   }
 
@@ -432,26 +432,29 @@ export class ToolManager {
 
   private findGeminiRemainingPercentForModel(modelId: string, records: GeminiUsageRecord[]): number | null {
     const normalizedModelId = this.normalizeGeminiModelIdentifier(modelId);
-    let bestMatch: number | null = null;
-
+    
+    // First, try to find an exact match for this model
     for (const record of records) {
       if (record.remainingPercent === null) {
         continue;
       }
 
-      if (record.modelId === "unknown" || !record.modelId) {
-        if (bestMatch === null) {
-          bestMatch = record.remainingPercent;
+      if (record.modelId && record.modelId !== "unknown") {
+        if (this.normalizeGeminiModelIdentifier(record.modelId) === normalizedModelId) {
+          return record.remainingPercent;
         }
-        continue;
       }
+    }
 
-      if (this.normalizeGeminiModelIdentifier(record.modelId) === normalizedModelId) {
+    // Only if no exact match is found, should we consider an "unknown" record
+    // but only as a global fallback if it's the only record provided (e.g. from session stats)
+    for (const record of records) {
+      if (record.remainingPercent !== null && (record.modelId === "unknown" || !record.modelId)) {
         return record.remainingPercent;
       }
     }
 
-    return bestMatch;
+    return null;
   }
 
   private normalizeGeminiModelIdentifier(value: string): string {
@@ -499,10 +502,6 @@ export class ToolManager {
 
     if (used !== null && quota !== null && quota > 0) {
       return this.clampPercentage(((quota - used) / quota) * 100);
-    }
-
-    if (used !== null && (quota === null || quota === 0)) {
-      return this.clampPercentage(100 - used);
     }
 
     return null;
