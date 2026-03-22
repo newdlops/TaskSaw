@@ -65,6 +65,7 @@ type GeminiAcpInvokerOptions = {
   fallbackModelIds?: string[];
   invalidStreamRetryCount?: number;
   temperature?: number;
+  sandbox?: boolean;
   dependencies?: GeminiAcpInvokerDependencies;
 };
 
@@ -303,7 +304,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const promptInactivityTimeoutMs = typeof options.promptInactivityTimeoutMs === "number" && Number.isFinite(options.promptInactivityTimeoutMs)
     ? Math.max(1_000, Math.trunc(options.promptInactivityTimeoutMs))
     : null;
-  const command = [options.executablePath, ...options.executableArgs, "--acp"];
+  const command = [options.executablePath, ...options.executableArgs, ...(options.sandbox ? ["--sandbox"] : []), "--acp"];
   const fallbackModelIds = options.fallbackModelIds ?? [];
   const invalidStreamRetryCount = Math.max(0, options.invalidStreamRetryCount ?? 1);
   const defaultTemperature = options.temperature ?? 0.2;
@@ -992,7 +993,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
     }
 
     const acpModule = await loadAcpModule(options.acpModulePath);
-    const child = spawnProcess(options.executablePath, [...options.executableArgs, "--acp"], {
+    const child = spawnProcess(options.executablePath, [...options.executableArgs, ...(options.sandbox ? ["--sandbox"] : []), "--acp"], {
       cwd: options.cwd,
       env: {
         ...process.env,
@@ -1956,17 +1957,20 @@ function collectExecuteToolCallTextCandidates(toolCall: {
 }
 
 function sanitizeExecuteToolCallCommandText(value: string): string | null {
-  const firstLine = value
+  const lines = value
     .normalize("NFKC")
     .replace(/\r\n?/g, "\n")
     .split("\n")
     .map((line) => line.trim())
-    .find((line) => line.length > 0);
-  if (!firstLine) {
+    .filter((line) => line.length > 0);
+
+  const targetLine = lines.find(line => !line.startsWith("export ") && !/^[a-zA-Z_][a-zA-Z0-9_]*=/.test(line)) || lines[lines.length - 1];
+
+  if (!targetLine) {
     return null;
   }
 
-  let commandText = firstLine;
+  let commandText = targetLine;
   const cwdMarker = commandText.match(/\s+\[(?:current working directory|cwd)\b/i);
   if (typeof cwdMarker?.index === "number") {
     commandText = commandText.slice(0, cwdMarker.index).trimEnd();

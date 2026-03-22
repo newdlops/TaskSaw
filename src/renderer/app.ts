@@ -278,6 +278,7 @@ type TasksawApi = {
     continuationMode?: OrchestratorContinuationMode | null;
     nextActionIndex?: number | null;
     maxDepth?: number | null;
+    sandbox?: boolean;
     workspacePath?: string | null;
     continueFromRunId?: string | null;
     workspaceAccessDialog?: DirectoryDialogOptions;
@@ -688,6 +689,7 @@ const orchestratorDepthLabelEl = document.getElementById("orchestrator-depth-lab
 const orchestratorGoalInput = document.getElementById("orchestrator-goal") as HTMLTextAreaElement;
 const orchestratorModeSelect = document.getElementById("orchestrator-mode") as HTMLSelectElement;
 const orchestratorDepthInput = document.getElementById("orchestrator-depth") as HTMLInputElement;
+const orchestratorSandboxInput = document.getElementById("orchestrator-sandbox") as HTMLInputElement;
 const orchestratorRefreshButton = document.getElementById("orchestrator-refresh") as HTMLButtonElement;
 const orchestratorStopButton = document.getElementById("orchestrator-stop") as HTMLButtonElement;
 const orchestratorContinueButton = document.getElementById("orchestrator-continue") as HTMLButtonElement;
@@ -5052,6 +5054,7 @@ async function runOrchestrator(options?: {
       continuationMode: continueFromRunId ? continuationMode : null,
       nextActionIndex: continueFromRunId ? (options?.nextActionIndex ?? null) : null,
       maxDepth,
+      sandbox: orchestratorSandboxInput.checked,
       workspacePath: currentWorkspacePath,
       continueFromRunId,
       workspaceAccessDialog: {

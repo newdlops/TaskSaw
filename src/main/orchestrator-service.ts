@@ -119,7 +119,7 @@ export class OrchestratorService {
     const continuation = this.resolveContinuationSeed(explicitContinuation, cachedContinuation);
     const goal = this.resolveRunGoal(input, continuationSnapshot);
     let activeRunId: string | null = null;
-    const runtime = new OrchestratorRuntime(await this.createRegistry(workspacePath, modeConfig.toolModels), {
+    const runtime = new OrchestratorRuntime(await this.createRegistry(workspacePath, modeConfig.toolModels, input.sandbox ?? true), {
       persistence: this.persistence,
       enableRootBootstrapSketch: true,
       requestUserApproval,
@@ -880,7 +880,8 @@ export class OrchestratorService {
 
   private async createRegistry(
     workspacePath: string,
-    toolModels: Partial<Record<ManagedToolId, ModelRef[]>>
+    toolModels: Partial<Record<ManagedToolId, ModelRef[]>>,
+    sandbox: boolean
   ): Promise<ModelAdapterRegistry> {
     const registry = new ModelAdapterRegistry();
     const cliRunnerPath = path.join(this.appRootPath, "dist", "main", "node-cli-runner.js");
@@ -932,6 +933,7 @@ export class OrchestratorService {
         acpModulePath: geminiAcpModulePath,
         cwd: workspacePath,
         fallbackModelIds: geminiFallbackModelIds,
+        sandbox,
         env: {
           ...geminiEnv,
           ...geminiCommand.env
