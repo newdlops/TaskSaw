@@ -278,10 +278,11 @@ export class ToolManager {
 
     const env = this.buildManagedCommandEnv("gemini", launchCommand.env);
     const commandAttempts = [
+      ["-p", "/stats session", "-o", "json"],
+      ["-p", "/stats model", "-o", "json"],
       ["/stats", "session", "-o", "json"],
       ["/stats", "model", "-o", "json"],
-      ["retrieveuserquota", "-o", "json"],
-      ["-p", "/stats model", "-o", "json"]
+      ["retrieveuserquota", "-o", "json"]
     ];
 
     for (const args of commandAttempts) {
@@ -300,7 +301,7 @@ export class ToolManager {
           if (combined.includes("exhausted your capacity") || combined.includes("quota will reset after") || combined.includes("quota_exhausted")) {
             const resetMatch = combined.match(/quota will reset after ([^\s.]+)/);
             const statusMessage = resetMatch ? `Quota exhausted (resets after ${resetMatch[1]})` : "Quota exhausted";
-            return [{ modelId: "unknown", remainingPercent: null, statusMessage }];
+            return [{ modelId: "unknown", remainingPercent: 0, statusMessage }];
           }
         }
       }
@@ -383,39 +384,40 @@ export class ToolManager {
 
   private extractGeminiUsageRecords(stats: unknown): GeminiUsageRecord[] {
     const records: GeminiUsageRecord[] = [];
-    const visit = (value: unknown) => {
+    const visit = (value: unknown, parentModelId: string | null = null) => {
       if (!value || typeof value !== "object") {
         return;
       }
 
       if (Array.isArray(value)) {
-        value.forEach(visit);
+        value.forEach(v => visit(v, parentModelId));
         return;
       }
 
-      const record = this.parseGeminiUsageRecord(value as Record<string, unknown>);
+      const currentModelId = this.readFirstString(value as Record<string, unknown>, [
+        "model",
+        "modelId",
+        "model_id",
+        "id",
+        "name",
+        "displayName",
+        "display_name",
+        "modelName"
+      ]) || parentModelId;
+
+      const record = this.parseGeminiUsageRecord(value as Record<string, unknown>, currentModelId);
       if (record) {
         records.push(record);
       }
 
-      Object.values(value).forEach(visit);
+      Object.values(value).forEach(v => visit(v, currentModelId));
     };
 
     visit(stats);
     return records;
   }
 
-  private parseGeminiUsageRecord(value: Record<string, unknown>): GeminiUsageRecord | null {
-    const modelId = this.readFirstString(value, [
-      "model",
-      "modelId",
-      "model_id",
-      "id",
-      "name",
-      "displayName",
-      "display_name",
-      "modelName"
-    ]);
+  private parseGeminiUsageRecord(value: Record<string, unknown>, modelId: string | null): GeminiUsageRecord | null {
     const remainingPercent = this.readGeminiRemainingPercent(value);
     const statusMessage = typeof value.statusMessage === "string" ? value.statusMessage : null;
 
@@ -477,12 +479,16 @@ export class ToolManager {
       "remaining",
       "remainingQuota",
       "remaining_quota",
+      "remaining_per_day",
+      "remaining_per_minute",
       "left",
       "available"
     ]);
     const quota = this.readFirstNumber(value, [
       "quota",
       "limit",
+      "limit_per_day",
+      "limit_per_minute",
       "max",
       "total",
       "totalQuota",
@@ -493,7 +499,15 @@ export class ToolManager {
       return this.clampPercentage((remaining / quota) * 100);
     }
 
-    const used = this.readFirstNumber(value, ["used", "usage", "usedQuota", "used_quota", "consumed", "count"]);
+    const used = this.readFirstNumber(value, [
+      "used",
+      "usage",
+      "usedQuota",
+      "used_quota",
+      "used_in_session",
+      "consumed",
+      "count"
+    ]);
     const usedPercentage = this.readFirstNumber(value, ["usedPercentage", "used_percentage", "usedPercent", "used_percent", "consumption_percentage"]);
     
     if (usedPercentage !== null) {

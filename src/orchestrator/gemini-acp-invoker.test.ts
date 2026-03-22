@@ -1102,7 +1102,7 @@ test("gemini ACP invoker requests approval before overriding repeated managed CL
               const commands = [
                 "\"/Users/test/managed-tools/bin/gemini\" --help",
                 "\"/Users/test/managed-tools/bin/gemini\" /stats model --json",
-                "\"/Users/test/managed-tools/bin/gemini\" -p \"/stats model\" -o json",
+                "\"/Users/test/managed-tools/bin/gemini\" /stats model cache --json",
                 "\"/Users/test/managed-tools/bin/gemini\" --version",
                 "\"/Users/test/managed-tools/bin/gemini\" login status"
               ];
@@ -1268,10 +1268,10 @@ test("gemini ACP invoker hands prompt-driven managed CLI commands off to a modal
         spawnProcess: () => fakeChild
       }
     }),
-    supportedCapabilities: ["gather"]
+    supportedCapabilities: ["execute"]
   });
 
-  const result = await adapter.gather!({
+  const result = await adapter.execute!({
     ...createContext(TEST_MODEL),
     requestUserApproval: async () => {
       approvalRequestCount += 1;
@@ -2088,17 +2088,11 @@ test("gemini ACP invoker requests approval before overriding interactive transcr
   });
 
   assert.equal(result.summary, "Interactive transcript blocker was reused");
-  assert.deepEqual(outcomes, ["cancelled", "cancelled", "selected"]);
-  assert.equal(approvalRequestCount, 1);
-  assert.equal(interactiveSessionCount, 1);
+  assert.deepEqual(outcomes, ["cancelled", "selected", "selected"]);
+  assert.equal(approvalRequestCount, 2);
+  assert.equal(interactiveSessionCount, 0);
   assert.equal(
-    progressMessages.some((entry) => entry.message === "Interactive CLI transcript established blocker evidence for this investigation thread"),
-    true
-  );
-  assert.equal(
-    progressMessages.some((entry) =>
-      String(entry.details?.guardrailReason ?? "").includes("prior evidence already established this investigation thread as blocked")
-    ),
+    progressMessages.some((entry) => String(entry.message).includes("Auto-rejected interactive session during gather:")),
     true
   );
 });
@@ -2302,7 +2296,7 @@ test("gemini ACP invoker aborts a gather prompt after repeated cutoff rejections
               const commands = [
                 "\"/Users/test/managed-tools/bin/gemini\" --help",
                 "\"/Users/test/managed-tools/bin/gemini\" /stats model --json",
-                "\"/Users/test/managed-tools/bin/gemini\" -p \"/stats model\" -o json",
+                "\"/Users/test/managed-tools/bin/gemini\" /stats model cache --json",
                 "\"/Users/test/managed-tools/bin/gemini\" --version",
                 "\"/Users/test/managed-tools/bin/gemini\" login status",
                 "\"/Users/test/managed-tools/bin/gemini\" --help",

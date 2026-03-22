@@ -549,3 +549,100 @@ test("tool manager falls back to generic usage when model-specific data is missi
     fs.rmSync(userData, { recursive: true, force: true });
   }
 });
+
+test("tool manager parses Gemini remaining percent from new quota fields and handles nested structure", async () => {
+  const userData = createTempDirectory("tasksaw-user-data-");
+
+  try {
+    const manager = new ToolManager(userData);
+    const managerStub = manager as unknown as {
+      discoverModelCatalog: (toolId: "gemini") => Promise<{
+        currentModelId: string;
+        models: Array<{ id: string; displayName: string; hidden: boolean }>;
+      }>;
+      queryGeminiModelUsageStats: () => Promise<unknown>;
+      getGeminiUsage: () => Promise<{
+        remainingPercent: number | null;
+        statusMessage: string | null;
+        gemini: {
+          models: Array<{ modelId: string; displayName: string; remainingPercent: number | null }>;
+        };
+      } | null>;
+    };
+
+    managerStub.discoverModelCatalog = async () => ({
+      currentModelId: "gemini-3.1-pro",
+      models: [
+        { id: "gemini-3.1-pro", displayName: "Gemini 3.1 Pro", hidden: false }
+      ]
+    });
+
+    // Test new field names: limit_per_day, remaining_per_day
+    managerStub.queryGeminiModelUsageStats = async () => ({
+      model: "gemini-3.1-pro",
+      requests: {
+        limit_per_day: 1000,
+        remaining_per_day: 750
+      }
+    });
+
+    let usage = await managerStub.getGeminiUsage();
+    assert.equal(usage?.remainingPercent, 75);
+
+    // Test used_in_session and nested model propagation
+    managerStub.queryGeminiModelUsageStats = async () => ({
+      model: "gemini-3.1-pro",
+      tokens: {
+        limit: 1000000,
+        used_in_session: 100000
+      }
+    });
+
+    usage = await managerStub.getGeminiUsage();
+    assert.equal(usage?.remainingPercent, 90);
+
+  } finally {
+    fs.rmSync(userData, { recursive: true, force: true });
+  }
+});
+
+test("tool manager handles Gemini quota exhaustion by returning 0 percent", async () => {
+  const userData = createTempDirectory("tasksaw-user-data-");
+
+  try {
+    const manager = new ToolManager(userData);
+    const managerStub = manager as unknown as {
+      discoverModelCatalog: (toolId: "gemini") => Promise<{
+        currentModelId: string;
+        models: Array<{ id: string; displayName: string; hidden: boolean }>;
+      }>;
+      queryGeminiModelUsageStats: () => Promise<unknown>;
+      getGeminiUsage: () => Promise<{
+        remainingPercent: number | null;
+        statusMessage: string | null;
+        gemini: {
+          models: Array<{ modelId: string; displayName: string; remainingPercent: number | null }>;
+        };
+      } | null>;
+    };
+
+    managerStub.discoverModelCatalog = async () => ({
+      currentModelId: "gemini-3.1-pro",
+      models: [
+        { id: "gemini-3.1-pro", displayName: "Gemini 3.1 Pro", hidden: false }
+      ]
+    });
+
+    // Simulate quota exhaustion response from queryGeminiModelUsageStats
+    managerStub.queryGeminiModelUsageStats = async () => [
+      { modelId: "unknown", remainingPercent: 0, statusMessage: "Quota exhausted" }
+    ];
+
+    const usage = await managerStub.getGeminiUsage();
+    assert.equal(usage?.remainingPercent, 0);
+    assert.equal(usage?.statusMessage, "Quota exhausted");
+
+  } finally {
+    fs.rmSync(userData, { recursive: true, force: true });
+  }
+});

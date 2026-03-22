@@ -422,6 +422,11 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
       }
 
       if (request.method === "item/tool/requestUserInput" || request.method === "mcpServer/elicitation/request") {
+        if (capability === "gather") {
+          sendError(request.id, "Auto-rejected during gather: interactive user input is not allowed during the gather phase. Please use read-only static analysis.");
+          return;
+        }
+
         const inputRequest = await context.requestUserInput?.({
           abortSignal: context.abortSignal,
           title: request.method === "item/tool/requestUserInput" ? "Codex user input requested" : "Codex elicitation requested",

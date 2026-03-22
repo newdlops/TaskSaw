@@ -573,6 +573,23 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               readOnlyProbeGuardState.consecutiveRejections = 0;
 
               const interactiveSessionCommand = getInteractiveSessionHandoffCommand(permissionRequest.toolCall);
+              if (capability === "gather" && interactiveSessionCommand) {
+                const rejectMessage = `Auto-rejected interactive session during gather: The command (${interactiveSessionCommand}) requires interactive user input. Please use static analysis instead.`;
+                context.reportProgress?.(
+                  rejectMessage,
+                  {
+                    capability,
+                    model: modelId,
+                    toolCall: toolCallSummary ?? null
+                  }
+                );
+                promptActivity.touch();
+                return {
+                  outcome: "internally_cancelled",
+                  reason: rejectMessage
+                };
+              }
+
               if (interactiveSessionCommand && context.requestInteractiveSession) {
                 context.reportProgress?.(
                   "Opening modal interactive session for CLI tool call",
