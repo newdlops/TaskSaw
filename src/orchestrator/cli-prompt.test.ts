@@ -245,6 +245,10 @@ test("task orchestration concrete plan prompt distinguishes structural gaps from
   );
   assert.match(
     prompt,
+    /If blocker evidence already shows that external-path approval or one raw payload\/stderr sample is required, do not convert that into an instrumentation, diagnostic logging, temp log file, or gemini_debug\.log plan\./
+  );
+  assert.match(
+    prompt,
     /If the current evidence is still too broad for execution but one more focused plan\/gather pass would materially narrow the scope, set needsAdditionalGather=true, keep childTasks empty when possible, and return 1-3 explicit additionalGatherObjectives\./
   );
   assert.match(
@@ -274,10 +278,27 @@ test("task orchestration verify prompt rejects placeholder successes and follow-
   );
   assert.match(
     prompt,
+    /Set passed=false if the run only added diagnostic logging or instrumentation and the promised log, payload, or external evidence has not actually been produced yet\./
+  );
+  assert.match(
+    prompt,
     /When additional tests are necessary in this TypeScript workspace, prefer the project's documented scripts or built dist tests after a build instead of raw node --test src\/\*\*\/\*\.ts entrypoints\./
   );
   assert.match(
     prompt,
     /Do not modify files, create temp scripts or temp files, run builds, or attempt follow-up fixes during verify\./
+  );
+});
+
+test("task orchestration gather prompt rejects logging-workaround pivots for missing external evidence", () => {
+  const prompt = buildCliPrompt("gather", createContext(TEST_MODEL));
+
+  assert.match(
+    prompt,
+    /Do not turn missing external evidence into a workspace logging or instrumentation plan\./
+  );
+  assert.match(
+    prompt,
+    /If the next required step is external-path approval or one raw payload\/stderr sample, return that blocker directly in the gathered evidence\./
   );
 });

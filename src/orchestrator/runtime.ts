@@ -62,10 +62,15 @@ const ASSIGNED_ROLE_CAPABILITY: Record<AssignedModelRole, OrchestratorCapability
 };
 
 const PRECISE_DATA_REQUEST_PATTERN = /\b(?:exact|actual|accurate|precise|real)\b|정확|실제|정확한|정확하게|실시간/i;
+const REAL_DATA_RESULT_REQUEST_PATTERN = /\bn\/a\b|\b(?:usage|quota|remaining(?:percent)?)\b|stats model|retrieveuserquota|remainingPercent|사용량|할당량|쿼터|남은|잔여/i;
+const DIAGNOSTIC_REQUEST_PATTERN = /\b(?:debug|diagnostic|instrument(?:ation)?|logging|trace)\b|디버그|진단|계측|로깅|로그/i;
 const FALLBACK_EXECUTION_PATTERN = /\bn\/a\b|no data|data unavailable|placeholder|fallback|not tracked|not available|usage unavailable|quota unavailable|정보 없음|데이터 없음|추적 불가|지원하지 않|표시를 .* 변경/i;
 const DATA_SOURCE_BLOCKER_PATTERN = /\b(?:quota|usage|remaining|stats model|retrieveuserquota|unsupported|unavailable|not expose|not exposed|missing data source|blocked by missing source)\b|지원하지 않|노출하지 않|불가|제약|데이터 소스/i;
 const REPOSITORY_EVIDENCE_PATTERN = /\bsrc\/|tool-manager\.ts|renderer\/app\.ts|main\/types\.ts/i;
 const EXTERNAL_SURFACE_EVIDENCE_PATTERN = /managed-tools|gemini-cli|\/stats model|retrieveuserquota|codeassist|\.gemini|auth login status/i;
+const DIAGNOSTIC_WORKAROUND_PATTERN = /\b(?:instrument(?:ation)?|diagnostic logging|debug logging|log(?:ging)?|gemini_debug\.log|runJsonCommand|stdout|stderr|trace)\b|계측|진단용 로깅|디버그 로그|stdout|stderr/i;
+const DEFERRED_DIAGNOSTIC_SIGNAL_PATTERN = /\b(?:has not been generated yet|awaiting a real cli call|awaiting a real CLI call|future stdout|future stderr|will capture future)\b|아직 생성되지 않았|실제 CLI 호출을 기다리|향후 .*stdout|향후 .*stderr/i;
+const EXTERNAL_BLOCKER_PATTERN = /\b(?:operation not permitted|permission denied|access denied|blocked by sandbox|sandbox restrictions|raw payload|raw stdout|raw stderr|payload sample|approval required)\b|샌드박스|권한 거부|승인 필요|외부 경로 읽기 승인|원시 payload|원시 stdout|원시 stderr/i;
 
 type RootPhaseResults = {
   abstractPlan: AbstractPlanResult;
@@ -556,6 +561,7 @@ export class OrchestratorRuntime {
           (concretePlan.additionalGatherObjectives ?? [concretePlan.summary]).join(" | ")
         );
       }
+      this.failIfDiagnosticWorkaroundNeedsExternalEvidence(currentNode, consolidatedEvidence, concretePlan);
     }
 
     if (!isProjectStructureInspection) {
@@ -816,6 +822,35 @@ export class OrchestratorRuntime {
       );
       this.recordExecutionStatus(currentNode, "verification_failed", verificationSummary, {
         signal: unresolvedSuccessSignal
+      });
+    }
+    const deferredDiagnosticSignal = verificationPassed
+      ? this.findDeferredDiagnosticWorkaroundSignal(currentNode, [
+          execute.summary,
+          ...execute.outputs,
+          verify.summary,
+          ...verify.findings,
+          review?.summary,
+          ...(review?.followUpQuestions ?? []),
+          ...((review?.nextActions ?? []).flatMap((nextAction) => [
+            nextAction.title,
+            nextAction.objective,
+            nextAction.rationale
+          ]))
+        ])
+      : null;
+    if (deferredDiagnosticSignal) {
+      verificationPassed = false;
+      verificationSummary =
+        "Verification reported success but the run only added diagnostic instrumentation that is still awaiting future evidence.";
+      this.recordDecision(
+        currentNode.runId,
+        verifyStage.stageNode.id,
+        "Verification flagged deferred diagnostic workaround",
+        verificationSummary
+      );
+      this.recordExecutionStatus(currentNode, "verification_failed", verificationSummary, {
+        signal: deferredDiagnosticSignal
       });
     }
 
@@ -1595,6 +1630,7 @@ export class OrchestratorRuntime {
         "Concrete plan updated after focused gather",
         concretePlan.summary
       );
+      this.failIfDiagnosticWorkaroundNeedsExternalEvidence(currentNode, consolidatedEvidence, concretePlan);
     }
 
     return {
@@ -2690,6 +2726,116 @@ export class OrchestratorRuntime {
         "Execution is deferred until the missing or unsupported data source is established with explicit evidence."
       ])
     };
+  }
+
+  private failIfDiagnosticWorkaroundNeedsExternalEvidence(
+    node: PlanNode,
+    consolidatedEvidence: EvidenceBundle,
+    concretePlan: ConcretePlanResult
+  ) {
+    if (!this.isRealDataOutcomeRequest(node.objective)) {
+      return;
+    }
+
+    const planText = this.buildConcretePlanSearchText(concretePlan);
+    if (!DIAGNOSTIC_WORKAROUND_PATTERN.test(planText)) {
+      return;
+    }
+
+    const evidenceText = this.buildRunEvidenceSearchText(node.runId, consolidatedEvidence);
+    const hasExternalSurfaceEvidence = EXTERNAL_SURFACE_EVIDENCE_PATTERN.test(evidenceText);
+    const hasStableExternalBlocker = EXTERNAL_BLOCKER_PATTERN.test(evidenceText);
+    if (!hasExternalSurfaceEvidence || !hasStableExternalBlocker) {
+      return;
+    }
+
+    const blockerMessage =
+      "External path read approval or one raw Gemini CLI payload/stderr sample is required before more planning. Another internal diagnostic logging or instrumentation change will not resolve the current n/a result.";
+    this.recordDecision(node.runId, node.id, "External evidence required before implementation", blockerMessage);
+    this.engine.appendEvent(node.runId, node.id, "scheduler_progress", {
+      message: "Stopping diagnostic workaround because external approval or raw payload evidence is required",
+      blocker: blockerMessage
+    });
+    throw new Error(blockerMessage);
+  }
+
+  private findDeferredDiagnosticWorkaroundSignal(
+    node: PlanNode,
+    texts: Iterable<string | null | undefined>
+  ): string | null {
+    if (!this.isRealDataOutcomeRequest(node.objective)) {
+      return null;
+    }
+
+    const combined = [...texts]
+      .filter((text): text is string => typeof text === "string")
+      .map((text) => text.trim())
+      .filter((text) => text.length > 0)
+      .join("\n");
+    if (combined.length === 0) {
+      return null;
+    }
+
+    if (!DIAGNOSTIC_WORKAROUND_PATTERN.test(combined)) {
+      return null;
+    }
+
+    if (!DEFERRED_DIAGNOSTIC_SIGNAL_PATTERN.test(combined)) {
+      return null;
+    }
+
+    return "diagnostic-workaround";
+  }
+
+  private isRealDataOutcomeRequest(objective: string): boolean {
+    if (DIAGNOSTIC_REQUEST_PATTERN.test(objective)) {
+      return false;
+    }
+
+    return PRECISE_DATA_REQUEST_PATTERN.test(objective) || REAL_DATA_RESULT_REQUEST_PATTERN.test(objective);
+  }
+
+  private buildConcretePlanSearchText(concretePlan: ConcretePlanResult): string {
+    return [
+      concretePlan.summary,
+      ...concretePlan.executionNotes,
+      ...(concretePlan.additionalGatherObjectives ?? []),
+      ...concretePlan.childTasks.flatMap((task) => [task.title, task.objective])
+    ]
+      .filter((entry) => entry.length > 0)
+      .join("\n");
+  }
+
+  private buildRunEvidenceSearchText(runId: string, consolidatedEvidence: EvidenceBundle): string {
+    const workingMemory = this.getWorkingMemorySnapshot(runId);
+    const projectStructure = this.getProjectStructureSnapshot(runId);
+
+    return [
+      consolidatedEvidence.summary,
+      ...consolidatedEvidence.facts.map((fact) => fact.statement),
+      ...consolidatedEvidence.hypotheses.map((hypothesis) => hypothesis.statement),
+      ...consolidatedEvidence.unknowns.map((unknown) => unknown.question),
+      ...consolidatedEvidence.relevantTargets.flatMap((target) => [
+        target.filePath ?? "",
+        target.symbol ?? "",
+        target.note ?? ""
+      ]),
+      ...consolidatedEvidence.references.flatMap((reference) => [
+        reference.note ?? "",
+        reference.location?.filePath ?? "",
+        reference.location?.symbol ?? "",
+        reference.location?.label ?? "",
+        reference.location?.uri ?? ""
+      ]),
+      ...consolidatedEvidence.snippets.map((snippet) => snippet.content),
+      ...workingMemory.decisions.flatMap((decision) => [decision.summary, decision.rationale]),
+      ...workingMemory.openQuestions.map((question) => question.question),
+      ...workingMemory.unknowns.map((unknown) => unknown.description),
+      ...projectStructure.openQuestions.map((question) => question.question),
+      ...projectStructure.contradictions.map((contradiction) => contradiction.summary)
+    ]
+      .filter((entry) => entry.length > 0)
+      .join("\n");
   }
 
   private buildGatherContractCues(input: {

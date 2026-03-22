@@ -401,6 +401,55 @@ test("tool manager maps Gemini /stats model remaining percent onto the selected 
   }
 });
 
+test("tool manager prefers a Codex mini-family model for worker recommendations even when the default model is full size", () => {
+  const userData = createTempDirectory("tasksaw-user-data-");
+
+  try {
+    const manager = new ToolManager(userData);
+    const selectRecommendedWorkerModelId = (
+      manager as unknown as {
+        selectCodexRecommendedWorkerModelId: (
+          models: Array<{
+            id: string;
+            model: string;
+            hidden: boolean;
+            isDefault: boolean;
+            defaultReasoningEffort: string | null;
+            supportedReasoningEfforts: string[];
+          }>,
+          currentModelId: string | null
+        ) => string | null;
+      }
+    ).selectCodexRecommendedWorkerModelId.bind(manager);
+
+    const recommendedWorkerModelId = selectRecommendedWorkerModelId(
+      [
+        {
+          id: "gpt-5.4",
+          model: "gpt-5.4",
+          hidden: false,
+          isDefault: true,
+          defaultReasoningEffort: "high",
+          supportedReasoningEfforts: ["medium", "high", "xhigh"]
+        },
+        {
+          id: "gpt-5.4-mini",
+          model: "gpt-5.4-mini",
+          hidden: false,
+          isDefault: false,
+          defaultReasoningEffort: "medium",
+          supportedReasoningEfforts: ["low", "medium", "high"]
+        }
+      ],
+      "gpt-5.4"
+    );
+
+    assert.equal(recommendedWorkerModelId, "gpt-5.4-mini");
+  } finally {
+    fs.rmSync(userData, { recursive: true, force: true });
+  }
+});
+
 test("tool manager computes Gemini remaining percent from quota and usage fields", async () => {
   const userData = createTempDirectory("tasksaw-user-data-");
 
@@ -442,6 +491,51 @@ test("tool manager computes Gemini remaining percent from quota and usage fields
         models: [
           { modelId: "gemini-2.5-pro", displayName: "2.5 Pro", remainingPercent: 58 },
           { modelId: "gemini-2.5-flash", displayName: "2.5 Flash", remainingPercent: 90 }
+        ]
+      }
+    });
+  } finally {
+    fs.rmSync(userData, { recursive: true, force: true });
+  }
+});
+
+test("tool manager falls back to generic usage when model-specific data is missing", async () => {
+  const userData = createTempDirectory("tasksaw-user-data-");
+
+  try {
+    const manager = new ToolManager(userData);
+    const managerStub = manager as unknown as {
+      discoverModelCatalog: (toolId: "gemini") => Promise<{
+        currentModelId: string;
+        models: Array<{ id: string; displayName: string; hidden: boolean }>;
+      }>;
+      queryGeminiModelUsageStats: () => Promise<unknown>;
+      getGeminiUsage: () => Promise<{
+        remainingPercent: number | null;
+        gemini: {
+          models: Array<{ modelId: string; displayName: string; remainingPercent: number | null }>;
+        };
+      } | null>;
+    };
+
+    managerStub.discoverModelCatalog = async () => ({
+      currentModelId: "gemini-2.5-pro",
+      models: [
+        { id: "gemini-2.5-pro", displayName: "Gemini 2.5 Pro", hidden: false }
+      ]
+    });
+    managerStub.queryGeminiModelUsageStats = async () => ({
+      quota: 100,
+      used: 25
+    });
+
+    const usage = await managerStub.getGeminiUsage();
+
+    assert.deepEqual(usage, {
+      remainingPercent: 75,
+      gemini: {
+        models: [
+          { modelId: "gemini-2.5-pro", displayName: "2.5 Pro", remainingPercent: 75 }
         ]
       }
     });

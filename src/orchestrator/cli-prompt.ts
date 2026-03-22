@@ -299,6 +299,7 @@ function buildStageInstructions(
       "If the key blocker is a missing or unsupported data source rather than ambiguous repository structure, keep needsProjectStructureInspection=false and explain the blocker or fallback in executionNotes or childTasks.",
       "Do not downgrade an exact-data request into a UI fallback, placeholder label, or 'n/a' plan unless the gathered evidence already contains explicit blocker facts about the missing or unsupported data source.",
       "If the user asked for exact, actual, precise, or real data and that blocker evidence is still weak, set needsAdditionalGather=true and ask for the narrowest follow-up proof instead of declaring the fallback ready.",
+      "If blocker evidence already shows that external-path approval or one raw payload/stderr sample is required, do not convert that into an instrumentation, diagnostic logging, temp log file, or gemini_debug.log plan. Surface the blocker directly instead.",
       "Do not call tools, create temp files, or run shell commands during concrete planning. Use only the provided memory and gathered evidence.",
       "If the current evidence is still too broad for execution but one more focused plan/gather pass would materially narrow the scope, set needsAdditionalGather=true, keep childTasks empty when possible, and return 1-3 explicit additionalGatherObjectives.",
       "Use needsAdditionalGather only for narrow follow-up evidence collection. Do not punt broad discovery back to gather.",
@@ -338,6 +339,7 @@ function buildStageInstructions(
       "If an external CLI/API surface already appears absent or unsupported, stop after enough evidence to establish that fact. Do not keep probing undocumented alternative commands, slash commands, or ad hoc flags.",
       "Do not pivot from a named external surface to local cache, log, temp, or home-directory files until one direct capability check against that named surface has failed or returned explicit blocker evidence.",
       "If the user asked for exact or actual data, do not treat a UI fallback label as sufficient. Gather one direct proof about the narrowest missing or unsupported data source before recommending that fallback.",
+      "Do not turn missing external evidence into a workspace logging or instrumentation plan. If the next required step is external-path approval or one raw payload/stderr sample, return that blocker directly in the gathered evidence.",
       "When probing an external CLI surface, prefer one documented help/usage check and one direct capability check. Do not spend gather budget on multiple synonymous command variants that test the same hypothesis.",
       "In a focused follow-up gather pass, inspect named files, symbols, or managed-tool surfaces directly instead of rediscovering whether they exist.",
       "Do not spend focused gather budget on existence-only commands such as find-by-name sweeps, plain ls path checks, recursive ls listings, or broad *.md/settings.json searches when the target path is already named in memory.",
@@ -364,6 +366,7 @@ function buildStageInstructions(
       "Verify the requested user-visible behavior, not just the presence of code changes or lint/build success.",
       "A generic success claim is insufficient. State the concrete observed behavior or the concrete blocker that justifies the verdict.",
       "Set passed=false if any requested behavior still relies on placeholder, fallback, no-data, or unsupported upstream sources instead of the requested real result.",
+      "Set passed=false if the run only added diagnostic logging or instrumentation and the promised log, payload, or external evidence has not actually been produced yet.",
       "When additional tests are necessary in this TypeScript workspace, prefer the project's documented scripts or built dist tests after a build instead of raw node --test src/**/*.ts entrypoints.",
       "Do not modify files, create temp scripts or temp files, run builds, or attempt follow-up fixes during verify.",
       "Use already captured evidence first and keep any additional inspection strictly read-only and minimal."

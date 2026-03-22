@@ -2503,6 +2503,256 @@ test("runtime rejects claimed verification success when model output still conta
   );
 });
 
+test("runtime stops diagnostic instrumentation plans when real data still needs external approval or a raw payload", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan"]),
+      {
+        abstractPlan: () => ({
+          summary: "Inspect the narrowest Gemini usage path",
+          targetsToInspect: ["src/main/tool-manager.ts", "/Users/test/managed-tools/bin/gemini"],
+          evidenceRequirements: ["Confirm why Gemini remainingPercent is still null"]
+        }),
+        concretePlan: () => ({
+          summary: "Instrument runJsonCommand and append stdout/stderr to gemini_debug.log",
+          childTasks: [],
+          executionNotes: [
+            "Add diagnostic logging inside runJsonCommand so future Gemini CLI calls dump raw stdout and stderr."
+          ]
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => ({
+          summary: "Managed Gemini surface is blocked and still needs direct external evidence",
+          evidenceBundles: [
+            {
+              id: "gemini-external-blocker",
+              summary: "External blocker evidence",
+              facts: [
+                {
+                  id: "remaining-null",
+                  statement: "Gemini usage still reaches remainingPercent:null in src/main/tool-manager.ts.",
+                  confidence: "high",
+                  referenceIds: []
+                },
+                {
+                  id: "permission-blocked",
+                  statement:
+                    "Direct reads of managed-tools Gemini paths failed with Operation not permitted, so external-path approval or one raw payload/stderr sample is still required.",
+                  confidence: "high",
+                  referenceIds: []
+                }
+              ],
+              hypotheses: [],
+              unknowns: [],
+              relevantTargets: [
+                { filePath: "src/main/tool-manager.ts" },
+                { note: "managed-tools Gemini CLI /stats model surface" }
+              ],
+              snippets: [
+                {
+                  id: "permission-terminal",
+                  kind: "terminal",
+                  content: "ls \"$HOME/Library/Application Support/TaskSaw/managed-tools/packages/gemini\": Operation not permitted",
+                  rationale: "Direct permission blocker"
+                }
+              ],
+              references: [
+                {
+                  id: "managed-cli-proof",
+                  sourceType: "terminal",
+                  note: "Managed Gemini CLI capability check failed with Operation not permitted"
+                }
+              ],
+              confidence: "high"
+            }
+          ]
+        })
+      },
+      trace
+    )
+  );
+
+  let capturedSnapshot: RunSnapshot | undefined;
+  const runtime = new OrchestratorRuntime(registry, {
+    persistence: {
+      saveSnapshot(snapshot: RunSnapshot) {
+        capturedSnapshot = snapshot;
+      }
+    } as never
+  });
+
+  await assert.rejects(
+    runtime.executeScheduledRun({
+      goal: "Gemini 사용량이 아직도 n/a라서 실제 값을 보여줘",
+      assignedModels: {
+        abstractPlanner: planner,
+        gatherer,
+        concretePlanner: planner
+      },
+      reviewPolicy: "none"
+    }),
+    /External path read approval or one raw Gemini CLI payload\/stderr sample is required/
+  );
+
+  assert.deepEqual(trace, [
+    "abstract:planner-upper",
+    "gather:gather-lower",
+    "concrete:planner-upper"
+  ]);
+  assert.ok(capturedSnapshot);
+  const snapshot = capturedSnapshot as RunSnapshot;
+  assert.equal(snapshot.run.status, "escalated");
+  assert.equal(
+    snapshot.events.some((event) =>
+      event.type === "scheduler_progress"
+      && String(event.payload.message).includes("Stopping diagnostic workaround")
+    ),
+    true
+  );
+});
+
+test("runtime rejects verification success when only diagnostic instrumentation was added and no real evidence was produced", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        abstractPlan: () => ({
+          summary: "Inspect the Gemini usage path",
+          targetsToInspect: ["src/main/tool-manager.ts"],
+          evidenceRequirements: ["Confirm why Gemini usage still shows n/a"]
+        }),
+        concretePlan: () => ({
+          summary: "Execution is ready",
+          childTasks: [],
+          executionNotes: []
+        }),
+        verify: () => ({
+          summary:
+            "Verified the instrumentation wiring, but gemini_debug.log has not been generated yet because we are still awaiting a real CLI call.",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => ({
+          summary: "Gather complete",
+          evidenceBundles: []
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Added diagnostic logging to runJsonCommand and gemini_debug.log output.",
+          outputs: ["instrumented-gemini-debug-log"],
+          completed: true
+        })
+      },
+      trace
+    )
+  );
+
+  let capturedSnapshot: RunSnapshot | undefined;
+  const runtime = new OrchestratorRuntime(registry, {
+    persistence: {
+      saveSnapshot(snapshot: RunSnapshot) {
+        capturedSnapshot = snapshot;
+      }
+    } as never
+  });
+
+  await assert.rejects(
+    runtime.executeScheduledRun({
+      goal: "Gemini 사용량이 n/a 대신 실제 값으로 보여야 한다",
+      assignedModels: {
+        abstractPlanner: planner,
+        gatherer,
+        concretePlanner: planner,
+        executor,
+        verifier: planner
+      },
+      reviewPolicy: "none"
+    }),
+    /diagnostic instrumentation that is still awaiting future evidence/
+  );
+
+  assert.ok(capturedSnapshot);
+  const snapshot = capturedSnapshot as RunSnapshot;
+  assert.equal(snapshot.run.status, "escalated");
+  assert.equal(
+    snapshot.events.some((event) =>
+      event.type === "run_failed"
+      && String(event.payload.error).includes("diagnostic instrumentation that is still awaiting future evidence")
+    ),
+    true
+  );
+});
+
 test("runtime does not fail successful verification just because raw execute output mentions placeholder text", async () => {
   const trace: string[] = [];
   const registry = new ModelAdapterRegistry();

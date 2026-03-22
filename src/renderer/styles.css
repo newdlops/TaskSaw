@@ -1714,6 +1714,8 @@ body[data-has-sessions="false"] #sidebar {
   display: grid;
   place-items: center;
   padding: 20px;
+  box-sizing: border-box;
+  overflow: hidden;
   background: rgba(15, 23, 42, 0.26);
   backdrop-filter: blur(10px);
   z-index: 30;
@@ -1721,9 +1723,13 @@ body[data-has-sessions="false"] #sidebar {
 
 .session-dialog-card {
   width: min(560px, 100%);
+  max-width: 100%;
   display: grid;
   gap: 16px;
   padding: 20px;
+  box-sizing: border-box;
+  min-width: 0;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 18px;
   background: var(--surface-strong);
@@ -1752,9 +1758,11 @@ body[data-has-sessions="false"] #sidebar {
 
 .interactive-session-dialog-card {
   width: min(1180px, 100%);
+  max-width: min(1180px, calc(100vw - 40px));
   max-height: min(86vh, 960px);
   grid-template-rows: auto auto auto minmax(0, 1fr);
   min-height: 0;
+  min-width: 0;
 }
 
 .interactive-session-dialog-command {
@@ -1765,11 +1773,32 @@ body[data-has-sessions="false"] #sidebar {
 
 .interactive-session-dialog-terminal {
   min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
   height: min(60vh, 680px);
   border-radius: 14px;
   border: 1px solid var(--border);
   background: rgba(2, 6, 23, 0.92);
   overflow: hidden;
+}
+
+#interactive-session-dialog-terminal,
+#interactive-session-dialog-terminal .xterm,
+#interactive-session-dialog-terminal .xterm-screen,
+#interactive-session-dialog-terminal .xterm-viewport {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+
+#interactive-session-dialog-terminal .xterm {
+  overflow: hidden;
+}
+
+#interactive-session-dialog-terminal .xterm-screen canvas {
+  display: block;
+  max-width: 100%;
 }
 
 .approval-dialog-list {

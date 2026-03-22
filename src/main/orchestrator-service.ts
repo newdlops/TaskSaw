@@ -803,8 +803,22 @@ export class OrchestratorService {
   }
 
   private selectCodexWorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef | undefined): ModelRef | undefined {
-    const selectedModel = this.findCatalogModel(catalog, catalog.recommendedWorkerModelId)
-      ?? this.findCatalogModel(catalog, catalog.currentModelId)
+    const preferredMiniModel = this.pickBestCandidate(
+      this.listSelectableModels(catalog).filter((model) => this.isCodexMiniFamilyModel(model.model)),
+      (model) =>
+        (model.hidden ? -1_000_000 : 0)
+        + (model.isDefault ? 10_000 : 0)
+        + (this.scoreLighterReasoningPreference(model) * 10)
+    );
+    const recommendedWorkerModel = this.findCatalogModel(catalog, catalog.recommendedWorkerModelId);
+    const currentModel = this.findCatalogModel(catalog, catalog.currentModelId);
+    const selectedModel = (recommendedWorkerModel && (this.isCodexMiniFamilyModel(recommendedWorkerModel.model) || !preferredMiniModel))
+      ? recommendedWorkerModel
+      : (currentModel && this.isCodexMiniFamilyModel(currentModel.model))
+        ? currentModel
+        : preferredMiniModel
+          ?? recommendedWorkerModel
+          ?? currentModel
       ?? this.pickBestCandidate(this.listSelectableModels(catalog), (model) =>
         (model.hidden ? -1_000_000 : 0)
         + (model.isDefault ? 10_000 : 0)
@@ -850,6 +864,10 @@ export class OrchestratorService {
 
   private isConcreteGeminiModel(model: string): boolean {
     return model.startsWith("gemini-") && !model.startsWith("auto-") && !model.includes("customtools");
+  }
+
+  private isCodexMiniFamilyModel(model: string): boolean {
+    return model.toLowerCase().includes("mini");
   }
 
   private normalizeReasoningEffort(value: string | null | undefined): ModelRef["reasoningEffort"] {

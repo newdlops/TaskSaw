@@ -261,6 +261,8 @@ export class ToolManager {
     const env = this.buildManagedCommandEnv("gemini", launchCommand.env);
     const commandAttempts = [
       ["/stats", "model", "--json"],
+      ["/stats", "session", "--json"],
+      ["retrieveuserquota", "--json"],
       ["-p", "/stats model", "-o", "json"]
     ];
 
@@ -286,9 +288,14 @@ export class ToolManager {
     });
 
     let stdout = "";
+    let stderr = "";
 
     child.stdout?.on("data", (chunk) => {
       stdout += chunk.toString();
+    });
+
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
     });
 
     return await new Promise((resolve) => {
@@ -297,8 +304,30 @@ export class ToolManager {
         resolve(null);
       }, timeoutMs);
 
+      const logExecution = (code: number | null, error?: Error) => {
+        const logPath = path.join(process.cwd(), "gemini_debug.log");
+        const timestamp = new Date().toISOString();
+        const logEntries = [
+          `--- ${timestamp} ---`,
+          `Command: ${command}`,
+          `Args: ${JSON.stringify(args)}`,
+          `Exit Code: ${code}`
+        ];
+        if (error) logEntries.push(`Error: ${error.message}`);
+        logEntries.push(`STDOUT: ${stdout}`);
+        logEntries.push(`STDERR: ${stderr}`);
+        logEntries.push("---------------------------\n");
+
+        try {
+          fs.appendFileSync(logPath, logEntries.join("\n"));
+        } catch {
+          // Ignore logging failures
+        }
+      };
+
       child.on("close", (code) => {
         clearTimeout(timeout);
+        logExecution(code);
         if (code !== 0) {
           resolve(null);
           return;
@@ -311,8 +340,9 @@ export class ToolManager {
         }
       });
 
-      child.on("error", () => {
+      child.on("error", (err) => {
         clearTimeout(timeout);
+        logExecution(null, err);
         resolve(null);
       });
     });
@@ -350,24 +380,34 @@ export class ToolManager {
       "id",
       "name",
       "displayName",
-      "display_name"
+      "display_name",
+      "modelName"
     ]);
     const remainingPercent = this.readGeminiRemainingPercent(value);
 
-    if (modelId === null || remainingPercent === null) {
+    if (remainingPercent === null) {
       return null;
     }
 
     return {
-      modelId,
+      modelId: modelId ?? "unknown",
       remainingPercent
     };
   }
 
   private findGeminiRemainingPercentForModel(modelId: string, records: GeminiUsageRecord[]): number | null {
     const normalizedModelId = this.normalizeGeminiModelIdentifier(modelId);
+    let bestMatch: number | null = null;
+
     for (const record of records) {
-      if (record.remainingPercent === null || record.modelId === null) {
+      if (record.remainingPercent === null) {
+        continue;
+      }
+
+      if (record.modelId === "unknown" || !record.modelId) {
+        if (bestMatch === null) {
+          bestMatch = record.remainingPercent;
+        }
         continue;
       }
 
@@ -376,7 +416,7 @@ export class ToolManager {
       }
     }
 
-    return null;
+    return bestMatch;
   }
 
   private normalizeGeminiModelIdentifier(value: string): string {
@@ -395,13 +435,27 @@ export class ToolManager {
       return this.clampPercentage(directPercent);
     }
 
-    const remaining = this.readFirstNumber(value, ["remaining", "remainingQuota", "remaining_quota"]);
-    const quota = this.readFirstNumber(value, ["quota", "limit", "max", "total", "totalQuota", "total_quota"]);
+    const remaining = this.readFirstNumber(value, [
+      "remaining",
+      "remainingQuota",
+      "remaining_quota",
+      "left",
+      "available"
+    ]);
+    const quota = this.readFirstNumber(value, [
+      "quota",
+      "limit",
+      "max",
+      "total",
+      "totalQuota",
+      "total_quota",
+      "capacity"
+    ]);
     if (remaining !== null && quota !== null && quota > 0) {
       return this.clampPercentage((remaining / quota) * 100);
     }
 
-    const used = this.readFirstNumber(value, ["used", "usage", "usedQuota", "used_quota", "consumed"]);
+    const used = this.readFirstNumber(value, ["used", "usage", "usedQuota", "used_quota", "consumed", "count"]);
     if (used !== null && quota !== null && quota > 0) {
       return this.clampPercentage(((quota - used) / quota) * 100);
     }
@@ -873,9 +927,22 @@ export class ToolManager {
   ): string | null {
     const visibleModels = models.filter((model) => !model.hidden);
     const selectableModels = visibleModels.length > 0 ? visibleModels : models;
+    const preferredMiniModel = this.pickBestCatalogModel(
+      selectableModels.filter((model) => this.isCodexMiniFamilyModel(model.model)),
+      (model) =>
+        (model.hidden ? -1_000_000 : 0)
+        + (model.isDefault ? 10_000 : 0)
+        - (this.scoreManagedReasoningCapability(model) * 10)
+    );
     const currentModel = currentModelId
       ? selectableModels.find((model) => model.id === currentModelId || model.model === currentModelId)
       : undefined;
+    if (currentModel && this.isCodexMiniFamilyModel(currentModel.model)) {
+      return currentModel.id;
+    }
+    if (preferredMiniModel) {
+      return preferredMiniModel.id;
+    }
     if (currentModel) {
       return currentModel.id;
     }
@@ -897,6 +964,10 @@ export class ToolManager {
     }
 
     return this.discoverGeminiModelCatalog(workspacePath);
+  }
+
+  private isCodexMiniFamilyModel(model: string): boolean {
+    return model.toLowerCase().includes("mini");
   }
 
   private async getCodexAuthenticationStatus(workspacePath?: string | null): Promise<ManagedToolAuthState> {
