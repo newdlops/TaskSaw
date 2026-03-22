@@ -2700,6 +2700,11 @@ export class OrchestratorRuntime {
     consolidatedEvidence: EvidenceBundle,
     concretePlan: ConcretePlanResult
   ): ConcretePlanResult {
+    const attempt = this.focusedGatherAttemptsByNode.get(node.id) ?? 0;
+    if (attempt > 0) {
+      return concretePlan;
+    }
+
     if (concretePlan.needsAdditionalGather) {
       return concretePlan;
     }
@@ -2777,6 +2782,11 @@ export class OrchestratorRuntime {
     consolidatedEvidence: EvidenceBundle,
     concretePlan: ConcretePlanResult
   ): ConcretePlanResult {
+    const attempt = this.focusedGatherAttemptsByNode.get(node.id) ?? 0;
+    if (attempt > 0) {
+      return concretePlan;
+    }
+
     if (!this.isRealDataOutcomeRequest(node.objective)) {
       return concretePlan;
     }

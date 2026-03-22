@@ -383,6 +383,12 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
       if (embedded !== null) return embedded;
     }
 
+    const match = rawText.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+    if (match) {
+      const fallback = this.tryParseJson(match[0].trim());
+      if (fallback !== null) return fallback;
+    }
+
     throw new Error("No valid JSON object was found in CLI output");
   }
 
