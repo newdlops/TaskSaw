@@ -411,6 +411,30 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               promptActivity.touch();
 
               const requestGuardrailOverride = async (guardrailReason: string): Promise<OrchestratorApprovalDecision> => {
+                const isGuessAndTestLoopBlocker = guardrailReason.includes("interactive") ||
+                  (guardrailReason.includes("unauthorized") && guardrailReason.includes("CLI")) ||
+                  guardrailReason.includes("re-mine") ||
+                  guardrailReason.includes("already attempted in this phase");
+
+                if (capability === "gather" && isGuessAndTestLoopBlocker) {
+                  const reason = `Auto-rejected during gather to prevent blind execution loops: ${guardrailReason}. Please use static analysis (e.g. reading source code, --help manuals) instead of guessing CLI arguments.`;
+                  const decision: OrchestratorApprovalDecision = {
+                    outcome: "internally_cancelled",
+                    reason
+                  };
+                  context.reportProgress?.(
+                    reason,
+                    {
+                       capability,
+                       model: modelId,
+                       toolCall: toolCallSummary ?? null,
+                       guardrailReason
+                    }
+                  );
+                  promptActivity.touch();
+                  return decision;
+                }
+
                 if (!context.requestUserApproval) {
                   const decision: OrchestratorApprovalDecision = {
                     outcome: "internally_cancelled",

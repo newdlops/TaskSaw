@@ -311,14 +311,37 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
         request.method === "item/commandExecution/requestApproval"
         || request.method === "item/fileChange/requestApproval"
       ) {
+        const message = buildCodexApprovalMessage(request.method, params);
+        const details = buildCodexApprovalDetails(request.method, params);
+        
+        const reasonStr = `${message}\n${details ?? ""}`;
+        const isGuessAndTestLoopBlocker = reasonStr.includes("interactive") ||
+          (reasonStr.includes("unauthorized") && reasonStr.includes("CLI")) ||
+          reasonStr.includes("re-mine") ||
+          reasonStr.includes("already attempted in this phase");
+
+        if (capability === "gather" && isGuessAndTestLoopBlocker) {
+          const rejectReason = `Auto-rejected during gather to prevent blind execution loops: ${message}. Please use static analysis (e.g. reading source code, --help manuals) instead of guessing CLI arguments.`;
+          context.reportProgress?.(
+            rejectReason,
+            {
+              capability,
+              model: context.assignedModel.model,
+              guardrailReason: message
+            }
+          );
+          sendError(request.id, rejectReason);
+          return;
+        }
+
         const approvalOptions = buildCodexApprovalOptions(request.method);
         const approval = await context.requestUserApproval?.({
           abortSignal: context.abortSignal,
           title: request.method === "item/fileChange/requestApproval"
             ? "Codex file change approval"
             : "Codex command approval",
-          message: buildCodexApprovalMessage(request.method, params),
-          details: buildCodexApprovalDetails(request.method, params),
+          message,
+          details,
           kind: request.method,
           locations: extractCodexRequestLocations(params),
           options: approvalOptions
@@ -332,11 +355,34 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
       }
 
       if (request.method === "item/permissions/requestApproval") {
+        const message = buildCodexApprovalMessage(request.method, params);
+        const details = buildCodexApprovalDetails(request.method, params);
+
+        const reasonStr = `${message}\n${details ?? ""}`;
+        const isGuessAndTestLoopBlocker = reasonStr.includes("interactive") ||
+          (reasonStr.includes("unauthorized") && reasonStr.includes("CLI")) ||
+          reasonStr.includes("re-mine") ||
+          reasonStr.includes("already attempted in this phase");
+
+        if (capability === "gather" && isGuessAndTestLoopBlocker) {
+          const rejectReason = `Auto-rejected during gather to prevent blind execution loops: ${message}. Please use static analysis (e.g. reading source code, --help manuals) instead of guessing CLI arguments.`;
+          context.reportProgress?.(
+            rejectReason,
+            {
+              capability,
+              model: context.assignedModel.model,
+              guardrailReason: message
+            }
+          );
+          sendError(request.id, rejectReason);
+          return;
+        }
+
         const approval = await context.requestUserApproval?.({
           abortSignal: context.abortSignal,
           title: "Codex permission approval",
-          message: buildCodexApprovalMessage(request.method, params),
-          details: buildCodexApprovalDetails(request.method, params),
+          message,
+          details,
           kind: request.method,
           locations: extractCodexRequestLocations(params),
           options: [

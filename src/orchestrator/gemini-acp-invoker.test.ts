@@ -764,8 +764,8 @@ test("gemini ACP invoker requests approval before overriding repeated read-only 
 
   assert.equal(result.summary, "Gather completed with dedupe");
   assert.equal(firstOutcome, "selected");
-  assert.equal(secondOutcome, "selected");
-  assert.equal(approvalRequestCount, 2);
+  assert.equal(secondOutcome, "cancelled");
+  assert.equal(approvalRequestCount, 1);
   assert.equal(
     progressMessages.some(
       (entry) => entry.details?.guardrailReason === "Rejected Gemini tool call because this command was already attempted in this phase"
@@ -1943,11 +1943,11 @@ test("gemini ACP invoker flags focused-gather internal log re-mining before redi
   });
 
   assert.equal(result.summary, "Focused gather blocked internal log re-mining early");
-  assert.deepEqual(outcomes, ["selected", "selected"]);
-  assert.equal(approvalRequestCount, 2);
+  assert.deepEqual(outcomes, ["cancelled", "selected"]);
+  assert.equal(approvalRequestCount, 1);
   assert.equal(
     progressMessages.filter((entry) => entry.message === "Gemini guardrail override approved and waiting for result").length,
-    1
+    0
   );
   assert.equal(
     progressMessages.some(
@@ -2088,8 +2088,8 @@ test("gemini ACP invoker requests approval before overriding interactive transcr
   });
 
   assert.equal(result.summary, "Interactive transcript blocker was reused");
-  assert.deepEqual(outcomes, ["cancelled", "selected", "selected"]);
-  assert.equal(approvalRequestCount, 2);
+  assert.deepEqual(outcomes, ["cancelled", "cancelled", "selected"]);
+  assert.equal(approvalRequestCount, 1);
   assert.equal(interactiveSessionCount, 1);
   assert.equal(
     progressMessages.some((entry) => entry.message === "Interactive CLI transcript established blocker evidence for this investigation thread"),
@@ -2357,7 +2357,7 @@ test("gemini ACP invoker aborts a gather prompt after repeated cutoff rejections
     "Gather stopped early after repeated external CLI probing hit the cutoff. Continue planning from the workspace-local evidence collected so far."
   );
   assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "cancelled", "cancelled"]);
-  assert.equal(approvalRequestCount, 7);
+  assert.equal(approvalRequestCount, 5);
   assert.equal(
     progressMessages.some((entry) => entry.message === "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget"),
     true
