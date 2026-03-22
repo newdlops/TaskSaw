@@ -382,6 +382,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
           );
           let activeStdinMonitor: StdinWaitMonitorHandle | null = null;
           let stdinWaitDetectedCommand: string | null = null;
+          const stdinWaitAbort = new AbortController();
           const runtime: GeminiPromptRuntime = {
             capability,
             agentMessageChunks,
@@ -400,11 +401,6 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               if (activeStdinMonitor) {
                 activeStdinMonitor.stop();
                 activeStdinMonitor = null;
-              }
-
-              // Normalize slash command quotes in the tool call title
-              if (permissionRequest.toolCall?.title) {
-                permissionRequest.toolCall.title = normalizeSlashCommandQuotes(permissionRequest.toolCall.title);
               }
 
               if (readOnlyProbeGuardState.permissionCallbacksClosed) {
@@ -713,11 +709,11 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                     ?? permissionRequest.toolCall.title ?? "";
                   activeStdinMonitor = startStdinWaitMonitor(
                     session.child.pid,
-                    async (childPid) => {
+                    (childPid) => {
                       stdinWaitDetectedCommand = commandText;
                       activeStdinMonitor = null;
                       context.reportProgress?.(
-                        "Runtime stdin-wait detected; tearing down ACP session and opening interactive modal",
+                        "Runtime stdin-wait detected; aborting prompt to open interactive modal",
                         {
                           capability,
                           model: modelId,
@@ -725,36 +721,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                           detectedChildPid: childPid
                         }
                       );
-                      await invalidateSession(session);
-                      promptActivity.pause();
-                      try {
-                        const response = await context.requestInteractiveSession!({
-                          abortSignal: context.abortSignal,
-                          title: commandText,
-                          message: buildInteractiveSessionRequestMessage(context.outputLanguage),
-                          commandText,
-                          cwd: workspaceRoot
-                        });
-                        const transcript = response.transcript ?? "";
-                        if (transcript.trim().length > 0) {
-                          agentMessageChunks.push(transcript);
-                        }
-                        context.reportProgress?.(
-                          response.outcome === "completed"
-                            ? "Interactive session from stdin-wait detection completed"
-                            : "Interactive session from stdin-wait detection ended",
-                          {
-                            capability,
-                            model: modelId,
-                            toolCall: toolCallSummary ?? null,
-                            sessionOutcome: response.outcome ?? null,
-                            exitCode: response.exitCode ?? null
-                          }
-                        );
-                      } finally {
-                        promptActivity.resume();
-                        promptActivity.touch();
-                      }
+                      stdinWaitAbort.abort();
                     },
                     context.abortSignal
                   );
@@ -800,11 +767,11 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                     ?? permissionRequest.toolCall.title ?? "";
                   activeStdinMonitor = startStdinWaitMonitor(
                     session.child.pid,
-                    async (childPid) => {
+                    (childPid) => {
                       stdinWaitDetectedCommand = commandText;
                       activeStdinMonitor = null;
                       context.reportProgress?.(
-                        "Runtime stdin-wait detected; tearing down ACP session and opening interactive modal",
+                        "Runtime stdin-wait detected; aborting prompt to open interactive modal",
                         {
                           capability,
                           model: modelId,
@@ -812,36 +779,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                           detectedChildPid: childPid
                         }
                       );
-                      await invalidateSession(session);
-                      promptActivity.pause();
-                      try {
-                        const response = await context.requestInteractiveSession!({
-                          abortSignal: context.abortSignal,
-                          title: commandText,
-                          message: buildInteractiveSessionRequestMessage(context.outputLanguage),
-                          commandText,
-                          cwd: workspaceRoot
-                        });
-                        const transcript = response.transcript ?? "";
-                        if (transcript.trim().length > 0) {
-                          agentMessageChunks.push(transcript);
-                        }
-                        context.reportProgress?.(
-                          response.outcome === "completed"
-                            ? "Interactive session from stdin-wait detection completed"
-                            : "Interactive session from stdin-wait detection ended",
-                          {
-                            capability,
-                            model: modelId,
-                            toolCall: toolCallSummary ?? null,
-                            sessionOutcome: response.outcome ?? null,
-                            exitCode: response.exitCode ?? null
-                          }
-                        );
-                      } finally {
-                        promptActivity.resume();
-                        promptActivity.touch();
-                      }
+                      stdinWaitAbort.abort();
                     },
                     context.abortSignal
                   );
@@ -861,6 +799,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               capability,
               model: modelId
             });
+            const combinedAbortSignal = AbortSignal.any([context.abortSignal, stdinWaitAbort.signal]);
             const promptResult = await withAbort(
               promptActivity.wrap(
                 session.connection.prompt({
@@ -878,9 +817,13 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                   } : {})
                 }) as Promise<GeminiPromptResponse>
               ),
-              context.abortSignal,
+              combinedAbortSignal,
               async () => {
                 promptActivity.stop();
+                if (activeStdinMonitor) {
+                  activeStdinMonitor.stop();
+                  activeStdinMonitor = null;
+                }
                 await invalidateSession(session);
               },
               [
@@ -890,6 +833,9 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 `model=${modelId}`
               ].join(" · ")
             );
+
+            (activeStdinMonitor as StdinWaitMonitorHandle | null)?.stop();
+            activeStdinMonitor = null;
 
             const stdout = agentMessageChunks.join("");
             if (stdout.trim().length === 0) {
@@ -912,9 +858,54 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 command
               };
             }
+
+            // Handle runtime stdin-wait detection: the prompt was aborted because
+            // a child process entered stdin-waiting state. Open an interactive
+            // modal session and use its transcript as the output.
+            if (stdinWaitDetectedCommand && context.requestInteractiveSession) {
+              await invalidateSession(session);
+              try {
+                const response = await context.requestInteractiveSession({
+                  abortSignal: context.abortSignal,
+                  title: stdinWaitDetectedCommand,
+                  message: buildInteractiveSessionRequestMessage(context.outputLanguage),
+                  commandText: stdinWaitDetectedCommand,
+                  cwd: workspaceRoot
+                });
+                const transcript = response.transcript ?? "";
+                if (transcript.trim().length > 0) {
+                  agentMessageChunks.push(transcript);
+                }
+                context.reportProgress?.(
+                  response.outcome === "completed"
+                    ? "Interactive session from stdin-wait detection completed"
+                    : "Interactive session from stdin-wait detection ended",
+                  {
+                    capability,
+                    model: modelId,
+                    toolCall: stdinWaitDetectedCommand,
+                    sessionOutcome: response.outcome ?? null,
+                    exitCode: response.exitCode ?? null
+                  }
+                );
+              } catch {
+                // If interactive session request itself fails, fall through
+              }
+              const interactiveStdout = agentMessageChunks.join("");
+              return {
+                stdout: interactiveStdout.trim().length > 0
+                  ? interactiveStdout
+                  : `Interactive session for ${stdinWaitDetectedCommand} ended without output`,
+                stderr: session.stderrBuffer().slice(stderrStartIndex),
+                command
+              };
+            }
+
             throw error;
           } finally {
             promptActivity.stop();
+            (activeStdinMonitor as StdinWaitMonitorHandle | null)?.stop();
+            activeStdinMonitor = null;
             activeRuntime = null;
           }
         } catch (error) {

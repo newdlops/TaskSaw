@@ -149,6 +149,62 @@ export class PtyManager {
     session.ptyProcess.kill();
   }
 
+  async executeHiddenCommand(kind: ManagedToolId, commandText: string): Promise<string> {
+    this.ensureNodePtySpawnHelperExecutable();
+
+    const id = randomUUID();
+    const workspaceDirectory = os.tmpdir(); // Use tmp for short-lived commands
+    const sessionPaths = this.prepareSessionPaths(id, workspaceDirectory);
+
+    try {
+      const sessionEnv = this.buildSessionEnv(sessionPaths);
+      const { command, args, env: launchEnv } = await this.resolveManagedToolCommand(kind, sessionEnv, sessionPaths);
+      
+      const ptyProcess = pty.spawn(command, args, {
+        name: "xterm-256color",
+        cols: 120,
+        rows: 32,
+        cwd: workspaceDirectory,
+        env: launchEnv
+      });
+
+      return await new Promise((resolve) => {
+        let output = "";
+        const timeout = setTimeout(() => {
+          ptyProcess.kill();
+          resolve(output);
+        }, 10_000);
+
+        let commandSent = false;
+
+        ptyProcess.onData((data) => {
+          output += data;
+          
+          // Wait for a prompt-like output before sending the command, or just send it after a short delay
+          if (!commandSent && (data.includes("tasksaw") || data.includes("%") || data.includes(">"))) {
+            commandSent = true;
+            ptyProcess.write(`${commandText}\r`);
+          }
+
+          // If we see something that looks like the end of the command output (e.g., the prompt returns)
+          // and we have captured some actual output from the command
+          if (commandSent && output.split("\r\n").length > 3 && (data.includes("tasksaw") || data.includes("%") || data.includes(">"))) {
+            clearTimeout(timeout);
+            ptyProcess.kill();
+            resolve(output);
+          }
+        });
+
+        ptyProcess.onExit(() => {
+          clearTimeout(timeout);
+          resolve(output);
+        });
+      });
+    } finally {
+      this.removeSessionDirectory(sessionPaths.sessionDirectory);
+    }
+  }
+
   resetAllSessions() {
     const sessionIds = [...this.sessions.keys()];
 

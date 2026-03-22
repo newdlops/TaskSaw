@@ -104,6 +104,7 @@ export class ToolManager {
   private readonly resolvedModelCatalogs = new Map<string, ManagedToolModelCatalog>();
   private observedGeminiRemainingPercent: number | null = null;
   private observedGeminiStatusMessage: string | null = null;
+  private ptyExecutor?: (kind: ManagedToolId, commandText: string) => Promise<string>;
 
   constructor(private userDataDirectory: string) {
     this.toolingRoot = path.join(userDataDirectory, "managed-tools");
@@ -112,6 +113,10 @@ export class ToolManager {
     this.homeDirectory = path.join(this.toolingRoot, "home");
     this.runtimeDirectory = path.join(this.toolingRoot, "runtime");
     this.ensureBaseDirectories();
+  }
+
+  setPtyExecutor(executor: (kind: ManagedToolId, commandText: string) => Promise<string>) {
+    this.ptyExecutor = executor;
   }
 
   updateObservedGeminiUsage(percent: number | null, message: string | null = null) {
@@ -242,13 +247,13 @@ export class ToolManager {
           return {
             modelId: model.id,
             displayName,
-            remainingPercent: this.findGeminiRemainingPercentForModel(model.id, usageRecords)
+            remainingPercent: this.findGeminiRemainingPercentForModel(model.id, usageRecords, false)
           };
         });
 
       const selectedModelId = catalog.currentModelId ?? models[0]?.modelId ?? null;
       let remainingPercent = selectedModelId
-        ? this.findGeminiRemainingPercentForModel(selectedModelId, usageRecords)
+        ? this.findGeminiRemainingPercentForModel(selectedModelId, usageRecords, true)
         : null;
 
       let statusMessage = this.observedGeminiStatusMessage;
@@ -278,6 +283,8 @@ export class ToolManager {
 
     const env = this.buildManagedCommandEnv("gemini", launchCommand.env);
     const commandAttempts = [
+      ["-p", "/stats", "session", "-o", "json"],
+      ["-p", "/stats", "model", "-o", "json"],
       ["-p", "/stats session", "-o", "json"],
       ["-p", "/stats model", "-o", "json"],
       ["/stats", "session", "-o", "json"],
@@ -304,6 +311,51 @@ export class ToolManager {
             return [{ modelId: "unknown", remainingPercent: 0, statusMessage }];
           }
         }
+      }
+    }
+
+    // PTY Fallback
+    if (this.ptyExecutor) {
+      try {
+        const rawOutput = await this.ptyExecutor("gemini", "/stats session");
+        const parsedUsage = this.parseGeminiUsageFromText(rawOutput);
+        if (parsedUsage) {
+          return [{
+            modelId: "unknown",
+            remainingPercent: parsedUsage.percent,
+            statusMessage: parsedUsage.message
+          }];
+        }
+      } catch {
+        // Ignore fallback failures
+      }
+    }
+
+    return null;
+  }
+
+  private parseGeminiUsageFromText(text: string): { percent: number | null, message: string | null } | null {
+    const lowerText = text.toLowerCase();
+    
+    // Detect quota exhausted
+    if (lowerText.includes("exhausted your capacity") || lowerText.includes("quota will reset after")) {
+      const resetMatch = lowerText.match(/quota will reset after ([^\s.]+)/);
+      const statusMessage = resetMatch ? `Quota exhausted (resets after ${resetMatch[1]})` : "Quota exhausted";
+      return { percent: 0, message: statusMessage };
+    }
+
+    // Detect numeric patterns like 10/100 or 90% remaining
+    const remainingMatch = lowerText.match(/(\d+)%\s*remaining/);
+    if (remainingMatch?.[1]) {
+      return { percent: parseInt(remainingMatch[1], 10), message: null };
+    }
+
+    const quotaMatch = lowerText.match(/usage:\s*(\d+)\s*\/\s*(\d+)/);
+    if (quotaMatch?.[1] && quotaMatch?.[2]) {
+      const used = parseInt(quotaMatch[1], 10);
+      const total = parseInt(quotaMatch[2], 10);
+      if (total > 0) {
+        return { percent: ((total - used) / total) * 100, message: null };
       }
     }
 
@@ -432,7 +484,7 @@ export class ToolManager {
     };
   }
 
-  private findGeminiRemainingPercentForModel(modelId: string, records: GeminiUsageRecord[]): number | null {
+  private findGeminiRemainingPercentForModel(modelId: string, records: GeminiUsageRecord[], allowFallback: boolean): number | null {
     const normalizedModelId = this.normalizeGeminiModelIdentifier(modelId);
     
     // First, try to find an exact match for this model
@@ -449,10 +501,14 @@ export class ToolManager {
     }
 
     // Only if no exact match is found, should we consider an "unknown" record
-    // but only as a global fallback if it's the only record provided (e.g. from session stats)
-    for (const record of records) {
-      if (record.remainingPercent !== null && (record.modelId === "unknown" || !record.modelId)) {
-        return record.remainingPercent;
+    // but only as a global fallback if it's allowed (e.g. for the selected model)
+    // or if it's a generic record without a status message (which likely applies to the whole account/session)
+    const hasStatusMessage = records.some(r => r.statusMessage);
+    if (allowFallback || !hasStatusMessage) {
+      for (const record of records) {
+        if (record.remainingPercent !== null && (record.modelId === "unknown" || !record.modelId)) {
+          return record.remainingPercent;
+        }
       }
     }
 

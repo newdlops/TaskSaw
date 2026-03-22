@@ -629,7 +629,8 @@ test("tool manager handles Gemini quota exhaustion by returning 0 percent", asyn
     managerStub.discoverModelCatalog = async () => ({
       currentModelId: "gemini-3.1-pro",
       models: [
-        { id: "gemini-3.1-pro", displayName: "Gemini 3.1 Pro", hidden: false }
+        { id: "gemini-3.1-pro", displayName: "Gemini 3.1 Pro", hidden: false },
+        { id: "gemini-3.1-flash-lite", displayName: "Gemini 3.1 Flash Lite", hidden: false }
       ]
     });
 
@@ -639,8 +640,12 @@ test("tool manager handles Gemini quota exhaustion by returning 0 percent", asyn
     ];
 
     const usage = await managerStub.getGeminiUsage();
-    assert.equal(usage?.remainingPercent, 0);
+    assert.equal(usage?.remainingPercent, 0); // Selected model gets fallback
     assert.equal(usage?.statusMessage, "Quota exhausted");
+
+    // Other models should be null (N/A) because they don't allow fallback
+    const flashLite = usage?.gemini?.models.find(m => m.modelId === "gemini-3.1-flash-lite");
+    assert.equal(flashLite?.remainingPercent, null);
 
   } finally {
     fs.rmSync(userData, { recursive: true, force: true });

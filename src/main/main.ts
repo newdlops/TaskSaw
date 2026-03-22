@@ -62,6 +62,7 @@ async function createWindow() {
     workspaceAccessManager,
     browserBridge
   );
+  toolManager.setPtyExecutor((kind, commandText) => ptyManager.executeHiddenCommand(kind, commandText));
   registerIpc(mainWindow, ptyManager, workspaceAccessManager, toolManager, orchestratorService);
 }
 

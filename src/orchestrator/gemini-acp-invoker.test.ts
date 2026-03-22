@@ -1301,7 +1301,7 @@ test("gemini ACP invoker hands prompt-driven managed CLI commands off to a modal
   assert.equal(outcome, "cancelled");
   assert.equal(approvalRequestCount, 0);
   assert.equal(interactiveSessionCount, 1);
-  assert.equal(handedOffCommand, "/Users/Test/TaskSaw/managed-tools/bin/gemini -p /stats model -o json");
+  assert.equal(handedOffCommand, "/Users/Test/TaskSaw/managed-tools/bin/gemini -p \"/stats model\" -o json");
   assert.equal(
     progressMessages.some((entry) => entry.message === "Opening modal interactive session for CLI tool call"),
     true
