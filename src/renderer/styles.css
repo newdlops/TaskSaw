@@ -1612,6 +1612,7 @@ body[data-has-sessions="false"] #sidebar {
   }
 
   .orchestrator-node-live-body {
+    width: 100%;
     grid-template-columns: minmax(0, 1fr);
   }
 

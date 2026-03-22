@@ -318,7 +318,7 @@ export function registerIpc(
             optionId: input.optionId ?? undefined
           }
         : {
-            outcome: "cancelled"
+            outcome: "rejected"
           }
     );
     return true;

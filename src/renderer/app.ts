@@ -1402,11 +1402,14 @@ function summarizeEvent(event: OrchestratorEvent): string[] {
   }
 
   if (event.type === "approval_resolved") {
+    const outcome = typeof payload.outcome === "string" ? payload.outcome : (payload.approved === true ? "selected" : "rejected");
     return [
       `[${formatTimestamp(event.createdAt)}] ${eventLabel("approval resolved")}`,
-      payload.approved === true
+      outcome === "selected"
         ? (languagePreference === "ko" ? "사용자 승인" : "User approved")
-        : (languagePreference === "ko" ? "사용자 거절" : "User denied")
+        : outcome === "internally_cancelled"
+          ? (languagePreference === "ko" ? "시스템 내부 차단" : "Blocked internally")
+          : (languagePreference === "ko" ? "사용자 거절" : "User denied")
     ];
   }
 
@@ -2235,6 +2238,7 @@ function formatExecutionStatusLabel(state: string | undefined): string {
       awaiting_interactive_session: "대화형 세션 대기",
       approval_granted: "사용자 승인됨",
       approval_denied: "사용자 거절",
+      approval_blocked: "시스템 내부 차단",
       user_input_submitted: "입력 제출됨",
       user_input_cancelled: "입력 취소됨",
       interactive_session_completed: "대화형 세션 완료",
@@ -2271,6 +2275,7 @@ function formatExecutionStatusLabel(state: string | undefined): string {
     awaiting_interactive_session: "Waiting for interactive session",
     approval_granted: "Approved",
     approval_denied: "Denied",
+    approval_blocked: "Blocked internally",
     user_input_submitted: "Input submitted",
     user_input_cancelled: "Input cancelled",
     interactive_session_completed: "Interactive session completed",

@@ -50,8 +50,9 @@ export type OrchestratorApprovalRequest = {
 };
 
 export type OrchestratorApprovalDecision = {
-  outcome: "selected" | "cancelled";
+  outcome: "selected" | "rejected" | "internally_cancelled";
   optionId?: string;
+  reason?: string;
 };
 
 export type OrchestratorApprovalRequestDraft = Omit<

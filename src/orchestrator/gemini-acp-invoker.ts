@@ -392,7 +392,8 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               if (readOnlyProbeGuardState.permissionCallbacksClosed) {
                 promptActivity.touch();
                 return {
-                  outcome: "cancelled"
+                  outcome: "internally_cancelled",
+                  reason: "Permission callbacks were already closed for this Gemini prompt"
                 };
               }
 
@@ -409,21 +410,64 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 ?? optionsForUi[0];
               promptActivity.touch();
 
+              const requestGuardrailOverride = async (guardrailReason: string): Promise<OrchestratorApprovalDecision> => {
+                if (!context.requestUserApproval) {
+                  const decision: OrchestratorApprovalDecision = {
+                    outcome: "internally_cancelled",
+                    reason: guardrailReason
+                  };
+                  context.reportProgress?.(
+                    guardrailReason,
+                    {
+                      capability,
+                      model: modelId,
+                      toolCall: toolCallSummary ?? null,
+                      guardrailReason
+                    }
+                  );
+                  promptActivity.touch();
+                  return decision;
+                }
+
+                promptActivity.pause();
+                try {
+                  const decision = await context.requestUserApproval({
+                    abortSignal: context.abortSignal,
+                    title: permissionRequest.toolCall?.title?.trim() || "Gemini guardrail override approval",
+                    message: buildGuardrailOverrideMessage(capability, modelId),
+                    details: buildGuardrailOverrideDetails(guardrailReason, permissionRequest.toolCall),
+                    kind: permissionRequest.toolCall?.kind?.trim() || undefined,
+                    locations: extractPermissionRequestLocations(permissionRequest.toolCall),
+                    options: buildGuardrailOverrideOptions(optionsForUi)
+                  });
+                  const decisionWithReason = decision.outcome === "selected"
+                    ? decision
+                    : {
+                        ...decision,
+                        reason: guardrailReason
+                      };
+                  context.reportProgress?.(
+                    decision.outcome === "selected"
+                      ? "Gemini guardrail override approved and waiting for result"
+                      : "Gemini guardrail override rejected; the tool call stayed blocked",
+                    {
+                      capability,
+                      model: modelId,
+                      toolCall: toolCallSummary ?? null,
+                      optionId: decision.optionId ?? null,
+                      guardrailReason
+                    }
+                  );
+                  return decisionWithReason;
+                } finally {
+                  promptActivity.resume();
+                  promptActivity.touch();
+                }
+              };
+
               const disallowedReason = getDisallowedToolCallReasonForCapability(capability, permissionRequest.toolCall);
               if (disallowedReason) {
-                const decision: OrchestratorApprovalDecision = {
-                  outcome: "cancelled"
-                };
-                context.reportProgress?.(
-                  disallowedReason,
-                  {
-                    capability,
-                    model: modelId,
-                    toolCall: toolCallSummary ?? null
-                  }
-                );
-                promptActivity.touch();
-                return decision;
+                return requestGuardrailOverride(disallowedReason);
               }
 
               const bootstrapSketchReason = getBootstrapSketchExecuteRejectionReason({
@@ -433,28 +477,22 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 workspaceRoot
               });
               if (bootstrapSketchReason) {
-                const decision: OrchestratorApprovalDecision = {
-                  outcome: "cancelled"
-                };
-                context.reportProgress?.(
-                  bootstrapSketchReason,
-                  {
-                    capability,
-                    model: modelId,
-                    toolCall: toolCallSummary ?? null
-                  }
-                );
-                promptActivity.touch();
-                return decision;
+                return requestGuardrailOverride(bootstrapSketchReason);
               }
 
               const focusedGatherLowSignalReason = getFocusedGatherLowSignalRejectionReason({
                 capability,
                 workflowStage: context.workflowStage,
                 nodeTitle: context.node.title,
+                workspaceRoot,
                 toolCall: permissionRequest.toolCall
               });
               if (focusedGatherLowSignalReason) {
+                const decision = await requestGuardrailOverride(focusedGatherLowSignalReason);
+                if (decision.outcome === "selected") {
+                  readOnlyProbeGuardState.consecutiveRejections = 0;
+                  return decision;
+                }
                 readOnlyProbeGuardState.consecutiveRejections += 1;
                 if (shouldAbortReadOnlyProbeLoop({
                   workflowStage: context.workflowStage,
@@ -472,18 +510,6 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                   );
                   throw new GeminiAcpReadOnlyProbeLoopAbortError(abortMessage);
                 }
-                const decision: OrchestratorApprovalDecision = {
-                  outcome: "cancelled"
-                };
-                context.reportProgress?.(
-                  focusedGatherLowSignalReason,
-                  {
-                    capability,
-                    model: modelId,
-                    toolCall: toolCallSummary ?? null
-                  }
-                );
-                promptActivity.touch();
                 return decision;
               }
 
@@ -495,6 +521,11 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 state: readOnlyProbeGuardState
               });
               if (repeatedProbeReason) {
+                const decision = await requestGuardrailOverride(repeatedProbeReason);
+                if (decision.outcome === "selected") {
+                  readOnlyProbeGuardState.consecutiveRejections = 0;
+                  return decision;
+                }
                 readOnlyProbeGuardState.consecutiveRejections += 1;
                 if (shouldAbortReadOnlyProbeLoop({
                   workflowStage: context.workflowStage,
@@ -512,18 +543,6 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                   );
                   throw new GeminiAcpReadOnlyProbeLoopAbortError(abortMessage);
                 }
-                const decision: OrchestratorApprovalDecision = {
-                  outcome: "cancelled"
-                };
-                context.reportProgress?.(
-                  repeatedProbeReason,
-                  {
-                    capability,
-                    model: modelId,
-                    toolCall: toolCallSummary ?? null
-                  }
-                );
-                promptActivity.touch();
                 return decision;
               }
 
@@ -584,7 +603,8 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                     }
                   );
                   return {
-                    outcome: "cancelled"
+                    outcome: "internally_cancelled",
+                    reason: "Interactive handoff completed and the original Gemini ACP tool call was closed"
                   };
                 } finally {
                   promptActivity.resume();
@@ -599,16 +619,18 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                       optionId: allowOption.optionId
                     }
                   : {
-                      outcome: "cancelled"
+                      outcome: "internally_cancelled",
+                      reason: "No approval option was available for this Gemini tool call"
                     };
                 context.reportProgress?.(
                   decision.outcome === "selected"
                     ? "Gemini tool call auto-approved and resumed"
-                    : "Gemini tool call auto-rejected",
+                    : "Gemini tool call was cancelled internally because no approval option was available",
                   {
                     capability,
                     model: modelId,
-                    toolCall: toolCallSummary ?? null
+                    toolCall: toolCallSummary ?? null,
+                    reason: decision.reason ?? null
                   }
                 );
                 promptActivity.touch();
@@ -629,12 +651,15 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 context.reportProgress?.(
                   decision.outcome === "selected"
                     ? "Gemini tool call approved and waiting for result"
-                    : "Gemini tool call rejected",
+                    : decision.outcome === "rejected"
+                      ? "Gemini tool call rejected"
+                      : "Gemini tool call was cancelled internally",
                   {
                     capability,
                     model: modelId,
                     toolCall: toolCallSummary ?? null,
-                    optionId: decision.optionId ?? null
+                    optionId: decision.optionId ?? null,
+                    reason: decision.reason ?? null
                   }
                 );
                 return decision;
@@ -940,6 +965,10 @@ function buildPermissionRequestMessage(capability: OrchestratorCapability, model
   return `User approval is required before Gemini can continue ${capability} with ${modelId}.`;
 }
 
+function buildGuardrailOverrideMessage(capability: OrchestratorCapability, modelId: string): string {
+  return `TaskSaw would normally block this Gemini tool call during ${capability} with ${modelId}. Do you want to override the guardrail and continue anyway?`;
+}
+
 function buildPermissionRequestDetails(toolCall: {
   title?: string;
   kind?: string;
@@ -1001,6 +1030,35 @@ function buildPermissionRequestDetails(toolCall: {
   }
 
   return lines.length > 0 ? lines.join("\n\n") : undefined;
+}
+
+function buildGuardrailOverrideDetails(
+  guardrailReason: string,
+  toolCall: Parameters<typeof buildPermissionRequestDetails>[0]
+): string | undefined {
+  const toolDetails = buildPermissionRequestDetails(toolCall);
+  return toolDetails
+    ? [`guardrail: ${guardrailReason}`, toolDetails].join("\n\n")
+    : `guardrail: ${guardrailReason}`;
+}
+
+function buildGuardrailOverrideOptions(options: OrchestratorApprovalOption[]): OrchestratorApprovalOption[] {
+  if (options.length > 0) {
+    return options;
+  }
+
+  return [
+    {
+      optionId: "allow_once",
+      kind: "allow_once",
+      label: "Allow once"
+    },
+    {
+      optionId: "reject_once",
+      kind: "reject_once",
+      label: "Reject"
+    }
+  ];
 }
 
 function summarizePermissionToolCall(toolCall: {
@@ -1353,6 +1411,7 @@ function getFocusedGatherLowSignalRejectionReason(params: {
   capability: OrchestratorCapability;
   workflowStage: ModelInvocationContext["workflowStage"];
   nodeTitle: string;
+  workspaceRoot: string;
   toolCall: {
     title?: string;
     kind?: string;
@@ -1387,7 +1446,17 @@ function getFocusedGatherLowSignalRejectionReason(params: {
     return null;
   }
 
+  if (isFocusedGatherInternalLogReminingCommand(commandText, params.workspaceRoot)) {
+    return /focused gather/i.test(params.nodeTitle)
+      ? "Rejected Gemini tool call because focused gather should not re-mine workspace-local debug logs or caches when named external targets are still pending"
+      : "Rejected Gemini tool call because task-orchestration gather should not re-mine workspace-local debug logs or caches when external target evidence is still missing";
+  }
+
   if (!isFocusedGatherLowSignalReadOnlyCommand(commandText)) {
+    return null;
+  }
+
+  if (isFocusedGatherNamedExternalTargetInspection(commandText, params.workspaceRoot)) {
     return null;
   }
 
@@ -1482,6 +1551,65 @@ function isFocusedGatherLowSignalReadOnlyCommand(commandText: string): boolean {
   }
 
   return FOCUSED_GATHER_LOW_SIGNAL_COMMANDS.has(commandName);
+}
+
+function isFocusedGatherNamedExternalTargetInspection(commandText: string, workspaceRoot: string): boolean {
+  return buildExternalToolSurfaceKey(commandText, workspaceRoot) !== null
+    || extractExternalResourceKeys(commandText, workspaceRoot).length > 0;
+}
+
+function isFocusedGatherInternalLogReminingCommand(commandText: string, workspaceRoot: string): boolean {
+  const workspaceRootPath = path.resolve(workspaceRoot);
+
+  for (const rawToken of tokenizeCommandText(commandText)) {
+    const token = stripOuterQuotes(rawToken).trim();
+    if (!token || isShellOperatorToken(token) || token.startsWith("-") || isEnvironmentAssignmentToken(token)) {
+      continue;
+    }
+
+    const normalizedToken = token.replace(/\\/g, "/");
+    const lowerToken = normalizedToken.toLowerCase().replace(/\/+$/g, "");
+    const basename = path.posix.basename(lowerToken);
+
+    if (basename === "gemini_debug.log" || basename === "logs.json") {
+      return true;
+    }
+
+    if (
+      lowerToken === ".tasksaw"
+      || lowerToken.startsWith(".tasksaw/")
+      || lowerToken === ".tasksaw-dev"
+      || lowerToken.startsWith(".tasksaw-dev/logs")
+      || lowerToken.endsWith("/.tasksaw")
+      || lowerToken.includes("/.tasksaw/")
+      || lowerToken.endsWith("/.tasksaw-dev")
+      || lowerToken.includes("/.tasksaw-dev/logs")
+    ) {
+      return true;
+    }
+
+    if (!looksLikePathToken(normalizedToken) || !isWorkspaceRelativePath(normalizedToken, workspaceRootPath)) {
+      continue;
+    }
+
+    const resolvedPath = path.isAbsolute(normalizedToken)
+      ? path.resolve(normalizedToken)
+      : path.resolve(workspaceRootPath, normalizedToken);
+    const relativePath = path.relative(workspaceRootPath, resolvedPath).replace(/\\/g, "/").toLowerCase();
+
+    if (
+      relativePath === "gemini_debug.log"
+      || relativePath === "logs.json"
+      || relativePath === ".tasksaw"
+      || relativePath.startsWith(".tasksaw/")
+      || relativePath === ".tasksaw-dev"
+      || relativePath.startsWith(".tasksaw-dev/logs")
+    ) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function getBootstrapSketchExecuteRejectionReason(params: {

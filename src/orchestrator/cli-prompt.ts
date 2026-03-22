@@ -323,6 +323,8 @@ function buildStageInstructions(
       "If the current memory already names likely files, modules, entrypoints, or managed tool locations, inspect those first instead of widening the search.",
       "If the current memory already names a concrete external surface such as a CLI command, API route, or managed-tool capability check, inspect that surface before pivoting to local caches, log files, temp files, or home-directory state.",
       "If the user explicitly asked for exact or actual data, keep the plan centered on the concrete data source or blocker evidence first. Do not jump straight to a UI fallback or copy change.",
+      "If workingMemory already records a failed or deferred instrumentation, logging, or gemini_debug.log attempt for this exact-data request, do not propose that approach again. Move directly to the external approval or raw payload blocker instead.",
+      "If the next narrow step is a direct managed-tool read or CLI capability check outside the workspace, target that exact surface so gather can request approval for it.",
       "Do not edit files, call tools, create temp files, run builds, or execute shell commands during planning.",
       "Do not ask for broad repository or external tool exploration unless the current memory is insufficient to name a concrete next target."
     ].join(" ");
@@ -340,6 +342,8 @@ function buildStageInstructions(
       "Do not pivot from a named external surface to local cache, log, temp, or home-directory files until one direct capability check against that named surface has failed or returned explicit blocker evidence.",
       "If the user asked for exact or actual data, do not treat a UI fallback label as sufficient. Gather one direct proof about the narrowest missing or unsupported data source before recommending that fallback.",
       "Do not turn missing external evidence into a workspace logging or instrumentation plan. If the next required step is external-path approval or one raw payload/stderr sample, return that blocker directly in the gathered evidence.",
+      "If workingMemory already shows that instrumentation, logging, or gemini_debug.log was tried for this request, do not gather around that workaround again.",
+      "When the current contract requires a named external path or CLI capability check outside the workspace, it is acceptable to request approval for that narrow direct read or command and use the result as evidence.",
       "When probing an external CLI surface, prefer one documented help/usage check and one direct capability check. Do not spend gather budget on multiple synonymous command variants that test the same hypothesis.",
       "In a focused follow-up gather pass, inspect named files, symbols, or managed-tool surfaces directly instead of rediscovering whether they exist.",
       "Do not spend focused gather budget on existence-only commands such as find-by-name sweeps, plain ls path checks, recursive ls listings, or broad *.md/settings.json searches when the target path is already named in memory.",

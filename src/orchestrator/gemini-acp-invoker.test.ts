@@ -512,7 +512,7 @@ test("gemini ACP invoker switches execute sessions to default approval mode and 
   );
 });
 
-test("gemini ACP invoker rejects generic approval requests without prompting the user", async () => {
+test("gemini ACP invoker routes generic approval requests through explicit guardrail override approval", async () => {
   const fakeChild = new FakeChildProcess();
   const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
   let approvalRequestCount = 0;
@@ -630,15 +630,17 @@ test("gemini ACP invoker rejects generic approval requests without prompting the
   });
 
   assert.equal(result.summary, "Gather completed without generic approvals");
-  assert.equal(otherOutcome, "cancelled");
-  assert.equal(approvalRequestCount, 0);
+  assert.equal(otherOutcome, "selected");
+  assert.equal(approvalRequestCount, 1);
   assert.equal(
-    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because generic approval requests are not supported"),
+    progressMessages.some(
+      (entry) => entry.details?.guardrailReason === "Rejected Gemini tool call because generic approval requests are not supported"
+    ),
     true
   );
 });
 
-test("gemini ACP invoker deduplicates repeated read-only execute commands within the same stage", async () => {
+test("gemini ACP invoker requests approval before overriding repeated read-only execute dedupe guardrails", async () => {
   const fakeChild = new FakeChildProcess();
   const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
   let approvalRequestCount = 0;
@@ -762,15 +764,17 @@ test("gemini ACP invoker deduplicates repeated read-only execute commands within
 
   assert.equal(result.summary, "Gather completed with dedupe");
   assert.equal(firstOutcome, "selected");
-  assert.equal(secondOutcome, "cancelled");
-  assert.equal(approvalRequestCount, 1);
+  assert.equal(secondOutcome, "selected");
+  assert.equal(approvalRequestCount, 2);
   assert.equal(
-    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because this command was already attempted in this phase"),
+    progressMessages.some(
+      (entry) => entry.details?.guardrailReason === "Rejected Gemini tool call because this command was already attempted in this phase"
+    ),
     true
   );
 });
 
-test("gemini ACP invoker rejects bootstrap sketch probing outside the workspace before asking for approval", async () => {
+test("gemini ACP invoker requests approval before overriding bootstrap sketch probing guardrails", async () => {
   const fakeChild = new FakeChildProcess();
   const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
   let approvalRequestCount = 0;
@@ -883,15 +887,17 @@ test("gemini ACP invoker rejects bootstrap sketch probing outside the workspace 
   });
 
   assert.equal(result.summary, "Bootstrap sketch stayed shallow");
-  assert.equal(outcome, "cancelled");
-  assert.equal(approvalRequestCount, 0);
+  assert.equal(outcome, "selected");
+  assert.equal(approvalRequestCount, 1);
   assert.equal(
-    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because bootstrap sketch must stay workspace-local and low-cost"),
+    progressMessages.some(
+      (entry) => entry.details?.guardrailReason === "Rejected Gemini tool call because bootstrap sketch must stay workspace-local and low-cost"
+    ),
     true
   );
 });
 
-test("gemini ACP invoker cuts off repeated read-only probing for the same external investigation thread", async () => {
+test("gemini ACP invoker requests approval before overriding repeated read-only probing on the same external investigation thread", async () => {
   const fakeChild = new FakeChildProcess();
   const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
   let approvalRequestCount = 0;
@@ -1015,15 +1021,21 @@ test("gemini ACP invoker cuts off repeated read-only probing for the same extern
   });
 
   assert.equal(result.summary, "Bootstrap sketch completed with cutoff");
-  assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "cancelled", "cancelled"]);
-  assert.equal(approvalRequestCount, 4);
+  assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "selected", "selected"]);
+  assert.equal(approvalRequestCount, 6);
   assert.equal(
-    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because repeated probing hit the cutoff for this investigation thread"),
+    progressMessages.filter((entry) => entry.message === "Gemini guardrail override approved and waiting for result").length,
+    2
+  );
+  assert.equal(
+    progressMessages.some(
+      (entry) => entry.details?.guardrailReason === "Rejected Gemini tool call because repeated probing hit the cutoff for this investigation thread"
+    ),
     true
   );
 });
 
-test("gemini ACP invoker cuts off repeated managed CLI variants earlier within the same external tool surface", async () => {
+test("gemini ACP invoker requests approval before overriding repeated managed CLI surface probing", async () => {
   const fakeChild = new FakeChildProcess();
   const outcomes: string[] = [];
   let approvalRequestCount = 0;
@@ -1146,10 +1158,16 @@ test("gemini ACP invoker cuts off repeated managed CLI variants earlier within t
   });
 
   assert.equal(result.summary, "Task orchestration gather stopped after CLI surface cutoff");
-  assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "cancelled"]);
-  assert.equal(approvalRequestCount, 4);
+  assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "selected"]);
+  assert.equal(approvalRequestCount, 5);
   assert.equal(
-    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because repeated probing hit the cutoff for this investigation thread"),
+    progressMessages.filter((entry) => entry.message === "Gemini guardrail override approved and waiting for result").length,
+    1
+  );
+  assert.equal(
+    progressMessages.some(
+      (entry) => entry.details?.guardrailReason === "Rejected Gemini tool call because repeated probing hit the cutoff for this investigation thread"
+    ),
     true
   );
 });
@@ -1530,7 +1548,7 @@ test("gemini ACP invoker keeps bare slash-command probes on the normal approval 
   assert.equal(interactiveSessionCount, 0);
 });
 
-test("gemini ACP invoker rejects low-signal rediscovery commands during focused gather", async () => {
+test("gemini ACP invoker lets focused gather inspect named external targets without low-signal override", async () => {
   const fakeChild = new FakeChildProcess();
   const outcomes: string[] = [];
   let approvalRequestCount = 0;
@@ -1595,8 +1613,8 @@ test("gemini ACP invoker rejects low-signal rediscovery commands during focused 
 
             async prompt() {
               const commands = [
+                "ls -la \"/Users/test/managed-tools/bin/gemini\"",
                 "find . -name \"gemini\" -type f -perm +111",
-                "ls src/main/gemini-quota.ts",
                 "sed -n '1,40p' src/main/tool-manager.ts"
               ];
 
@@ -1655,15 +1673,19 @@ test("gemini ACP invoker rejects low-signal rediscovery commands during focused 
   });
 
   assert.equal(result.summary, "Focused gather stayed on named target inspection");
-  assert.deepEqual(outcomes, ["cancelled", "cancelled", "selected"]);
-  assert.equal(approvalRequestCount, 1);
+  assert.deepEqual(outcomes, ["selected", "selected", "selected"]);
+  assert.equal(approvalRequestCount, 3);
   assert.equal(
-    progressMessages.some((entry) => entry.message === "Rejected Gemini tool call because focused gather must inspect named targets directly instead of rediscovering files or paths"),
+    progressMessages.filter((entry) => entry.message === "Gemini guardrail override approved and waiting for result").length,
+    1
+  );
+  assert.equal(
+    progressMessages.some((entry) => entry.details?.guardrailReason === "Rejected Gemini tool call because focused gather must inspect named targets directly instead of rediscovering files or paths"),
     true
   );
 });
 
-test("gemini ACP invoker rejects low-signal rediscovery commands during root gather", async () => {
+test("gemini ACP invoker lets root gather inspect named external targets without low-signal override", async () => {
   const fakeChild = new FakeChildProcess();
   const outcomes: string[] = [];
   let approvalRequestCount = 0;
@@ -1783,17 +1805,159 @@ test("gemini ACP invoker rejects low-signal rediscovery commands during root gat
   });
 
   assert.equal(result.summary, "Root gather stayed on concrete target inspection");
-  assert.deepEqual(outcomes, ["cancelled", "cancelled", "selected"]);
-  assert.equal(approvalRequestCount, 1);
+  assert.deepEqual(outcomes, ["selected", "selected", "selected"]);
+  assert.equal(approvalRequestCount, 3);
+  assert.equal(
+    progressMessages.filter((entry) => entry.message === "Gemini guardrail override approved and waiting for result").length,
+    1
+  );
   assert.equal(
     progressMessages.some(
-      (entry) => entry.message === "Rejected Gemini tool call because task-orchestration gather must inspect concrete targets directly instead of rediscovering paths or directory contents"
+      (entry) => entry.details?.guardrailReason === "Rejected Gemini tool call because task-orchestration gather must inspect concrete targets directly instead of rediscovering paths or directory contents"
     ),
     true
   );
 });
 
-test("gemini ACP invoker promotes interactive transcript blockers onto the same investigation thread", async () => {
+test("gemini ACP invoker flags focused-gather internal log re-mining before rediscovery heuristics", async () => {
+  const fakeChild = new FakeChildProcess();
+  const outcomes: string[] = [];
+  let approvalRequestCount = 0;
+  const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                requestPermission(params: {
+                  options?: Array<{ optionId?: string; kind?: string }>;
+                  toolCall?: {
+                    title?: string;
+                    kind?: string;
+                  };
+                }): Promise<{ outcome: { outcome: string } }>;
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return { protocolVersion: 1 };
+            }
+
+            async newSession() {
+              return {
+                sessionId: "session-1",
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async setSessionMode() {
+              return {};
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt() {
+              const commands = [
+                "grep -B 5 -A 5 \"Exit Code: 0\" gemini_debug.log | tail -n 100",
+                "sed -n '1,40p' src/main/tool-manager.ts"
+              ];
+
+              for (const title of commands) {
+                const decision = await this.client.requestPermission({
+                  options: [{ optionId: "allow_once", kind: "allow_once" }],
+                  toolCall: {
+                    title,
+                    kind: "execute"
+                  }
+                });
+                outcomes.push(decision.outcome.outcome);
+              }
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: "Focused gather blocked internal log re-mining early",
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const baseContext = createContext(TEST_MODEL);
+  const result = await adapter.gather!({
+    ...baseContext,
+    node: {
+      ...baseContext.node,
+      title: "Focused Gather"
+    },
+    requestUserApproval: async () => {
+      approvalRequestCount += 1;
+      return {
+        outcome: "selected",
+        optionId: "allow_once"
+      };
+    },
+    reportProgress: (message, details) => {
+      progressMessages.push({ message, details });
+    }
+  });
+
+  assert.equal(result.summary, "Focused gather blocked internal log re-mining early");
+  assert.deepEqual(outcomes, ["selected", "selected"]);
+  assert.equal(approvalRequestCount, 2);
+  assert.equal(
+    progressMessages.filter((entry) => entry.message === "Gemini guardrail override approved and waiting for result").length,
+    1
+  );
+  assert.equal(
+    progressMessages.some(
+      (entry) => entry.details?.guardrailReason === "Rejected Gemini tool call because focused gather should not re-mine workspace-local debug logs or caches when named external targets are still pending"
+    ),
+    true
+  );
+});
+
+test("gemini ACP invoker requests approval before overriding interactive transcript blockers on the same investigation thread", async () => {
   const fakeChild = new FakeChildProcess();
   const outcomes: string[] = [];
   let approvalRequestCount = 0;
@@ -1924,15 +2088,17 @@ test("gemini ACP invoker promotes interactive transcript blockers onto the same 
   });
 
   assert.equal(result.summary, "Interactive transcript blocker was reused");
-  assert.deepEqual(outcomes, ["cancelled", "cancelled", "selected"]);
-  assert.equal(approvalRequestCount, 1);
+  assert.deepEqual(outcomes, ["cancelled", "selected", "selected"]);
+  assert.equal(approvalRequestCount, 2);
   assert.equal(interactiveSessionCount, 1);
   assert.equal(
     progressMessages.some((entry) => entry.message === "Interactive CLI transcript established blocker evidence for this investigation thread"),
     true
   );
   assert.equal(
-    progressMessages.some((entry) => entry.message.includes("prior evidence already established this investigation thread as blocked")),
+    progressMessages.some((entry) =>
+      String(entry.details?.guardrailReason ?? "").includes("prior evidence already established this investigation thread as blocked")
+    ),
     true
   );
 });
@@ -2004,9 +2170,9 @@ test("gemini ACP invoker closes stale permission callbacks after probe-loop abor
             async prompt() {
               try {
                 for (const title of [
-                  "ls -R \"/Users/test/managed-tools/bin\"",
                   "find . -name \"managed-tools\" -type d",
-                  "pwd"
+                  "pwd",
+                  "which gemini"
                 ]) {
                   const decision = await this.client.requestPermission({
                     options: [{ optionId: "allow_once", kind: "allow_once" }],
@@ -2060,8 +2226,7 @@ test("gemini ACP invoker closes stale permission callbacks after probe-loop abor
     requestUserApproval: async () => {
       approvalRequestCount += 1;
       return {
-        outcome: "selected",
-        optionId: "allow_once"
+        outcome: "rejected"
       };
     },
     reportProgress: (message, details) => {
@@ -2072,7 +2237,7 @@ test("gemini ACP invoker closes stale permission callbacks after probe-loop abor
   assert.equal(result.summary, "Abort latch ignored stale permission callback");
   assert.equal(caughtAbortMessage, "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget");
   assert.deepEqual(outcomes, ["cancelled", "cancelled", "cancelled"]);
-  assert.equal(approvalRequestCount, 0);
+  assert.equal(approvalRequestCount, 3);
   assert.equal(
     progressMessages.some((entry) => entry.message === "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget"),
     true
@@ -2172,6 +2337,11 @@ test("gemini ACP invoker aborts a gather prompt after repeated cutoff rejections
     workflowStage: "task_orchestration",
     requestUserApproval: async () => {
       approvalRequestCount += 1;
+      if (approvalRequestCount > 4) {
+        return {
+          outcome: "rejected"
+        };
+      }
       return {
         outcome: "selected",
         optionId: "allow_once"
@@ -2187,7 +2357,7 @@ test("gemini ACP invoker aborts a gather prompt after repeated cutoff rejections
     "Gather stopped early after repeated external CLI probing hit the cutoff. Continue planning from the workspace-local evidence collected so far."
   );
   assert.deepEqual(outcomes, ["selected", "selected", "selected", "selected", "cancelled", "cancelled"]);
-  assert.equal(approvalRequestCount, 4);
+  assert.equal(approvalRequestCount, 7);
   assert.equal(
     progressMessages.some((entry) => entry.message === "Aborting Gemini ACP prompt after repeated rejected probing to preserve budget"),
     true
@@ -2538,7 +2708,7 @@ test("gemini ACP invoker pauses inactivity timeout while awaiting approval and r
   );
 });
 
-test("gemini ACP invoker rejects edit, build, and heredoc write tool calls during gather without prompting the user", async () => {
+test("gemini ACP invoker routes read-only gather write attempts through explicit guardrail override approval", async () => {
   const fakeChild = new FakeChildProcess();
   const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
   let approvalRequestCount = 0;
@@ -2673,18 +2843,25 @@ test("gemini ACP invoker rejects edit, build, and heredoc write tool calls durin
   });
 
   assert.equal(result.summary, "Gather stayed read-only");
-  assert.equal(editOutcome, "cancelled");
-  assert.equal(buildOutcome, "cancelled");
-  assert.equal(heredocOutcome, "cancelled");
-  assert.equal(approvalRequestCount, 0);
+  assert.equal(editOutcome, "selected");
+  assert.equal(buildOutcome, "selected");
+  assert.equal(heredocOutcome, "selected");
+  assert.equal(approvalRequestCount, 3);
   assert.equal(
-    progressMessages.filter((entry) => entry.message === "Rejected Gemini tool call because this phase is read-only")
+    progressMessages.filter((entry) => entry.message === "Gemini guardrail override approved and waiting for result")
       .length,
     3
   );
+  assert.equal(
+    progressMessages.every((entry) =>
+      entry.message !== "Gemini guardrail override approved and waiting for result"
+      || entry.details?.guardrailReason === "Rejected Gemini tool call because this phase is read-only"
+    ),
+    true
+  );
 });
 
-test("gemini ACP invoker rejects execute tool calls during concrete planning without prompting the user", async () => {
+test("gemini ACP invoker routes concrete-plan execute tool calls through explicit guardrail override approval", async () => {
   const fakeChild = new FakeChildProcess();
   let approvalRequestCount = 0;
   let executeOutcome = "";
@@ -2797,8 +2974,8 @@ test("gemini ACP invoker rejects execute tool calls during concrete planning wit
   });
 
   assert.equal(result.summary, "Concrete plan stayed tool-free");
-  assert.equal(executeOutcome, "cancelled");
-  assert.equal(approvalRequestCount, 0);
+  assert.equal(executeOutcome, "selected");
+  assert.equal(approvalRequestCount, 1);
 });
 
 test("gemini ACP invoker blocks direct file writes outside execute", async () => {

@@ -261,6 +261,23 @@ test("task orchestration concrete plan prompt distinguishes structural gaps from
   );
 });
 
+test("task orchestration abstract plan prompt avoids repeating failed logging workarounds", () => {
+  const prompt = buildCliPrompt("abstractPlan", createContext(TEST_MODEL));
+
+  assert.match(
+    prompt,
+    /If workingMemory already records a failed or deferred instrumentation, logging, or gemini_debug\.log attempt for this exact-data request, do not propose that approach again\./
+  );
+  assert.match(
+    prompt,
+    /Move directly to the external approval or raw payload blocker instead\./
+  );
+  assert.match(
+    prompt,
+    /If the next narrow step is a direct managed-tool read or CLI capability check outside the workspace, target that exact surface so gather can request approval for it\./
+  );
+});
+
 test("task orchestration verify prompt rejects placeholder successes and follow-up fixes", () => {
   const prompt = buildCliPrompt("verify", createContext(TEST_MODEL));
 
@@ -300,5 +317,13 @@ test("task orchestration gather prompt rejects logging-workaround pivots for mis
   assert.match(
     prompt,
     /If the next required step is external-path approval or one raw payload\/stderr sample, return that blocker directly in the gathered evidence\./
+  );
+  assert.match(
+    prompt,
+    /If workingMemory already shows that instrumentation, logging, or gemini_debug\.log was tried for this request, do not gather around that workaround again\./
+  );
+  assert.match(
+    prompt,
+    /When the current contract requires a named external path or CLI capability check outside the workspace, it is acceptable to request approval for that narrow direct read or command and use the result as evidence\./
   );
 });

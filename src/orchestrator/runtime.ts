@@ -561,7 +561,20 @@ export class OrchestratorRuntime {
           (concretePlan.additionalGatherObjectives ?? [concretePlan.summary]).join(" | ")
         );
       }
-      this.failIfDiagnosticWorkaroundNeedsExternalEvidence(currentNode, consolidatedEvidence, concretePlan);
+      const approvalRedirectedConcretePlan = this.redirectDiagnosticWorkaroundToApprovalBackedGather(
+        currentNode,
+        consolidatedEvidence,
+        concretePlan
+      );
+      if (approvalRedirectedConcretePlan !== concretePlan) {
+        concretePlan = approvalRedirectedConcretePlan;
+        this.recordDecision(
+          currentNode.runId,
+          concretePlanStage.stageNode.id,
+          "Concrete plan redirected to approval-backed gather",
+          (concretePlan.additionalGatherObjectives ?? [concretePlan.summary]).join(" | ")
+        );
+      }
     }
 
     if (!isProjectStructureInspection) {
@@ -1630,7 +1643,20 @@ export class OrchestratorRuntime {
         "Concrete plan updated after focused gather",
         concretePlan.summary
       );
-      this.failIfDiagnosticWorkaroundNeedsExternalEvidence(currentNode, consolidatedEvidence, concretePlan);
+      const approvalRedirectedConcretePlan = this.redirectDiagnosticWorkaroundToApprovalBackedGather(
+        currentNode,
+        consolidatedEvidence,
+        concretePlan
+      );
+      if (approvalRedirectedConcretePlan !== concretePlan) {
+        concretePlan = approvalRedirectedConcretePlan;
+        this.recordDecision(
+          currentNode.runId,
+          concretePlanStage.stageNode.id,
+          "Concrete plan redirected to approval-backed gather",
+          (concretePlan.additionalGatherObjectives ?? [concretePlan.summary]).join(" | ")
+        );
+      }
     }
 
     return {
@@ -2027,7 +2053,8 @@ export class OrchestratorRuntime {
             optionId: allowOption.optionId
           }
         : {
-            outcome: "cancelled"
+            outcome: "internally_cancelled",
+            reason: "No approval handler was available for this action"
           };
     }
 
@@ -2037,16 +2064,26 @@ export class OrchestratorRuntime {
       provider: assignedModel.provider,
       model: assignedModel.model,
       approved: decision.outcome === "selected",
-      optionId: decision.optionId ?? null
+      outcome: decision.outcome,
+      optionId: decision.optionId ?? null,
+      reason: decision.reason ?? null
     });
 
     if (node.kind === "execution") {
+      const approvalStatus = decision.outcome === "selected"
+        ? "approval_granted"
+        : decision.outcome === "rejected"
+          ? "approval_denied"
+          : "approval_blocked";
+      const approvalMessage = decision.outcome === "selected"
+        ? `Approved ${this.describeApprovalOption(payloadOptions.find((option) => option.optionId === decision.optionId))}`
+        : decision.outcome === "rejected"
+          ? "User denied the requested action"
+          : (decision.reason?.trim() || "The requested action stayed blocked by an internal guardrail");
       this.recordExecutionStatus(
         node,
-        decision.outcome === "selected" ? "approval_granted" : "approval_denied",
-        decision.outcome === "selected"
-          ? `Approved ${this.describeApprovalOption(payloadOptions.find((option) => option.optionId === decision.optionId))}`
-          : "User denied the requested action"
+        approvalStatus,
+        approvalMessage
       );
     }
 
@@ -2284,11 +2321,18 @@ export class OrchestratorRuntime {
   }
 
   private formatApprovalTerminalDecision(decision: OrchestratorApprovalDecision): string {
-    if (decision.outcome !== "selected") {
+    if (decision.outcome === "selected") {
+      return `[approval granted] ${decision.optionId ?? "selected"}\n`;
+    }
+
+    if (decision.outcome === "rejected") {
       return "[approval rejected]\n";
     }
 
-    return `[approval granted] ${decision.optionId ?? "selected"}\n`;
+    const reason = decision.reason?.trim();
+    return reason
+      ? `[approval blocked internally] ${reason}\n`
+      : "[approval blocked internally]\n";
   }
 
   private formatUserInputTerminalRequest(
@@ -2633,7 +2677,7 @@ export class OrchestratorRuntime {
       return baseObjective;
     }
 
-    const memoryCues = this.buildTaskOrchestrationMemoryCues(node.runId, evidenceBundles);
+    const memoryCues = this.buildTaskOrchestrationMemoryCues(node, evidenceBundles);
     const contractCues = capability === "gather"
       ? this.buildGatherContractCues(gatherContract)
       : [];
@@ -2728,35 +2772,41 @@ export class OrchestratorRuntime {
     };
   }
 
-  private failIfDiagnosticWorkaroundNeedsExternalEvidence(
+  private redirectDiagnosticWorkaroundToApprovalBackedGather(
     node: PlanNode,
     consolidatedEvidence: EvidenceBundle,
     concretePlan: ConcretePlanResult
-  ) {
+  ): ConcretePlanResult {
     if (!this.isRealDataOutcomeRequest(node.objective)) {
-      return;
+      return concretePlan;
     }
 
     const planText = this.buildConcretePlanSearchText(concretePlan);
     if (!DIAGNOSTIC_WORKAROUND_PATTERN.test(planText)) {
-      return;
+      return concretePlan;
     }
 
-    const evidenceText = this.buildRunEvidenceSearchText(node.runId, consolidatedEvidence);
-    const hasExternalSurfaceEvidence = EXTERNAL_SURFACE_EVIDENCE_PATTERN.test(evidenceText);
-    const hasStableExternalBlocker = EXTERNAL_BLOCKER_PATTERN.test(evidenceText);
-    if (!hasExternalSurfaceEvidence || !hasStableExternalBlocker) {
-      return;
+    if (!this.hasStableExternalBlockerEvidence(node.runId, [consolidatedEvidence])) {
+      return concretePlan;
     }
 
-    const blockerMessage =
-      "External path read approval or one raw Gemini CLI payload/stderr sample is required before more planning. Another internal diagnostic logging or instrumentation change will not resolve the current n/a result.";
-    this.recordDecision(node.runId, node.id, "External evidence required before implementation", blockerMessage);
+    const blockerMessage = this.buildExternalEvidenceRequiredMessage();
     this.engine.appendEvent(node.runId, node.id, "scheduler_progress", {
-      message: "Stopping diagnostic workaround because external approval or raw payload evidence is required",
+      message: "Redirecting diagnostic workaround into approval-backed external gather",
       blocker: blockerMessage
     });
-    throw new Error(blockerMessage);
+
+    return {
+      ...concretePlan,
+      summary: "Approval-backed external gather is required before execution.",
+      childTasks: [],
+      needsAdditionalGather: true,
+      additionalGatherObjectives: this.buildApprovalBackedExternalGatherObjectives(concretePlan),
+      executionNotes: this.dedupeTextEntries([
+        ...concretePlan.executionNotes,
+        "Execution is deferred until a narrow approved external Gemini surface check captures one raw stdout/stderr/exit or payload sample."
+      ])
+    };
   }
 
   private findDeferredDiagnosticWorkaroundSignal(
@@ -2806,28 +2856,50 @@ export class OrchestratorRuntime {
       .join("\n");
   }
 
-  private buildRunEvidenceSearchText(runId: string, consolidatedEvidence: EvidenceBundle): string {
+  private buildExternalEvidenceRequiredMessage(): string {
+    return "External path read approval or one raw Gemini CLI payload/stderr sample is required before more planning. Another internal diagnostic logging or instrumentation change will not resolve the current n/a result.";
+  }
+
+  private buildApprovalBackedExternalGatherObjectives(concretePlan: ConcretePlanResult): string[] {
+    return this.dedupeTextEntries([
+      ...(concretePlan.additionalGatherObjectives ?? []),
+      "Request approval for the narrowest direct read or Gemini CLI capability check against the named external Gemini surface.",
+      "Capture one raw Gemini stdout/stderr/exit or payload sample from that approved external surface.",
+      "Do not revisit gemini_debug.log, instrumentation, or internal logging; use the approved external surface directly."
+    ]).slice(0, 3);
+  }
+
+  private hasStableExternalBlockerEvidence(runId: string, evidenceBundles: EvidenceBundle[]): boolean {
+    const evidenceText = this.buildRunEvidenceSearchText(runId, evidenceBundles);
+    const hasExternalSurfaceEvidence = EXTERNAL_SURFACE_EVIDENCE_PATTERN.test(evidenceText);
+    const hasStableExternalBlocker = EXTERNAL_BLOCKER_PATTERN.test(evidenceText);
+    return hasExternalSurfaceEvidence && hasStableExternalBlocker;
+  }
+
+  private buildRunEvidenceSearchText(runId: string, evidenceBundles: EvidenceBundle[]): string {
     const workingMemory = this.getWorkingMemorySnapshot(runId);
     const projectStructure = this.getProjectStructureSnapshot(runId);
 
     return [
-      consolidatedEvidence.summary,
-      ...consolidatedEvidence.facts.map((fact) => fact.statement),
-      ...consolidatedEvidence.hypotheses.map((hypothesis) => hypothesis.statement),
-      ...consolidatedEvidence.unknowns.map((unknown) => unknown.question),
-      ...consolidatedEvidence.relevantTargets.flatMap((target) => [
-        target.filePath ?? "",
-        target.symbol ?? "",
-        target.note ?? ""
+      ...evidenceBundles.flatMap((bundle) => [
+        bundle.summary,
+        ...bundle.facts.map((fact) => fact.statement),
+        ...bundle.hypotheses.map((hypothesis) => hypothesis.statement),
+        ...bundle.unknowns.map((unknown) => unknown.question),
+        ...bundle.relevantTargets.flatMap((target) => [
+          target.filePath ?? "",
+          target.symbol ?? "",
+          target.note ?? ""
+        ]),
+        ...bundle.references.flatMap((reference) => [
+          reference.note ?? "",
+          reference.location?.filePath ?? "",
+          reference.location?.symbol ?? "",
+          reference.location?.label ?? "",
+          reference.location?.uri ?? ""
+        ]),
+        ...bundle.snippets.map((snippet) => snippet.content)
       ]),
-      ...consolidatedEvidence.references.flatMap((reference) => [
-        reference.note ?? "",
-        reference.location?.filePath ?? "",
-        reference.location?.symbol ?? "",
-        reference.location?.label ?? "",
-        reference.location?.uri ?? ""
-      ]),
-      ...consolidatedEvidence.snippets.map((snippet) => snippet.content),
       ...workingMemory.decisions.flatMap((decision) => [decision.summary, decision.rationale]),
       ...workingMemory.openQuestions.map((question) => question.question),
       ...workingMemory.unknowns.map((unknown) => unknown.description),
@@ -2866,9 +2938,10 @@ export class OrchestratorRuntime {
     return cues;
   }
 
-  private buildTaskOrchestrationMemoryCues(runId: string, evidenceBundles: EvidenceBundle[]): string[] {
-    const workingMemory = this.getWorkingMemorySnapshot(runId);
-    const projectStructure = this.getProjectStructureSnapshot(runId);
+  private buildTaskOrchestrationMemoryCues(node: PlanNode, evidenceBundles: EvidenceBundle[]): string[] {
+    const workingMemory = this.getWorkingMemorySnapshot(node.runId);
+    const projectStructure = this.getProjectStructureSnapshot(node.runId);
+    const shouldFilterDiagnosticWorkarounds = this.isRealDataOutcomeRequest(node.objective);
     const unresolvedQuestions = this.dedupeTextEntries([
       ...workingMemory.openQuestions
         .filter((entry) => entry.status === "open")
@@ -2886,8 +2959,13 @@ export class OrchestratorRuntime {
         .filter((entry) => entry.status === "open")
         .map((entry) => entry.summary)
     ]).slice(0, 3);
+    const recentDecisionEntries = shouldFilterDiagnosticWorkarounds
+      ? workingMemory.decisions.filter((entry) =>
+          !DIAGNOSTIC_WORKAROUND_PATTERN.test(`${entry.summary}\n${entry.rationale}`)
+        )
+      : workingMemory.decisions;
     const recentDecisions = this.dedupeTextEntries(
-      workingMemory.decisions
+      recentDecisionEntries
         .slice(-3)
         .map((entry) => `${entry.summary}: ${entry.rationale}`)
     );
@@ -2909,6 +2987,9 @@ export class OrchestratorRuntime {
     const cues: string[] = [];
     if (recentDecisions.length > 0) {
       cues.push(`Recent memory decisions: ${recentDecisions.join(" | ")}`);
+    }
+    if (shouldFilterDiagnosticWorkarounds && this.hasStableExternalBlockerEvidence(node.runId, evidenceBundles)) {
+      cues.push("Do not repeat prior internal logging or instrumentation attempts for this exact-data request. Surface the external approval or raw payload blocker directly.");
     }
     if (unresolvedQuestions.length > 0) {
       cues.push(`Unresolved memory questions: ${unresolvedQuestions.join(" | ")}`);
