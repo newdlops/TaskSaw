@@ -935,7 +935,8 @@ export class OrchestratorService {
         env: {
           ...geminiEnv,
           ...geminiCommand.env
-        }
+        },
+        temperature: 0
       });
 
       for (const geminiModel of this.uniqueModels(geminiModels)) {

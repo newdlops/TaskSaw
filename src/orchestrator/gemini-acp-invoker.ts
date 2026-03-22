@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import {
@@ -28,6 +28,7 @@ type GeminiAcpModule = {
 };
 
 type SpawnedProcess = {
+  pid?: number;
   stdin: NodeJS.WritableStream | null;
   stdout: NodeJS.ReadableStream | null;
   stderr: NodeJS.ReadableStream | null;
@@ -63,6 +64,7 @@ type GeminiAcpInvokerOptions = {
   modeByCapability?: Partial<Record<OrchestratorCapability, string>>;
   fallbackModelIds?: string[];
   invalidStreamRetryCount?: number;
+  temperature?: number;
   dependencies?: GeminiAcpInvokerDependencies;
 };
 
@@ -135,6 +137,7 @@ type ReadOnlyProbeGuardState = {
   blockedHypothesisReasons: Map<string, string>;
   consecutiveRejections: number;
   permissionCallbacksClosed: boolean;
+  gatherAutoRejectCount: number;
 };
 
 const DEFAULT_GEMINI_MODE_BY_CAPABILITY: Partial<Record<OrchestratorCapability, string>> = {
@@ -303,6 +306,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const command = [options.executablePath, ...options.executableArgs, "--acp"];
   const fallbackModelIds = options.fallbackModelIds ?? [];
   const invalidStreamRetryCount = Math.max(0, options.invalidStreamRetryCount ?? 1);
+  const defaultTemperature = options.temperature ?? 0.2;
   const workspaceRoot = options.cwd ?? process.cwd();
   let activeRuntime: GeminiPromptRuntime | null = null;
   let activeSession: GeminiLiveSession | null = null;
@@ -324,7 +328,8 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
         hypothesisCounts: new Map(),
         blockedHypothesisReasons: new Map(),
         consecutiveRejections: 0,
-        permissionCallbacksClosed: false
+        permissionCallbacksClosed: false,
+        gatherAutoRejectCount: 0
       };
       const retryNotes: string[] = [];
       let lastError: unknown;
@@ -375,6 +380,8 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
             promptInactivityTimeoutMs,
             `Timed out while waiting for Gemini ACP prompt activity for ${capability} with ${modelId}`
           );
+          let activeStdinMonitor: StdinWaitMonitorHandle | null = null;
+          let stdinWaitDetectedCommand: string | null = null;
           const runtime: GeminiPromptRuntime = {
             capability,
             agentMessageChunks,
@@ -389,6 +396,17 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
             pauseActivity: () => promptActivity.pause(),
             resumeActivity: () => promptActivity.resume(),
             requestPermissionHandler: async (permissionRequest) => {
+              // Stop any active stdin-wait monitor from a previous tool call
+              if (activeStdinMonitor) {
+                activeStdinMonitor.stop();
+                activeStdinMonitor = null;
+              }
+
+              // Normalize slash command quotes in the tool call title
+              if (permissionRequest.toolCall?.title) {
+                permissionRequest.toolCall.title = normalizeSlashCommandQuotes(permissionRequest.toolCall.title);
+              }
+
               if (readOnlyProbeGuardState.permissionCallbacksClosed) {
                 promptActivity.touch();
                 return {
@@ -417,7 +435,15 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                   guardrailReason.includes("already attempted in this phase");
 
                 if (capability === "gather" && isGuessAndTestLoopBlocker) {
-                  const reason = `Auto-rejected during gather to prevent blind execution loops: ${guardrailReason}. Please use static analysis (e.g. reading source code, --help manuals) instead of guessing CLI arguments.`;
+                  readOnlyProbeGuardState.gatherAutoRejectCount += 1;
+                  const count = readOnlyProbeGuardState.gatherAutoRejectCount;
+
+                  let reason = `Auto-rejected during gather to prevent blind execution loops: ${guardrailReason}. Please use static analysis (e.g. reading source code, --help manuals) instead of guessing CLI arguments.`;
+
+                  if (count >= 3) {
+                    reason += ` WARNING: You have failed ${count} blind execution attempts consecutively. Your next tool call MUST use read-only tools (grep, find, cat, ls, sed -n) to read source code. Any further execute-type tool call WILL be blocked.`;
+                  }
+
                   const decision: OrchestratorApprovalDecision = {
                     outcome: "internally_cancelled",
                     reason
@@ -675,6 +701,65 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                   }
                 );
                 promptActivity.touch();
+
+                // Start stdin-wait monitor for auto-approved execute tool calls
+                if (
+                  decision.outcome === "selected"
+                  && permissionRequest.toolCall?.kind?.trim() === "execute"
+                  && session.child.pid
+                  && context.requestInteractiveSession
+                ) {
+                  const commandText = extractExecuteToolCallCommandText(permissionRequest.toolCall)
+                    ?? permissionRequest.toolCall.title ?? "";
+                  activeStdinMonitor = startStdinWaitMonitor(
+                    session.child.pid,
+                    async (childPid) => {
+                      stdinWaitDetectedCommand = commandText;
+                      activeStdinMonitor = null;
+                      context.reportProgress?.(
+                        "Runtime stdin-wait detected; tearing down ACP session and opening interactive modal",
+                        {
+                          capability,
+                          model: modelId,
+                          toolCall: toolCallSummary ?? null,
+                          detectedChildPid: childPid
+                        }
+                      );
+                      await invalidateSession(session);
+                      promptActivity.pause();
+                      try {
+                        const response = await context.requestInteractiveSession!({
+                          abortSignal: context.abortSignal,
+                          title: commandText,
+                          message: buildInteractiveSessionRequestMessage(context.outputLanguage),
+                          commandText,
+                          cwd: workspaceRoot
+                        });
+                        const transcript = response.transcript ?? "";
+                        if (transcript.trim().length > 0) {
+                          agentMessageChunks.push(transcript);
+                        }
+                        context.reportProgress?.(
+                          response.outcome === "completed"
+                            ? "Interactive session from stdin-wait detection completed"
+                            : "Interactive session from stdin-wait detection ended",
+                          {
+                            capability,
+                            model: modelId,
+                            toolCall: toolCallSummary ?? null,
+                            sessionOutcome: response.outcome ?? null,
+                            exitCode: response.exitCode ?? null
+                          }
+                        );
+                      } finally {
+                        promptActivity.resume();
+                        promptActivity.touch();
+                      }
+                    },
+                    context.abortSignal
+                  );
+                }
+
                 return decision;
               }
 
@@ -703,6 +788,65 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                     reason: decision.reason ?? null
                   }
                 );
+
+                // Start stdin-wait monitor for user-approved execute tool calls
+                if (
+                  decision.outcome === "selected"
+                  && permissionRequest.toolCall?.kind?.trim() === "execute"
+                  && session.child.pid
+                  && context.requestInteractiveSession
+                ) {
+                  const commandText = extractExecuteToolCallCommandText(permissionRequest.toolCall)
+                    ?? permissionRequest.toolCall.title ?? "";
+                  activeStdinMonitor = startStdinWaitMonitor(
+                    session.child.pid,
+                    async (childPid) => {
+                      stdinWaitDetectedCommand = commandText;
+                      activeStdinMonitor = null;
+                      context.reportProgress?.(
+                        "Runtime stdin-wait detected; tearing down ACP session and opening interactive modal",
+                        {
+                          capability,
+                          model: modelId,
+                          toolCall: toolCallSummary ?? null,
+                          detectedChildPid: childPid
+                        }
+                      );
+                      await invalidateSession(session);
+                      promptActivity.pause();
+                      try {
+                        const response = await context.requestInteractiveSession!({
+                          abortSignal: context.abortSignal,
+                          title: commandText,
+                          message: buildInteractiveSessionRequestMessage(context.outputLanguage),
+                          commandText,
+                          cwd: workspaceRoot
+                        });
+                        const transcript = response.transcript ?? "";
+                        if (transcript.trim().length > 0) {
+                          agentMessageChunks.push(transcript);
+                        }
+                        context.reportProgress?.(
+                          response.outcome === "completed"
+                            ? "Interactive session from stdin-wait detection completed"
+                            : "Interactive session from stdin-wait detection ended",
+                          {
+                            capability,
+                            model: modelId,
+                            toolCall: toolCallSummary ?? null,
+                            sessionOutcome: response.outcome ?? null,
+                            exitCode: response.exitCode ?? null
+                          }
+                        );
+                      } finally {
+                        promptActivity.resume();
+                        promptActivity.touch();
+                      }
+                    },
+                    context.abortSignal
+                  );
+                }
+
                 return decision;
               } finally {
                 promptActivity.resume();
@@ -726,7 +870,12 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                       type: "text",
                       text: prompt
                     }
-                  ]
+                  ],
+                  ...(isReadOnlyGeminiCapability(capability) ? {
+                    generationConfig: {
+                      temperature: defaultTemperature
+                    }
+                  } : {})
                 }) as Promise<GeminiPromptResponse>
               ),
               context.abortSignal,
@@ -1316,6 +1465,15 @@ const SHELL_WRAPPER_COMMANDS = new Set([
   "/bin/zsh"
 ]);
 
+const RUNTIME_WRAPPER_COMMANDS = new Set([
+  "node",
+  "npx",
+  "ts-node",
+  "tsx",
+  "bun",
+  "deno"
+]);
+
 class GeminiAcpReadOnlyProbeLoopAbortError extends Error {
   constructor(message: string) {
     super(message);
@@ -1612,7 +1770,12 @@ function isFocusedGatherInternalLogReminingCommand(commandText: string, workspac
     const lowerToken = normalizedToken.toLowerCase().replace(/\/+$/g, "");
     const basename = path.posix.basename(lowerToken);
 
-    if (basename === "gemini_debug.log" || basename === "logs.json") {
+    if (
+      basename === "gemini_debug.log"
+      || basename === "logs.json"
+      || basename.endsWith(".log")
+      || basename.endsWith(".cache")
+    ) {
       return true;
     }
 
@@ -1894,6 +2057,25 @@ function buildExternalToolSurfaceKey(commandText: string, workspaceRoot: string)
   const commandName = path.basename(commandToken).toLowerCase();
   if (EXTERNAL_TOOL_SURFACE_COMMANDS.has(commandName)) {
     return `surface:${commandName}`;
+  }
+
+  if (RUNTIME_WRAPPER_COMMANDS.has(commandName)) {
+    for (let i = commandIndex + 1; i < tokens.length; i++) {
+      const arg = tokens[i]!;
+      if (arg.startsWith("-")) {
+        continue;
+      }
+      const normalizedArg = arg.replace(/\\/g, "/");
+      if (normalizedArg.includes("/managed-tools/")) {
+        const surfaceMatch = normalizedArg.match(/\/managed-tools\/.*\/([^/]+?)(?:-cli|-cli-core)?\/dist\//);
+        const surfaceName = surfaceMatch?.[1]?.toLowerCase();
+        if (surfaceName && EXTERNAL_TOOL_SURFACE_COMMANDS.has(surfaceName)) {
+          return `surface:${surfaceName}`;
+        }
+        return `surface:managed-tool`;
+      }
+      break;
+    }
   }
 
   const normalizedCommandToken = commandToken.replace(/\\/g, "/");
@@ -2248,6 +2430,120 @@ const COMMON_HYPOTHESIS_STOP_WORDS = new Set([
   "version",
   "status"
 ]);
+
+// ---------------------------------------------------------------------------
+// Runtime stdin-wait detection (macOS / Linux)
+// ---------------------------------------------------------------------------
+
+function execShellCommand(cmd: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { timeout: 5_000 }, (error, stdout) => {
+      if (error) {
+        // pgrep exits 1 when no processes found — that's expected
+        if ((error as NodeJS.ErrnoException).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || error.killed) {
+          return reject(error);
+        }
+        return resolve("");
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+async function getDescendantPids(parentPid: number): Promise<number[]> {
+  const directOutput = await execShellCommand("pgrep", ["-P", String(parentPid)]);
+  const directPids = directOutput
+    .split("\n")
+    .map((line) => parseInt(line.trim(), 10))
+    .filter((pid) => Number.isFinite(pid) && pid > 0);
+
+  const allPids = [...directPids];
+  for (const childPid of directPids) {
+    const grandchildren = await getDescendantPids(childPid);
+    allPids.push(...grandchildren);
+  }
+  return allPids;
+}
+
+async function isProcessWaitingForStdin(pid: number): Promise<boolean> {
+  // On macOS, `ps -o stat=` returns e.g. "S+" for sleeping foreground process
+  // "S+" means interruptible sleep in the foreground group (often stdin wait)
+  const statOutput = await execShellCommand("ps", ["-o", "stat=", "-p", String(pid)]);
+  const stat = statOutput.trim();
+  // S+ (sleeping foreground), Ss+ (session leader sleeping foreground)
+  return /^S[s]?\+/.test(stat);
+}
+
+async function detectStdinWaitingDescendant(parentPid: number): Promise<number | null> {
+  try {
+    const descendants = await getDescendantPids(parentPid);
+    for (const pid of descendants) {
+      if (await isProcessWaitingForStdin(pid)) {
+        return pid;
+      }
+    }
+  } catch {
+    // Ignore detection errors (process may have exited)
+  }
+  return null;
+}
+
+type StdinWaitMonitorHandle = {
+  stop: () => void;
+};
+
+function startStdinWaitMonitor(
+  geminiPid: number,
+  onDetected: (childPid: number) => void,
+  signal: AbortSignal,
+  intervalMs: number = 2_000,
+  initialDelayMs: number = 3_000
+): StdinWaitMonitorHandle {
+  let stopped = false;
+  let timer: NodeJS.Timeout | null = null;
+
+  const stop = () => {
+    stopped = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  if (signal.aborted) {
+    return { stop };
+  }
+  signal.addEventListener("abort", stop, { once: true });
+
+  const poll = async () => {
+    if (stopped) return;
+    const waitingPid = await detectStdinWaitingDescendant(geminiPid);
+    if (stopped) return;
+    if (waitingPid !== null) {
+      stop();
+      onDetected(waitingPid);
+    } else {
+      if (!stopped) {
+        timer = setTimeout(poll, intervalMs);
+      }
+    }
+  };
+
+  // Delay the first check to give the process time to start
+  timer = setTimeout(poll, initialDelayMs);
+
+  return { stop };
+}
+
+// ---------------------------------------------------------------------------
+// Slash command quote normalization
+// ---------------------------------------------------------------------------
+
+function normalizeSlashCommandQuotes(commandText: string): string {
+  // Remove unnecessary quotes around slash commands:
+  // gemini -p "/stats session" → gemini -p /stats session
+  return commandText.replace(/"(\/[a-zA-Z][\w\s/.-]*)"/g, "$1");
+}
 
 type InactivityController = {
   wrap: <T>(promise: Promise<T>) => Promise<T>;
