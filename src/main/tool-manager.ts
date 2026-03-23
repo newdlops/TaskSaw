@@ -239,10 +239,11 @@ export class ToolManager {
         return null;
       }
 
-      const usageStats = await this.queryGeminiModelUsageStats();
+      const selectedModelId = catalog.currentModelId ?? catalog.models[0]?.id ?? null;
+      const usageStats = await this.queryGeminiModelUsageStats(selectedModelId);
       const usageRecords = this.extractGeminiUsageRecords(usageStats);
 
-      const models = catalog.models
+      const catalogModels = catalog.models
         .filter((model) => !model.hidden)
         .map((model) => {
           let displayName = model.displayName;
@@ -256,7 +257,6 @@ export class ToolManager {
           };
         });
 
-      const selectedModelId = catalog.currentModelId ?? models[0]?.modelId ?? null;
       let remainingPercent = selectedModelId
         ? this.findGeminiRemainingPercentForModel(selectedModelId, usageRecords, true)
         : null;
@@ -277,14 +277,19 @@ export class ToolManager {
       return {
         remainingPercent,
         statusMessage,
-        gemini: { models }
+        gemini: { models: catalogModels }
       };
     } catch {
       return null;
     }
   }
 
-  private async queryGeminiModelUsageStats(): Promise<unknown> {
+  private async queryGeminiModelUsageStats(modelId?: string | null): Promise<unknown> {
+    const libraryQuota = await this.fetchGeminiQuotaViaLibrary(modelId);
+    if (libraryQuota) {
+      return libraryQuota;
+    }
+
     const launchCommand = this.resolveInstalledLaunchCommand("gemini");
     if (!launchCommand) {
       return null;
@@ -338,6 +343,73 @@ export class ToolManager {
 
     this.activeSessionQueryTrigger?.();
     return null;
+  }
+
+  private async fetchGeminiQuotaViaLibrary(modelId?: string | null): Promise<unknown> {
+    try {
+      const coreIndex = path.join(
+        this.getInstallDirectory("gemini"),
+        "node_modules",
+        "@google",
+        "gemini-cli-core",
+        "dist",
+        "src",
+        "index.js"
+      );
+
+      if (!fs.existsSync(coreIndex)) {
+        return null;
+      }
+
+      // Temporarily override HOME and force file storage to avoid keychain prompts
+      const originalHome = process.env.HOME;
+      const originalForceStorage = process.env.GEMINI_FORCE_FILE_STORAGE;
+      const originalDisableKeychain = process.env.GEMINI_DISABLE_KEYCHAIN;
+      
+      process.env.HOME = this.getHomeDirectory();
+      process.env.GEMINI_FORCE_FILE_STORAGE = 'true';
+      process.env.GEMINI_DISABLE_KEYCHAIN = 'true';
+
+      try {
+        const { Config, AuthType } = await dynamicImport(pathToFileURL(coreIndex).href) as {
+          Config: any;
+          AuthType: any;
+        };
+
+        const config = new Config({
+          sessionId: "tasksaw-usage-query",
+          targetDir: process.cwd(),
+          cwd: process.cwd(),
+          debugMode: false,
+          model: modelId || "auto",
+          interactive: false,
+          question: ""
+        });
+
+        await this.withTimeout(config.initialize(), 5_000, "Gemini library init timeout");
+        await this.withTimeout(config.refreshAuth(AuthType.LOGIN_WITH_GOOGLE), 5_000, "Gemini library auth timeout");
+        
+        const quota = await this.withTimeout(config.refreshUserQuota(), 5_000, "Gemini library quota timeout");
+        
+        this.logGeminiDebug("Library Quota Success", JSON.stringify(quota, null, 2));
+        return quota;
+      } finally {
+        process.env.HOME = originalHome;
+        if (originalForceStorage !== undefined) {
+          process.env.GEMINI_FORCE_FILE_STORAGE = originalForceStorage;
+        } else {
+          delete process.env.GEMINI_FORCE_FILE_STORAGE;
+        }
+        if (originalDisableKeychain !== undefined) {
+          process.env.GEMINI_DISABLE_KEYCHAIN = originalDisableKeychain;
+        } else {
+          delete process.env.GEMINI_DISABLE_KEYCHAIN;
+        }
+      }
+    } catch (error: any) {
+      this.logGeminiDebug("Library Quota Error", error.message || String(error));
+      return null;
+    }
   }
 
   private parseGeminiUsageFromText(text: string): { percent: number | null, message: string | null } | null {
@@ -403,30 +475,16 @@ export class ToolManager {
         resolve({ stdout, stderr, code: null, error: "timeout" });
       }, timeoutMs);
 
-      const logExecution = (code: number | null, error?: Error) => {
-        const logPath = path.join(process.cwd(), "gemini_debug.log");
-        const timestamp = new Date().toISOString();
-        const logEntries = [
-          `--- ${timestamp} ---`,
-          `Command: ${command}`,
-          `Args: ${JSON.stringify(args)}`,
-          `Exit Code: ${code}`
-        ];
-        if (error) logEntries.push(`Error: ${error.message}`);
-        logEntries.push(`STDOUT: ${stdout}`);
-        logEntries.push(`STDERR: ${stderr}`);
-        logEntries.push("---------------------------\n");
-
-        try {
-          fs.appendFileSync(logPath, logEntries.join("\n"));
-        } catch {
-          // Ignore logging failures
-        }
-      };
-
       child.on("close", (code) => {
         clearTimeout(timeout);
-        logExecution(code);
+        this.logGeminiDebug(`CLI Command Output`, [
+          `Command: ${command}`,
+          `Args: ${JSON.stringify(args)}`,
+          `Exit Code: ${code}`,
+          `STDOUT: ${stdout}`,
+          `STDERR: ${stderr}`
+        ].join("\n"));
+
         if (code !== 0) {
           resolve({ stdout, stderr, code });
           return;
@@ -441,10 +499,32 @@ export class ToolManager {
 
       child.on("error", (err) => {
         clearTimeout(timeout);
-        logExecution(null, err);
+        this.logGeminiDebug(`CLI Command Error`, [
+          `Command: ${command}`,
+          `Args: ${JSON.stringify(args)}`,
+          `Error: ${err.message}`,
+          `STDOUT: ${stdout}`,
+          `STDERR: ${stderr}`
+        ].join("\n"));
         resolve({ stdout, stderr, code: null, error: err.message });
       });
     });
+  }
+
+  private logGeminiDebug(title: string, content: string) {
+    const logPath = path.join(process.cwd(), "gemini_debug.log");
+    const timestamp = new Date().toISOString();
+    const entry = [
+      `--- ${timestamp} [${title}] ---`,
+      content,
+      "---------------------------\n"
+    ].join("\n");
+
+    try {
+      fs.appendFileSync(logPath, entry);
+    } catch {
+      // Ignore logging failures
+    }
   }
 
   private extractGeminiUsageRecords(stats: unknown): GeminiUsageRecord[] {
@@ -542,6 +622,16 @@ export class ToolManager {
     ]);
     if (directPercent !== null) {
       return this.clampPercentage(directPercent);
+    }
+
+    const fraction = this.readFirstNumber(value, [
+      "remainingFraction",
+      "remaining_fraction",
+      "remainingFractional",
+      "fractionRemaining"
+    ]);
+    if (fraction !== null) {
+      return this.clampPercentage(fraction * 100);
     }
 
     const remaining = this.readFirstNumber(value, [
@@ -654,6 +744,7 @@ export class ToolManager {
       SANDBOX: "tasksaw-managed",
       GEMINI_SANDBOX: "false",
       GEMINI_FORCE_FILE_STORAGE: "true",
+      GEMINI_DISABLE_KEYCHAIN: "true",
       GEMINI_TELEMETRY_ENABLED: "0",
       NODE_NO_WARNINGS: "1"
     };
