@@ -357,7 +357,7 @@ body[data-has-sessions="false"] #sidebar {
   max-width: 72ch;
 }
 
-.orchestrator-grid { 
+.orchestrator-grid {
   min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -443,7 +443,7 @@ body[data-has-sessions="false"] #sidebar {
   grid-row: 1 / span 2;
   display: grid;
   grid-template-rows: minmax(0, 1fr) minmax(220px, 0.72fr);
-  gap: 12px;
+  gap: 5px;
   min-height: 0;
   overflow: hidden;
 }
@@ -462,11 +462,8 @@ body[data-has-sessions="false"] #sidebar {
 }
 
 .orchestrator-detail-card {
-  flex: 0 0 auto;
   min-height: 0;
   grid-template-rows: auto auto minmax(min-content, 1fr);
-  height: 100%;
-  max-height: 100%;
   overflow: auto;
 }
 
@@ -625,7 +622,7 @@ body[data-has-sessions="false"] #sidebar {
 }
 
 .orchestrator-next-actions-card {
-  margin-bottom: 12px;
+  margin-bottom: 5px;
 }
 
 .orchestrator-next-actions-summary {
@@ -1375,7 +1372,7 @@ body[data-has-sessions="false"] #sidebar {
 }
 
 .orchestrator-log-card {
-  flex: 0 0 auto;
+  margin-top: 8px;
 }
 
 #terminal-root {
@@ -1560,7 +1557,7 @@ body[data-has-sessions="false"] #sidebar {
 }
 
 @media (max-width: 1100px) {
-  .orchestrator-grid { 
+  .orchestrator-grid {
   min-height: 0;
     grid-template-rows: auto;
   }
