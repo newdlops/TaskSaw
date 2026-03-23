@@ -84,7 +84,7 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
     this.buildInvocationArgs = options.buildInvocationArgs;
     this.env = options.env ?? {};
     this.cwd = options.cwd;
-    this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.timeoutMs = options.timeoutMs ?? 300_000;
   }
 
   supports(capability: OrchestratorCapability): boolean {

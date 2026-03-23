@@ -300,10 +300,10 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   ) as Partial<Record<OrchestratorCapability, string>>;
   const startupTimeoutMs = typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
     ? Math.max(1_000, Math.trunc(options.timeoutMs))
-    : 120_000;
+    : 300_000;
   const promptInactivityTimeoutMs = typeof options.promptInactivityTimeoutMs === "number" && Number.isFinite(options.promptInactivityTimeoutMs)
     ? Math.max(1_000, Math.trunc(options.promptInactivityTimeoutMs))
-    : 120_000;
+    : 300_000;
   const command = [options.executablePath, ...options.executableArgs, ...(options.sandbox ? ["--sandbox"] : []), "--acp"];
   const fallbackModelIds = options.fallbackModelIds ?? [];
   const invalidStreamRetryCount = Math.max(0, options.invalidStreamRetryCount ?? 1);

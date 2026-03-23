@@ -357,11 +357,11 @@ body[data-has-sessions="false"] #sidebar {
   max-width: 72ch;
 }
 
-.orchestrator-grid {
+.orchestrator-grid { 
+  min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
-  min-height: 0;
 }
 
 .orchestrator-inputs {
@@ -464,7 +464,7 @@ body[data-has-sessions="false"] #sidebar {
 .orchestrator-detail-card {
   flex: 0 0 auto;
   min-height: 0;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto auto minmax(min-content, 1fr);
   height: 100%;
   max-height: 100%;
   overflow: auto;
@@ -536,30 +536,27 @@ body[data-has-sessions="false"] #sidebar {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
-  height: 100%;
+  min-height: 100%;
   padding: 12px;
   border-radius: 12px;
   border: 1px solid var(--border);
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 18%, transparent), transparent 48%),
     color-mix(in srgb, var(--surface-strong) 92%, transparent);
-  overflow: hidden;
   align-content: start;
 }
 
 .orchestrator-node-live-body {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.85fr);
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto minmax(280px, 1fr);
   gap: 12px;
   min-width: 0;
-  min-height: 0;
   align-items: stretch;
 }
 
 .orchestrator-node-live-main {
   min-width: 0;
-  min-height: 0;
   display: grid;
   gap: 10px;
   align-content: start;
@@ -567,7 +564,6 @@ body[data-has-sessions="false"] #sidebar {
 
 .orchestrator-node-live-sidebar {
   min-width: 0;
-  min-height: 0;
   display: grid;
   gap: 10px;
   align-content: start;
@@ -582,7 +578,6 @@ body[data-has-sessions="false"] #sidebar {
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 24%, transparent), transparent 58%),
     color-mix(in srgb, var(--surface) 94%, transparent);
-  min-height: 0;
 }
 
 .orchestrator-node-approval-status {
@@ -603,7 +598,6 @@ body[data-has-sessions="false"] #sidebar {
 
 .orchestrator-node-approval-details {
   margin: 0;
-  min-height: 0;
   max-height: 108px;
   overflow: auto;
   white-space: pre-wrap;
@@ -616,7 +610,6 @@ body[data-has-sessions="false"] #sidebar {
 .orchestrator-pending-approvals-list {
   display: grid;
   gap: 8px;
-  min-height: 0;
   max-height: none;
   overflow: auto;
   padding-right: 4px;
@@ -645,7 +638,6 @@ body[data-has-sessions="false"] #sidebar {
 .orchestrator-next-actions-list {
   display: grid;
   gap: 8px;
-  min-height: 0;
 }
 
 .orchestrator-next-action-empty {
@@ -825,7 +817,6 @@ body[data-has-sessions="false"] #sidebar {
 
 .orchestrator-working-memory-card pre {
   margin: 0;
-  min-height: 0;
   overflow: auto;
 }
 
@@ -884,7 +875,6 @@ body[data-has-sessions="false"] #sidebar {
   grid-column: 1 / -1;
   gap: 10px;
   min-width: 0;
-  min-height: 0;
   margin-top: 6px;
 }
 
@@ -894,7 +884,6 @@ body[data-has-sessions="false"] #sidebar {
 
 .orchestrator-node-live-section {
   min-width: 0;
-  min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
@@ -1141,7 +1130,6 @@ body[data-has-sessions="false"] #sidebar {
 
 #orchestrator-node-log,
 #orchestrator-log {
-  min-height: 0;
   height: 100%;
   width: 100%;
   margin: 0;
@@ -1392,14 +1380,12 @@ body[data-has-sessions="false"] #sidebar {
 
 #terminal-root {
   width: 100%;
-  min-height: 0;
   overflow: hidden;
 }
 
 .terminal-pane {
   height: 100%;
   min-width: 0;
-  min-height: 0;
   display: none;
   grid-template-rows: auto 1fr;
   border-radius: 14px;
@@ -1485,7 +1471,6 @@ body[data-has-sessions="false"] #sidebar {
 
 .terminal-viewport {
   min-width: 0;
-  min-height: 0;
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -1575,7 +1560,8 @@ body[data-has-sessions="false"] #sidebar {
 }
 
 @media (max-width: 1100px) {
-  .orchestrator-grid {
+  .orchestrator-grid { 
+  min-height: 0;
     grid-template-rows: auto;
   }
 
@@ -1591,7 +1577,8 @@ body[data-has-sessions="false"] #sidebar {
   .orchestrator-detail-stack {
     grid-column: 1;
     grid-row: auto;
-    grid-template-rows: none;
+    grid-template-rows: auto auto;
+    gap: 16px;
     overflow: visible;
     padding-right: 0;
   }
@@ -1600,18 +1587,22 @@ body[data-has-sessions="false"] #sidebar {
   .orchestrator-log-card {
     grid-column: auto;
     grid-row: auto;
+    height: auto;
+  }
+
+  .orchestrator-card {
+    max-height: 480px;
   }
 
   .orchestrator-detail-card {
     max-height: none;
   }
 
-  .orchestrator-card {
-    max-height: 320px;
+  .orchestrator-log-card {
+    min-height: 320px;
   }
 
   .orchestrator-node-live-card {
-    min-height: 0;
     max-height: none;
   }
 
@@ -1759,7 +1750,6 @@ body[data-has-sessions="false"] #sidebar {
   max-width: min(720px, 100%);
   max-height: min(82vh, 920px);
   grid-template-rows: auto minmax(0, 160px) minmax(0, 1fr) minmax(0, 1.25fr) auto;
-  min-height: 0;
 }
 
 .interactive-session-dialog-card {
@@ -1767,7 +1757,6 @@ body[data-has-sessions="false"] #sidebar {
   max-width: min(1180px, calc(100vw - 40px));
   max-height: min(86vh, 960px);
   grid-template-rows: auto auto auto minmax(0, 1fr);
-  min-height: 0;
   min-width: 0;
 }
 
@@ -1778,7 +1767,6 @@ body[data-has-sessions="false"] #sidebar {
 }
 
 .interactive-session-dialog-terminal {
-  min-height: 0;
   min-width: 0;
   width: 100%;
   max-width: 100%;
@@ -1810,7 +1798,6 @@ body[data-has-sessions="false"] #sidebar {
 .approval-dialog-list {
   display: grid;
   gap: 8px;
-  min-height: 0;
   overflow: auto;
   padding-right: 4px;
 }
@@ -1845,7 +1832,6 @@ body[data-has-sessions="false"] #sidebar {
 }
 
 #approval-dialog-message {
-  min-height: 0;
   overflow: auto;
   padding-right: 4px;
 }
@@ -1855,7 +1841,6 @@ body[data-has-sessions="false"] #sidebar {
 }
 
 .log-viewer-content {
-  min-height: 0;
   margin: 0;
   padding: 14px;
   overflow: auto;

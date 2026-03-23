@@ -56,10 +56,6 @@
     <div style="display: flex; align-items: center; gap: 4px;">
       <button id="new-gemini" type="button" disabled>+Gemini</button>
     </div>
-    <label style="display: flex; align-items: center; gap: 4px; font-size: 13px;">
-      <input type="checkbox" id="auto-approve-checkbox">
-      <span id="auto-approve-label">Auto Approve</span>
-    </label>
     <button id="approval-queue-button" type="button" disabled>입력 대기중 (0)</button>
     <button id="tools-update" type="button">Update AI Tools</button>
     <button id="app-reset" type="button">Reset All Data</button>
@@ -102,6 +98,14 @@
             </div>
           </div>
           <div class="topbar-group">
+            <label style="display: flex; align-items: center; gap: 4px; font-size: 13px;">
+              <input type="checkbox" id="auto-approve-checkbox">
+              <span id="auto-approve-label">Auto Approve</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 4px; font-size: 13px;">
+              <input type="checkbox" id="orchestrator-sandbox" checked>
+              <span id="orchestrator-sandbox-label">Sandbox Mode</span>
+            </label>
             <button id="orchestrator-refresh" type="button">Refresh Runs</button>
             <button id="orchestrator-stop" type="button">Stop Run</button>
             <button id="orchestrator-continue" type="button">Resume Selected</button>
@@ -128,10 +132,6 @@
             <label class="orchestrator-form-field orchestrator-depth-field">
               <span id="orchestrator-depth-label">Max Depth</span>
               <input id="orchestrator-depth" type="number" min="1" max="6" step="1" value="2" />
-            </label>
-            <label class="orchestrator-form-field orchestrator-depth-field" style="flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px;">
-              <input type="checkbox" id="orchestrator-sandbox" checked>
-              <span id="orchestrator-sandbox-label">Sandbox Mode</span>
             </label>
         </div>
 
