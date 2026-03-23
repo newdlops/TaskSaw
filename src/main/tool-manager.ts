@@ -292,12 +292,9 @@ export class ToolManager {
 
     const env = this.buildManagedCommandEnv("gemini", launchCommand.env);
     const commandAttempts = [
-      ["-p", "/stats", "session", "-o", "json"],
-      ["-p", "/stats", "model", "-o", "json"],
       ["-p", "/stats session", "-o", "json"],
       ["-p", "/stats model", "-o", "json"],
-      ["/stats", "session", "-o", "json"],
-      ["/stats", "model", "-o", "json"],
+      ["/stats session", "-o", "json"],
       ["retrieveuserquota", "-o", "json"]
     ];
 

@@ -300,10 +300,10 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   ) as Partial<Record<OrchestratorCapability, string>>;
   const startupTimeoutMs = typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
     ? Math.max(1_000, Math.trunc(options.timeoutMs))
-    : null;
+    : 120_000;
   const promptInactivityTimeoutMs = typeof options.promptInactivityTimeoutMs === "number" && Number.isFinite(options.promptInactivityTimeoutMs)
     ? Math.max(1_000, Math.trunc(options.promptInactivityTimeoutMs))
-    : null;
+    : 120_000;
   const command = [options.executablePath, ...options.executableArgs, ...(options.sandbox ? ["--sandbox"] : []), "--acp"];
   const fallbackModelIds = options.fallbackModelIds ?? [];
   const invalidStreamRetryCount = Math.max(0, options.invalidStreamRetryCount ?? 1);
@@ -950,6 +950,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
             && (
               isRetryableGeminiInvalidStreamMessage(message)
               || isRetryableGeminiCapacityMessage(message)
+              || isRetryableGeminiTimeoutMessage(message)
             );
 
           if (!shouldRetry) {
@@ -1540,6 +1541,11 @@ function isRetryableGeminiCapacityMessage(message: string): boolean {
     || normalized.includes("resource exhausted")
     || normalized.includes("server is overloaded")
     || normalized.includes("capacity available");
+}
+
+function isRetryableGeminiTimeoutMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return normalized.includes("prompt inactive for");
 }
 
 function formatGeminiAcpError(error: unknown): string {

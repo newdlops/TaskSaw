@@ -35,6 +35,7 @@ type SessionPaths = {
 export class PtyManager {
   private sessions = new Map<string, SessionRecord>();
   private lastUsageQueryTime = 0;
+  private usageSessionId: string | null = null;
 
   constructor(
     private mainWindow: BrowserWindow,
@@ -182,14 +183,14 @@ export class PtyManager {
           output += data;
           
           // Wait for a prompt-like output before sending the command, or just send it after a short delay
-          if (!commandSent && (data.includes("tasksaw") || data.includes("%") || data.includes(">"))) {
+          if (!commandSent && (data.includes("tasksaw") || data.includes("%") || data.includes(">") || data.includes("gemini"))) {
             commandSent = true;
             ptyProcess.write(`${commandText}\r`);
           }
 
           // If we see something that looks like the end of the command output (e.g., the prompt returns)
           // and we have captured some actual output from the command
-          if (commandSent && output.split("\r\n").length > 3 && (data.includes("tasksaw") || data.includes("%") || data.includes(">"))) {
+          if (commandSent && output.split("\r\n").length > 3 && (data.includes("tasksaw") || data.includes("%") || data.includes(">") || data.includes("gemini"))) {
             clearTimeout(timeout);
             ptyProcess.kill();
             resolve(output);
@@ -225,17 +226,54 @@ export class PtyManager {
     this.cleanupStaleSessionDirectories();
   }
 
-  requestGeminiUsageUpdateFromActiveSession() {
+  async requestGeminiUsageUpdateFromActiveSession() {
     const now = Date.now();
-    // Throttle checks to once every 60 seconds
-    if (now - this.lastUsageQueryTime < 60_000) return;
+    // Throttle checks to once every 30 seconds
+    if (now - this.lastUsageQueryTime < 30_000) return;
 
+    // 1. Try active visible session
     for (const session of this.sessions.values()) {
       if (session.info.kind === "gemini" && !session.info.hidden) {
         this.lastUsageQueryTime = now;
         session.ptyProcess.write("/stats session\n");
-        break;
+        return;
       }
+    }
+
+    // 2. Try existing hidden usage session
+    if (this.usageSessionId) {
+      const usageSession = this.sessions.get(this.usageSessionId);
+      if (usageSession) {
+        this.lastUsageQueryTime = now;
+        usageSession.ptyProcess.write("/stats session\n");
+        return;
+      } else {
+        this.usageSessionId = null;
+      }
+    }
+
+    // 3. Create a new hidden usage session
+    try {
+      const info = await this.createSession({
+        kind: "gemini",
+        cwd: os.tmpdir(),
+        hidden: true,
+        title: "gemini-usage-check"
+      });
+
+      if (info) {
+        this.usageSessionId = info.id;
+        this.lastUsageQueryTime = now;
+        // Wait a bit for the tool to start before sending command
+        setTimeout(() => {
+          const session = this.sessions.get(info.id);
+          if (session) {
+            session.ptyProcess.write("/stats session\n");
+          }
+        }, 3000);
+      }
+    } catch (error) {
+      console.error("[TaskSaw] Failed to create background Gemini usage session:", error);
     }
   }
 
@@ -249,6 +287,9 @@ export class PtyManager {
     }
 
     this.sessions.delete(sessionId);
+    if (this.usageSessionId === sessionId) {
+      this.usageSessionId = null;
+    }
     this.workspaceAccessManager.releaseWorkspace(session.info.cwd);
     this.removeSessionDirectory(session.sessionDirectory);
   }

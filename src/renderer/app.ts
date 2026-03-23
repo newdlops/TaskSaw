@@ -4394,26 +4394,27 @@ function resolveReadOnlyTerminalDimension(
 }
 
 function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): boolean {
-  const viewportRect = container.getBoundingClientRect();
   const parentElement = container.parentElement;
   const parentRect = parentElement?.getBoundingClientRect() ?? null;
   const maxViewportWidth = Math.max(360, appWindow.innerWidth - 48);
+
+  // Subtract padding and borders to prevent infinite resize loop.
+  // #orchestrator-node-terminal has padding: 10px 12px.
+  const widthPadding = 32; // 12px * 2 + extra for borders and safety
+  const heightPadding = 28; // 10px * 2 + extra for borders and safety
+
   const availableWidth = resolveReadOnlyTerminalDimension(
     [
-      container.clientWidth,
-      viewportRect.width,
-      parentElement?.clientWidth ?? 0,
-      parentRect?.width ?? 0
+      (parentElement?.clientWidth ?? 0) - widthPadding,
+      (parentRect?.width ?? 0) - widthPadding
     ],
     360,
     maxViewportWidth
   );
   const availableHeight = resolveReadOnlyTerminalDimension(
     [
-      container.clientHeight,
-      viewportRect.height,
-      parentElement?.clientHeight ?? 0,
-      parentRect?.height ?? 0
+      (parentElement?.clientHeight ?? 0) - heightPadding,
+      (parentRect?.height ?? 0) - heightPadding
     ],
     220
   );
