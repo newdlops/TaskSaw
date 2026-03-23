@@ -4411,12 +4411,14 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
     360,
     maxViewportWidth
   );
+  const maxViewportHeight = Math.max(220, appWindow.innerHeight - 120);
   const availableHeight = resolveReadOnlyTerminalDimension(
     [
       (parentElement?.clientHeight ?? 0) - heightPadding,
       (parentRect?.height ?? 0) - heightPadding
     ],
-    220
+    220,
+    maxViewportHeight
   );
   if (availableWidth === null || availableHeight === null) {
     return false;
