@@ -255,6 +255,19 @@ export class ToolManager {
             displayName,
             remainingPercent: this.findGeminiRemainingPercentForModel(model.id, usageRecords, false)
           };
+        })
+        .sort((left, right) => {
+          // 1. Current model always first
+          if (left.modelId === selectedModelId) return -1;
+          if (right.modelId === selectedModelId) return 1;
+
+          // 2. Models with actual usage data come before n/a
+          const leftHasUsage = left.remainingPercent !== null;
+          const rightHasUsage = right.remainingPercent !== null;
+          if (leftHasUsage && !rightHasUsage) return -1;
+          if (!leftHasUsage && rightHasUsage) return 1;
+
+          return 0;
         });
 
       let remainingPercent = selectedModelId

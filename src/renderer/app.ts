@@ -5669,12 +5669,12 @@ function renderToolUsageStatus(status: ManagedToolStatus) {
     label += ` ${leftLabel}`;
   } else if (status.id === "gemini") {
     if (usage?.gemini?.models && usage.gemini.models.length > 0) {
-      const displayModels = usage.gemini.models.slice(0, 3);
+      const displayModels = usage.gemini.models.slice(0, 4);
       const modelLabels = displayModels.map(m => {
         const p = m.remainingPercent === null ? "n/a" : `${m.remainingPercent}%`;
         return `${m.displayName}:${p}`;
       });
-      const suffix = usage.gemini.models.length > 3 ? "..." : "";
+      const suffix = usage.gemini.models.length > 4 ? "..." : "";
       label = `Gemini ${modelLabels.join(" ")}${suffix} ${leftLabel}`;
     } else {
       const p = remainingPercent === null ? "n/a" : `${remainingPercent}%`;
