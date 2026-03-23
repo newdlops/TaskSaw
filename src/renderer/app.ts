@@ -4428,6 +4428,11 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
   // (cols * charWidth) doesn't exceed the calculated availableWidth.
   const cols = Math.max(40, Math.floor(availableWidth / 10));
   const rows = Math.max(12, Math.floor(availableHeight / 18));
+
+  if (terminal.cols === cols && terminal.rows === rows) {
+    return true;
+  }
+
   terminal.resize(cols, rows);
   return true;
 }

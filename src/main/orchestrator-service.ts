@@ -927,6 +927,17 @@ export class OrchestratorService {
       const geminiEnv = this.toolManager.buildManagedExecutionEnvironment("gemini");
       const geminiAcpModulePath = this.toolManager.getGeminiAcpModulePath();
       const geminiFallbackModelIds = this.uniqueModels(geminiModels).map((model) => model.model);
+      
+      const hasFlashLite = geminiFallbackModelIds.some((id) => id.includes("flash-lite"));
+      if (hasFlashLite) {
+        if (!geminiFallbackModelIds.includes("gemini-3.0-flash")) {
+          geminiFallbackModelIds.push("gemini-3.0-flash");
+        }
+        if (!geminiFallbackModelIds.includes("gemini-2.5-flash")) {
+          geminiFallbackModelIds.push("gemini-2.5-flash");
+        }
+      }
+
       const sharedGeminiInvoke = createGeminiAcpInvoker({
         executablePath: geminiCommand.command,
         executableArgs: [cliRunnerPath, ...geminiCommand.args],

@@ -434,6 +434,7 @@ body[data-has-sessions="false"] #sidebar {
   grid-template-rows: minmax(0, 1fr) minmax(220px, 0.72fr);
   gap: 12px;
   min-height: 0;
+  min-width: 0;
   align-items: stretch;
   overflow: hidden;
 }
@@ -445,6 +446,7 @@ body[data-has-sessions="false"] #sidebar {
   grid-template-rows: minmax(0, 1fr) minmax(220px, 0.72fr);
   gap: 5px;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
 }
 
