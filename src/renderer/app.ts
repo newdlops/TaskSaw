@@ -4400,8 +4400,8 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
 
   // Subtract padding and borders to prevent infinite resize loop.
   // #orchestrator-node-terminal has padding: 10px 12px.
-  const widthPadding = 32; // 12px * 2 + extra for borders and safety
-  const heightPadding = 28; // 10px * 2 + extra for borders and safety
+  const widthPadding = 48; // Increased from 32 for better safety margin
+  const heightPadding = 32; // Increased from 28
 
   const availableWidth = resolveReadOnlyTerminalDimension(
     [
@@ -4422,7 +4422,9 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
     return false;
   }
 
-  const cols = Math.max(40, Math.floor(availableWidth / 9));
+  // Use 10 instead of 9 as divisor for cols to ensure the actual terminal width
+  // (cols * charWidth) doesn't exceed the calculated availableWidth.
+  const cols = Math.max(40, Math.floor(availableWidth / 10));
   const rows = Math.max(12, Math.floor(availableHeight / 18));
   terminal.resize(cols, rows);
   return true;
