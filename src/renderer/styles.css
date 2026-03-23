@@ -871,9 +871,11 @@ body[data-has-sessions="false"] #sidebar {
   width: 100%;
   display: grid;
   grid-template-rows: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   grid-column: 1 / -1;
   gap: 10px;
   min-width: 0;
+  overflow: hidden;
   margin-top: 6px;
 }
 
@@ -1146,6 +1148,8 @@ body[data-has-sessions="false"] #sidebar {
 }
 
 #orchestrator-node-terminal {
+  min-width: 0;
+  width: 100%;
   min-height: 280px;
   max-width: 100%;
   box-sizing: border-box;
@@ -1153,11 +1157,14 @@ body[data-has-sessions="false"] #sidebar {
   background: #111827;
   border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
   overflow: hidden;
+  contain: layout style;
 }
 
 #orchestrator-node-terminal .xterm,
 #orchestrator-node-terminal .xterm-viewport,
 #orchestrator-node-terminal .xterm-screen {
+  width: 100%;
+  max-width: 100%;
   height: 100%;
 }
 
@@ -1774,6 +1781,7 @@ body[data-has-sessions="false"] #sidebar {
   border: 1px solid var(--border);
   background: rgba(2, 6, 23, 0.92);
   overflow: hidden;
+  contain: layout;
 }
 
 #interactive-session-dialog-terminal,

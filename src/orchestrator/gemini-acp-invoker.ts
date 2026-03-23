@@ -1540,7 +1540,8 @@ function isRetryableGeminiCapacityMessage(message: string): boolean {
   return normalized.includes("no capacity available for model")
     || normalized.includes("resource exhausted")
     || normalized.includes("server is overloaded")
-    || normalized.includes("capacity available");
+    || normalized.includes("capacity available")
+    || normalized.includes("exhausted your capacity");
 }
 
 function isRetryableGeminiTimeoutMessage(message: string): boolean {

@@ -351,6 +351,7 @@ function buildStageInstructions(
       "Do not spend focused gather budget on existence-only commands such as find-by-name sweeps, plain ls path checks, recursive ls listings, or broad *.md/settings.json searches when the target path is already named in memory.",
       "Do not ask the user for permission to continue planning, escape plan mode, or work around internal tool/runtime errors. Report those blockers directly in the JSON response instead.",
       "Do not edit files, run builds, or execute other mutating commands in gather. This phase is read-only evidence collection.",
+      "CRITICAL: Do NOT attempt to enter 'plan mode', generate plan files (e.g., in a 'plans/' directory), or use tools like `write_file`, `exit_plan_mode`, or `ask_user`. You are NOT the planner. You must ONLY explore the codebase using read-only terminal commands, gather the requested evidence, and then immediately return your GatherResult JSON.",
       "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node.",
       "Do not search outside the workspace or managed tool installation paths unless the current node explicitly requires it."
     ].join(" ");

@@ -2550,6 +2550,9 @@ function ensureInteractiveSessionTerminal() {
   }
 
   interactiveSessionTerminal = new appWindow.Terminal({
+    cols: 40,
+    rows: 12,
+    convertEol: true,
     cursorBlink: true,
     fontSize: 14,
     theme: XTERM_THEMES[resolveTheme(themePreference)]
@@ -2572,7 +2575,8 @@ function fitInteractiveSessionTerminal() {
   }
 
   const rect = interactiveSessionDialogTerminalEl.getBoundingClientRect();
-  const cols = Math.max(40, Math.floor(Math.max(rect.width, 360) / 9));
+  // Use 10.5 as divisor for 14px font in the dialog and limit to 100 cols.
+  const cols = Math.min(100, Math.max(40, Math.floor(Math.max(rect.width, 360) / 10.5)));
   const rows = Math.max(10, Math.floor(Math.max(rect.height, 200) / 18));
   interactiveSessionTerminal.resize(cols, rows);
   appWindow.tasksaw.resizeTerminal(request.sessionId, cols, rows);
@@ -4400,8 +4404,8 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
 
   // Subtract padding and borders to prevent infinite resize loop.
   // #orchestrator-node-terminal has padding: 10px 12px.
-  const widthPadding = 48; // Increased from 32 for better safety margin
-  const heightPadding = 32; // Increased from 28
+  const widthPadding = 32;
+  const heightPadding = 32;
 
   const availableWidth = resolveReadOnlyTerminalDimension(
     [
@@ -4420,13 +4424,14 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
     220,
     maxViewportHeight
   );
+
   if (availableWidth === null || availableHeight === null) {
     return false;
   }
 
-  // Use 10 instead of 9 as divisor for cols to ensure the actual terminal width
-  // (cols * charWidth) doesn't exceed the calculated availableWidth.
-  const cols = Math.max(40, Math.floor(availableWidth / 10));
+  // Use 11 instead of 10.5 as divisor for cols to be safer for 13px font and prevent overflow.
+  // Limit cols to 85 (down from 90) to enforce even more aggressive word wrapping.
+  const cols = Math.min(85, Math.max(32, Math.floor(availableWidth / 11)));
   const rows = Math.max(12, Math.floor(availableHeight / 18));
 
   if (terminal.cols === cols && terminal.rows === rows) {
@@ -4443,6 +4448,9 @@ function ensureOrchestratorNodeTerminal() {
   }
 
   const terminal = new appWindow.Terminal({
+    cols: 40,
+    rows: 12,
+    convertEol: true,
     cursorBlink: false,
     disableStdin: true,
     fontSize: 13,
@@ -4509,12 +4517,14 @@ function renderOrchestratorNodeTerminalTranscript(content: string, renderKey: st
 
   if (!shouldAppendOnly) {
     orchestratorNodeTerminal.reset();
+    fitOrchestratorNodeTerminal(); // Force sync fit before writing to avoid initial width expansion.
     if (normalizedContent.length > 0) {
       orchestratorNodeTerminal.write(normalizedContent);
     }
   } else {
     const delta = normalizedContent.slice(normalizedPrevious.length);
     if (delta.length > 0) {
+      fitOrchestratorNodeTerminal(); // Sync fit for incremental updates as well.
       orchestratorNodeTerminal.write(delta);
     }
   }
@@ -5486,6 +5496,7 @@ function mountTerminal(session: SessionInfo) {
   }
 
   const terminal = new appWindow.Terminal({
+    convertEol: true,
     cursorBlink: true,
     fontSize: 14,
     theme: XTERM_THEMES[resolveTheme(themePreference)]

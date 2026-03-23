@@ -928,13 +928,19 @@ export class OrchestratorService {
       const geminiAcpModulePath = this.toolManager.getGeminiAcpModulePath();
       const geminiFallbackModelIds = this.uniqueModels(geminiModels).map((model) => model.model);
       
-      const hasFlashLite = geminiFallbackModelIds.some((id) => id.includes("flash-lite"));
-      if (hasFlashLite) {
+      const hasFlash = geminiFallbackModelIds.some((id) => id.includes("flash"));
+      if (hasFlash) {
+        if (!geminiFallbackModelIds.includes("gemini-2.5-flash-lite")) {
+          geminiFallbackModelIds.push("gemini-2.5-flash-lite");
+        }
         if (!geminiFallbackModelIds.includes("gemini-3.0-flash")) {
           geminiFallbackModelIds.push("gemini-3.0-flash");
         }
         if (!geminiFallbackModelIds.includes("gemini-2.5-flash")) {
           geminiFallbackModelIds.push("gemini-2.5-flash");
+        }
+        if (!geminiFallbackModelIds.some((id) => id.includes("pro"))) {
+          geminiFallbackModelIds.push("gemini-3.0-pro");
         }
       }
 
