@@ -880,7 +880,10 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               command
             };
           } catch (error) {
-            if (error instanceof GeminiAcpReadOnlyProbeLoopAbortError) {
+            const isAbortError = error instanceof GeminiAcpReadOnlyProbeLoopAbortError
+              || (error instanceof Error && error.message.includes("Aborting Gemini ACP prompt"));
+            
+            if (isAbortError) {
               await invalidateSession(session);
               return {
                 stdout: buildReadOnlyProbeLoopAbortOutput(capability, context.outputLanguage),
