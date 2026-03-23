@@ -2702,7 +2702,7 @@ test("gemini ACP invoker pauses inactivity timeout while awaiting approval and r
   );
 });
 
-test("gemini ACP invoker routes read-only gather write attempts through explicit guardrail override approval", async () => {
+test("gemini ACP invoker hard rejects read-only gather edit attempts", async () => {
   const fakeChild = new FakeChildProcess();
   const progressMessages: Array<{ message: string; details?: Record<string, unknown> }> = [];
   let approvalRequestCount = 0;
@@ -2837,14 +2837,14 @@ test("gemini ACP invoker routes read-only gather write attempts through explicit
   });
 
   assert.equal(result.summary, "Gather stayed read-only");
-  assert.equal(editOutcome, "selected");
+  assert.equal(editOutcome, "cancelled");
   assert.equal(buildOutcome, "selected");
   assert.equal(heredocOutcome, "selected");
-  assert.equal(approvalRequestCount, 3);
+  assert.equal(approvalRequestCount, 2);
   assert.equal(
     progressMessages.filter((entry) => entry.message === "Gemini guardrail override approved and waiting for result")
       .length,
-    3
+    2
   );
   assert.equal(
     progressMessages.every((entry) =>

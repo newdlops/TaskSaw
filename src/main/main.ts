@@ -63,6 +63,7 @@ async function createWindow() {
     browserBridge
   );
   toolManager.setPtyExecutor((kind, commandText) => ptyManager.executeHiddenCommand(kind, commandText));
+  toolManager.setActiveSessionQueryTrigger(() => ptyManager.requestGeminiUsageUpdateFromActiveSession());
   registerIpc(mainWindow, ptyManager, workspaceAccessManager, toolManager, orchestratorService);
 }
 

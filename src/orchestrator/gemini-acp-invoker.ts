@@ -514,6 +514,35 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
 
               const disallowedReason = getDisallowedToolCallReasonForCapability(capability, permissionRequest.toolCall);
               if (disallowedReason) {
+                if (capability === "gather" && permissionRequest.toolCall?.kind?.trim() === "edit") {
+                  readOnlyProbeGuardState.gatherAutoRejectCount += 1;
+                  const count = readOnlyProbeGuardState.gatherAutoRejectCount;
+
+                  if (count >= 3) {
+                    readOnlyProbeGuardState.permissionCallbacksClosed = true;
+                    const abortMessage = `Aborting Gemini ACP prompt after ${count} consecutive unauthorized edit attempts during gather phase to preserve budget`;
+                    context.reportProgress?.(abortMessage, {
+                      capability,
+                      model: modelId,
+                      toolCall: toolCallSummary ?? null
+                    });
+                    throw new GeminiAcpReadOnlyProbeLoopAbortError(abortMessage);
+                  }
+
+                  const reason = `Auto-rejected during gather: File modifications are STRICTLY PROHIBITED in the gather phase. Please use read-only tools to inspect the codebase or move to the execution phase.`;
+                  context.reportProgress?.(reason, {
+                    capability,
+                    model: modelId,
+                    toolCall: toolCallSummary ?? null,
+                    guardrailReason: disallowedReason
+                  });
+                  promptActivity.touch();
+                  return {
+                    outcome: "internally_cancelled",
+                    reason
+                  };
+                }
+
                 return requestGuardrailOverride(disallowedReason);
               }
 

@@ -105,6 +105,7 @@ export class ToolManager {
   private observedGeminiRemainingPercent: number | null = null;
   private observedGeminiStatusMessage: string | null = null;
   private ptyExecutor?: (kind: ManagedToolId, commandText: string) => Promise<string>;
+  private activeSessionQueryTrigger?: () => void;
 
   constructor(private userDataDirectory: string) {
     this.toolingRoot = path.join(userDataDirectory, "managed-tools");
@@ -117,6 +118,10 @@ export class ToolManager {
 
   setPtyExecutor(executor: (kind: ManagedToolId, commandText: string) => Promise<string>) {
     this.ptyExecutor = executor;
+  }
+
+  setActiveSessionQueryTrigger(trigger: () => void) {
+    this.activeSessionQueryTrigger = trigger;
   }
 
   updateObservedGeminiUsage(percent: number | null, message: string | null = null) {
@@ -265,6 +270,10 @@ export class ToolManager {
         remainingPercent = this.observedGeminiRemainingPercent;
       }
 
+      if (remainingPercent === null && !statusMessage) {
+        this.activeSessionQueryTrigger?.();
+      }
+
       return {
         remainingPercent,
         statusMessage,
@@ -331,6 +340,7 @@ export class ToolManager {
       }
     }
 
+    this.activeSessionQueryTrigger?.();
     return null;
   }
 

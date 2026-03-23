@@ -34,6 +34,7 @@ type SessionPaths = {
 
 export class PtyManager {
   private sessions = new Map<string, SessionRecord>();
+  private lastUsageQueryTime = 0;
 
   constructor(
     private mainWindow: BrowserWindow,
@@ -222,6 +223,20 @@ export class PtyManager {
     }
 
     this.cleanupStaleSessionDirectories();
+  }
+
+  requestGeminiUsageUpdateFromActiveSession() {
+    const now = Date.now();
+    // Throttle checks to once every 60 seconds
+    if (now - this.lastUsageQueryTime < 60_000) return;
+
+    for (const session of this.sessions.values()) {
+      if (session.info.kind === "gemini" && !session.info.hidden) {
+        this.lastUsageQueryTime = now;
+        session.ptyProcess.write("/stats session\n");
+        break;
+      }
+    }
   }
 
   private releaseSession(sessionId: string) {
@@ -938,6 +953,21 @@ export class PtyManager {
 
   private detectGeminiUsageFromOutput(session: SessionRecord, data: string) {
     const text = data.toLowerCase();
+
+    const jsonMatch = data.match(/\{[\s\S]*"limit_per_day"[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        const limit = parsed.limit_per_day;
+        const used = parsed.used_in_session || parsed.used_quota || 0;
+        if (typeof limit === "number" && typeof used === "number" && limit > 0) {
+          this.toolManager.updateObservedGeminiUsage(((limit - used) / limit) * 100, null);
+          return;
+        }
+      } catch {
+        // Ignore JSON parse errors
+      }
+    }
     
     // Detect quota exhausted
     if (text.includes("exhausted your capacity") || text.includes("quota will reset after")) {
