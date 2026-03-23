@@ -532,8 +532,14 @@ export class PtyManager {
   }
 
   private async handleSessionOutput(session: SessionRecord, data: string) {
+    const strippedChunk = this.stripAnsiChunk(`${session.ansiCarryover}${data}`);
+    session.ansiCarryover = strippedChunk.remainder;
+    if (strippedChunk.plainText) {
+      session.outputBuffer = `${session.outputBuffer}${strippedChunk.plainText}`.slice(-32_000);
+    }
+
     if (session.info.kind === "gemini") {
-      this.detectGeminiUsageFromOutput(session, data);
+      this.detectGeminiUsageFromOutput(session);
     }
 
     if (session.info.kind !== "codex") return;
@@ -541,12 +547,6 @@ export class PtyManager {
     const rawWindow = `${session.rawOutputCarryover}${data}`;
     const rawAuthUrls = this.extractCodexAuthUrlsFromRaw(rawWindow);
     session.rawOutputCarryover = rawWindow.slice(-8_192);
-
-    const strippedChunk = this.stripAnsiChunk(`${session.ansiCarryover}${data}`);
-    session.ansiCarryover = strippedChunk.remainder;
-    if (strippedChunk.plainText) {
-      session.outputBuffer = `${session.outputBuffer}${strippedChunk.plainText}`.slice(-32_000);
-    }
 
     const plainAuthUrls = this.extractCodexAuthUrlsFromPlainText(session.outputBuffer);
     const latestAuthUrl = [...rawAuthUrls, ...plainAuthUrls].at(-1);
@@ -951,10 +951,13 @@ export class PtyManager {
     }
   }
 
-  private detectGeminiUsageFromOutput(session: SessionRecord, data: string) {
-    const text = data.toLowerCase();
 
-    const jsonMatch = data.match(/\{[\s\S]*"limit_per_day"[\s\S]*\}/);
+  private detectGeminiUsageFromOutput(session: SessionRecord) {
+    const text = session.outputBuffer.toLowerCase();
+    const lastWindow = text.slice(-2000); // Look at the last 2KB for efficiency
+
+    // Detect JSON in output (sometimes -o json is used)
+    const jsonMatch = lastWindow.match(/\{[\s\S]*"limit_per_day"[\s\S]*\}/);
     if (jsonMatch) {
       try {
         const parsed = JSON.parse(jsonMatch[0]);
@@ -970,27 +973,36 @@ export class PtyManager {
     }
     
     // Detect quota exhausted
-    if (text.includes("exhausted your capacity") || text.includes("quota will reset after")) {
-      const resetMatch = text.match(/quota will reset after ([^\s.]+)/);
+    if (lastWindow.includes("exhausted your capacity") || lastWindow.includes("quota will reset after") || lastWindow.includes("quota_exhausted")) {
+      const resetMatch = lastWindow.match(/quota will reset after ([^\s.]+)/);
       const statusMessage = resetMatch ? `Quota exhausted (resets after ${resetMatch[1]})` : "Quota exhausted";
       this.toolManager.updateObservedGeminiUsage(null, statusMessage);
       return;
     }
 
     // Detect numeric patterns like 10/100 or 90% remaining
-    const remainingMatch = text.match(/(\d+)%\s*remaining/);
+    const remainingMatch = lastWindow.match(/(\d+)%\s*remaining/);
     if (remainingMatch?.[1]) {
       this.toolManager.updateObservedGeminiUsage(parseInt(remainingMatch[1], 10), null);
       return;
     }
 
-    const quotaMatch = text.match(/usage:\s*(\d+)\s*\/\s*(\d+)/);
+    // Match patterns like "usage: 10/100" or "requests: 10 / 100"
+    const quotaMatch = lastWindow.match(/(?:usage|requests):\s*(\d+)\s*\/\s*(\d+)/);
     if (quotaMatch?.[1] && quotaMatch?.[2]) {
       const used = parseInt(quotaMatch[1], 10);
       const total = parseInt(quotaMatch[2], 10);
       if (total > 0) {
         this.toolManager.updateObservedGeminiUsage(((total - used) / total) * 100, null);
+        return;
       }
+    }
+
+    // Match patterns like "10 / 100 requests used (10%)"
+    const usedPercentMatch = lastWindow.match(/(\d+)\s*\/\s*(\d+)\s*(?:requests|tokens)\s*used\s*\((\d+)%\)/);
+    if (usedPercentMatch?.[3]) {
+      this.toolManager.updateObservedGeminiUsage(100 - parseInt(usedPercentMatch[3], 10), null);
+      return;
     }
   }
 }

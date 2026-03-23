@@ -315,9 +315,8 @@ export class ToolManager {
         if (raw.error === "json_parse_failed" || raw.code !== 0) {
           const combined = `${raw.stdout}\n${raw.stderr}`.toLowerCase();
           if (combined.includes("exhausted your capacity") || combined.includes("quota will reset after") || combined.includes("quota_exhausted")) {
-            const resetMatch = combined.match(/quota will reset after ([^\s.]+)/);
-            const statusMessage = resetMatch ? `Quota exhausted (resets after ${resetMatch[1]})` : "Quota exhausted";
-            return [{ modelId: "unknown", remainingPercent: 0, statusMessage }];
+            // Let it fall through to the next attempt or fallback
+            continue;
           }
         }
       }
@@ -348,7 +347,7 @@ export class ToolManager {
     const lowerText = text.toLowerCase();
     
     // Detect quota exhausted
-    if (lowerText.includes("exhausted your capacity") || lowerText.includes("quota will reset after")) {
+    if (lowerText.includes("exhausted your capacity") || lowerText.includes("quota will reset after") || lowerText.includes("quota_exhausted")) {
       const resetMatch = lowerText.match(/quota will reset after ([^\s.]+)/);
       const statusMessage = resetMatch ? `Quota exhausted (resets after ${resetMatch[1]})` : "Quota exhausted";
       return { percent: 0, message: statusMessage };
@@ -360,13 +359,20 @@ export class ToolManager {
       return { percent: parseInt(remainingMatch[1], 10), message: null };
     }
 
-    const quotaMatch = lowerText.match(/usage:\s*(\d+)\s*\/\s*(\d+)/);
+    // Match patterns like "usage: 10/100" or "requests: 10 / 100"
+    const quotaMatch = lowerText.match(/(?:usage|requests):\s*(\d+)\s*\/\s*(\d+)/);
     if (quotaMatch?.[1] && quotaMatch?.[2]) {
       const used = parseInt(quotaMatch[1], 10);
       const total = parseInt(quotaMatch[2], 10);
       if (total > 0) {
         return { percent: ((total - used) / total) * 100, message: null };
       }
+    }
+
+    // Match patterns like "10 / 100 requests used (10%)"
+    const usedPercentMatch = lowerText.match(/(\d+)\s*\/\s*(\d+)\s*(?:requests|tokens)\s*used\s*\((\d+)%\)/);
+    if (usedPercentMatch?.[3]) {
+      return { percent: 100 - parseInt(usedPercentMatch[3], 10), message: null };
     }
 
     return null;
