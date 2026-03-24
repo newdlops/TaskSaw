@@ -299,8 +299,11 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
       .filter(([, modeId]) => modeId.length > 0)
   ) as Partial<Record<OrchestratorCapability, string>>;
   const startupTimeoutMs = typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
-    ? Math.max(1_000, Math.trunc(options.timeoutMs))
+    ? Math.max(60_000, Math.trunc(options.timeoutMs))
     : 300_000;
+  const promptTimeoutMs = typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
+    ? Math.max(1_000, Math.trunc(options.timeoutMs))
+    : undefined;
   const promptInactivityTimeoutMs = typeof options.promptInactivityTimeoutMs === "number" && Number.isFinite(options.promptInactivityTimeoutMs)
     ? Math.max(1_000, Math.trunc(options.promptInactivityTimeoutMs))
     : 300_000;
@@ -940,6 +943,9 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
             (activeStdinMonitor as StdinWaitMonitorHandle | null)?.stop();
             activeStdinMonitor = null;
             activeRuntime = null;
+            // Always invalidate the session after each prompt to prevent stale
+            // ACP connections from hanging the next node invocation.
+            await invalidateSession(session);
           }
         } catch (error) {
           lastError = error;

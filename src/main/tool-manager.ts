@@ -719,7 +719,7 @@ export class ToolManager {
     return Math.max(0, Math.min(100, Math.round(value)));
   }
 
-  buildManagedExecutionEnvironment(toolId: ManagedToolId): Record<string, string> {
+  buildManagedExecutionEnvironment(toolId: ManagedToolId, geminiRegion?: string | null): Record<string, string> {
     const runtimeDirectory = this.getRuntimeDirectory();
     const tempDirectory = path.join(runtimeDirectory, "tmp");
     const xdgCacheDirectory = path.join(runtimeDirectory, "xdg-cache");
@@ -752,7 +752,7 @@ export class ToolManager {
       };
     }
 
-    return {
+    const geminiEnv: Record<string, string> = {
       ...baseEnv,
       SANDBOX: "tasksaw-managed",
       GEMINI_SANDBOX: "false",
@@ -761,6 +761,14 @@ export class ToolManager {
       GEMINI_TELEMETRY_ENABLED: "0",
       NODE_NO_WARNINGS: "1"
     };
+
+    if (geminiRegion) {
+      geminiEnv.GEMINI_REGION = geminiRegion;
+    } else if (process.env.GEMINI_REGION) {
+      geminiEnv.GEMINI_REGION = process.env.GEMINI_REGION;
+    }
+
+    return geminiEnv;
   }
 
   async prepareWorkspaceContext(toolId: ManagedToolId, workspacePath?: string | null): Promise<void> {
@@ -1438,7 +1446,7 @@ export class ToolManager {
   }
 
   private hasConfiguredGeminiApiKey(): boolean {
-    return [process.env.GEMINI_API_KEY, process.env.GOOGLE_API_KEY]
+    return [process.env.GEMINI_API_KEY, process.env.GOOGLE_API_KEY, process.env.GEMINI_REGION]
       .some((value) => typeof value === "string" && value.trim().length > 0);
   }
 
@@ -1771,7 +1779,7 @@ export class ToolManager {
 
     return {
       ...inheritedEnv,
-      ...this.buildManagedExecutionEnvironment(toolId),
+      ...this.buildManagedExecutionEnvironment(toolId, null),
       ...commandEnv
     };
   }

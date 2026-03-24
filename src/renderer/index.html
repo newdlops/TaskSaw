@@ -123,6 +123,10 @@
               <input type="checkbox" id="orchestrator-sandbox" checked>
               <span id="orchestrator-sandbox-label">Sandbox Mode</span>
             </label>
+            <label style="display: flex; align-items: center; gap: 4px; font-size: 13px;">
+              <input type="checkbox" id="orchestrator-gemini-acp" checked>
+              <span id="orchestrator-gemini-acp-label">Gemini ACP Mode</span>
+            </label>
             <button id="orchestrator-refresh" type="button">Refresh Runs</button>
             <button id="orchestrator-stop" type="button">Stop Run</button>
             <button id="orchestrator-continue" type="button">Resume Selected</button>
@@ -156,6 +160,10 @@
             <label class="orchestrator-form-field orchestrator-timeout-field">
               <span id="orchestrator-timeout-label">CLI Timeout</span>
               <input id="orchestrator-timeout" type="number" min="0" max="3600" step="60" value="0" />
+            </label>
+            <label class="orchestrator-form-field orchestrator-region-field">
+              <span id="orchestrator-gemini-region-label">Gemini Region</span>
+              <input id="orchestrator-gemini-region" type="text" placeholder="e.g. europe-west4" />
             </label>
         </div>
 

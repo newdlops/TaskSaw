@@ -150,56 +150,9 @@ export function buildCliPrompt(capability: OrchestratorCapability, context: Mode
     executionBudget: context.executionBudget,
     reviewPolicy: context.reviewPolicy,
     acceptanceCriteria: context.node.acceptanceCriteria.items.map((item) => item.description),
-    evidenceBundles: context.evidenceBundles.map((bundle) => ({
-      summary: bundle.summary,
-      facts: bundle.facts.map((fact) => fact.statement),
-      unknowns: bundle.unknowns.map((unknown) => unknown.question),
-      relevantTargets: bundle.relevantTargets.map((target) => target.filePath ?? target.symbol ?? target.note ?? "unknown")
-    })),
-    workingMemory: {
-      facts: context.workingMemory.facts.map((fact) => fact.statement),
-      openQuestions: context.workingMemory.openQuestions
-        .filter((question) => question.status === "open")
-        .map((question) => question.question),
-      unknowns: context.workingMemory.unknowns
-        .filter((unknown) => unknown.status === "open")
-        .map((unknown) => unknown.description),
-      conflicts: context.workingMemory.conflicts
-        .filter((conflict) => conflict.status === "open")
-        .map((conflict) => conflict.summary),
-      decisions: context.workingMemory.decisions.map((decision) => `${decision.summary}: ${decision.rationale}`)
-    },
-    projectStructure: {
-      summary: context.projectStructure.summary,
-      directories: context.projectStructure.directories.map((entry) => ({
-        path: entry.path,
-        summary: entry.summary,
-        confidence: entry.confidence
-      })),
-      keyFiles: context.projectStructure.keyFiles.map((entry) => ({
-        path: entry.path,
-        summary: entry.summary,
-        confidence: entry.confidence
-      })),
-      entryPoints: context.projectStructure.entryPoints.map((entry) => ({
-        path: entry.path,
-        role: entry.role,
-        summary: entry.summary,
-        confidence: entry.confidence
-      })),
-      modules: context.projectStructure.modules.map((entry) => ({
-        name: entry.name,
-        summary: entry.summary,
-        relatedPaths: entry.relatedPaths,
-        confidence: entry.confidence
-      })),
-      openQuestions: context.projectStructure.openQuestions
-        .filter((question) => question.status === "open")
-        .map((question) => question.question),
-      contradictions: context.projectStructure.contradictions
-        .filter((contradiction) => contradiction.status === "open")
-        .map((contradiction) => contradiction.summary)
-    }
+    evidenceBundles: buildPhaseEvidenceBundles(capability, context),
+    workingMemory: buildPhaseWorkingMemory(capability, context),
+    projectStructure: buildPhaseProjectStructure(capability, context)
   };
 
   const stageInstructions = buildStageInstructions(capability, context);
@@ -247,7 +200,8 @@ function buildStageInstructions(
       "Do not probe external CLIs, managed-tool installations, package internals, auth state, quota surfaces, or home-directory files during bootstrap sketch.",
       "If deeper exploration seems necessary, record that it is needed instead of performing it now.",
       "Do not over-explore or speculate in detail.",
-      "Return only compact clues that reduce future search cost."
+      "Return only compact clues that reduce future search cost.",
+      "When using grep or search tools to look for literal strings that contain special regex characters (such as {, }, (, ), +, *, or ?), you MUST escape them (e.g., \\{) to prevent regex parsing errors."
     ].join(" ");
   }
 
@@ -279,7 +233,8 @@ function buildStageInstructions(
     if (capability === "gather") {
       return [
         "Gather only the evidence needed to resolve the current project structure contradictions or gaps.",
-        "Return an updated projectStructure summary."
+        "Return an updated projectStructure summary.",
+        "When using grep or search tools to look for literal strings that contain special regex characters (such as {, }, (, ), +, *, or ?), you MUST escape them (e.g., \\{) to prevent regex parsing errors."
       ].join(" ");
     }
 
@@ -353,7 +308,8 @@ function buildStageInstructions(
       "Do not edit files, run builds, or execute other mutating commands in gather. This phase is read-only evidence collection.",
       "CRITICAL: Do NOT attempt to enter 'plan mode', generate plan files (e.g., in a 'plans/' directory), or use tools like `write_file`, `exit_plan_mode`, or `ask_user`. You are NOT the planner. You must ONLY explore the codebase using read-only terminal commands, gather the requested evidence, and then immediately return your GatherResult JSON.",
       "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node.",
-      "Do not search outside the workspace or managed tool installation paths unless the current node explicitly requires it."
+      "Do not search outside the workspace or managed tool installation paths unless the current node explicitly requires it.",
+      "When using grep or search tools to look for literal strings that contain special regex characters (such as {, }, (, ), +, *, or ?), you MUST escape them (e.g., \\{) to prevent regex parsing errors."
     ].join(" ");
   }
 
@@ -418,4 +374,188 @@ function serializeModelAssignment(contextAssignment: ModelInvocationContext["nod
     executor: serializeModel(contextAssignment.executor),
     verifier: serializeModel(contextAssignment.verifier)
   };
+}
+
+// ── Token efficiency: phase-aware payload helpers ──────────────────────────
+
+const MAX_EVIDENCE_FACTS = 10;
+const MAX_EVIDENCE_UNKNOWNS = 5;
+const MAX_EVIDENCE_TARGETS = 8;
+
+function isFullContextPhase(capability: OrchestratorCapability): boolean {
+  return capability === "abstractPlan" || capability === "concretePlan";
+}
+
+function truncateArray<T>(items: T[], limit: number): T[] {
+  return items.length <= limit ? items : items.slice(0, limit);
+}
+
+/**
+ * Build evidence bundles with phase-appropriate detail level.
+ * - Planning phases: full facts, unknowns, targets (with per-bundle caps)
+ * - Gather: full facts and targets, unknowns capped
+ * - Execute/verify/review: summary + top facts only
+ */
+function buildPhaseEvidenceBundles(
+  capability: OrchestratorCapability,
+  context: ModelInvocationContext
+): CliPromptEnvelope["evidenceBundles"] {
+  if (capability === "review") {
+    return context.evidenceBundles.map((bundle) => ({
+      summary: bundle.summary,
+      facts: [],
+      unknowns: [],
+      relevantTargets: []
+    }));
+  }
+
+  const summaryOnlyPhase = capability === "execute" || capability === "verify";
+
+  return context.evidenceBundles.map((bundle) => ({
+    summary: bundle.summary,
+    facts: truncateArray(
+      bundle.facts.map((fact) => fact.statement),
+      summaryOnlyPhase ? 5 : MAX_EVIDENCE_FACTS
+    ),
+    unknowns: summaryOnlyPhase
+      ? []
+      : truncateArray(
+          bundle.unknowns.map((unknown) => unknown.question),
+          MAX_EVIDENCE_UNKNOWNS
+        ),
+    relevantTargets: summaryOnlyPhase
+      ? []
+      : truncateArray(
+          bundle.relevantTargets.map((target) => target.filePath ?? target.symbol ?? target.note ?? "unknown"),
+          MAX_EVIDENCE_TARGETS
+        )
+  }));
+}
+
+/**
+ * Build working memory with phase-appropriate detail level.
+ * - Planning phases: full memory (facts, questions, unknowns, conflicts, decisions)
+ * - Gather: openQuestions only (to focus evidence collection)
+ * - Execute: decisions only (to guide implementation)
+ * - Verify/review: empty/minimal (verification is evidence-driven)
+ */
+function buildPhaseWorkingMemory(
+  capability: OrchestratorCapability,
+  context: ModelInvocationContext
+): CliPromptEnvelope["workingMemory"] {
+  const emptyMemory: CliPromptEnvelope["workingMemory"] = {
+    facts: [],
+    openQuestions: [],
+    unknowns: [],
+    conflicts: [],
+    decisions: []
+  };
+
+  if (isFullContextPhase(capability)) {
+    return {
+      facts: context.workingMemory.facts.map((fact) => fact.statement),
+      openQuestions: context.workingMemory.openQuestions
+        .filter((question) => question.status === "open")
+        .map((question) => question.question),
+      unknowns: context.workingMemory.unknowns
+        .filter((unknown) => unknown.status === "open")
+        .map((unknown) => unknown.description),
+      conflicts: context.workingMemory.conflicts
+        .filter((conflict) => conflict.status === "open")
+        .map((conflict) => conflict.summary),
+      decisions: context.workingMemory.decisions.map((decision) => `${decision.summary}: ${decision.rationale}`)
+    };
+  }
+
+  if (capability === "gather") {
+    return {
+      ...emptyMemory,
+      openQuestions: context.workingMemory.openQuestions
+        .filter((question) => question.status === "open")
+        .map((question) => question.question),
+      facts: context.workingMemory.facts.map((fact) => fact.statement)
+    };
+  }
+
+  if (capability === "execute") {
+    return {
+      ...emptyMemory,
+      decisions: context.workingMemory.decisions.map((decision) => `${decision.summary}: ${decision.rationale}`)
+    };
+  }
+
+  // verify, review: minimal working memory
+  return emptyMemory;
+}
+
+/**
+ * Build project structure with phase-appropriate detail level.
+ * - Planning phases: full structure (all directories, files, entrypoints, modules, questions)
+ * - Gather: summary + keyFiles only (to direct evidence collection)
+ * - Execute/verify/review: summary only
+ */
+function buildPhaseProjectStructure(
+  capability: OrchestratorCapability,
+  context: ModelInvocationContext
+): CliPromptEnvelope["projectStructure"] {
+  const summaryOnly: CliPromptEnvelope["projectStructure"] = {
+    summary: context.projectStructure.summary,
+    directories: [],
+    keyFiles: [],
+    entryPoints: [],
+    modules: [],
+    openQuestions: [],
+    contradictions: []
+  };
+
+  if (isFullContextPhase(capability)) {
+    return {
+      summary: context.projectStructure.summary,
+      directories: context.projectStructure.directories.map((entry) => ({
+        path: entry.path,
+        summary: entry.summary,
+        confidence: entry.confidence
+      })),
+      keyFiles: context.projectStructure.keyFiles.map((entry) => ({
+        path: entry.path,
+        summary: entry.summary,
+        confidence: entry.confidence
+      })),
+      entryPoints: context.projectStructure.entryPoints.map((entry) => ({
+        path: entry.path,
+        role: entry.role,
+        summary: entry.summary,
+        confidence: entry.confidence
+      })),
+      modules: context.projectStructure.modules.map((entry) => ({
+        name: entry.name,
+        summary: entry.summary,
+        relatedPaths: entry.relatedPaths,
+        confidence: entry.confidence
+      })),
+      openQuestions: context.projectStructure.openQuestions
+        .filter((question) => question.status === "open")
+        .map((question) => question.question),
+      contradictions: context.projectStructure.contradictions
+        .filter((contradiction) => contradiction.status === "open")
+        .map((contradiction) => contradiction.summary)
+    };
+  }
+
+  if (capability === "gather") {
+    return {
+      ...summaryOnly,
+      keyFiles: context.projectStructure.keyFiles.map((entry) => ({
+        path: entry.path,
+        summary: entry.summary,
+        confidence: entry.confidence
+      })),
+      openQuestions: context.projectStructure.openQuestions
+        .filter((question) => question.status === "open")
+        .map((question) => question.question)
+    };
+  }
+
+  // execute, verify, review: summary only
+  return summaryOnly;
 }

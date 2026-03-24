@@ -282,6 +282,8 @@ type TasksawApi = {
     maxDepth?: number | null;
     cliTimeoutSeconds?: number | null;
     sandbox?: boolean;
+    useGeminiAcpMode?: boolean;
+    geminiRegion?: string | null;
     workspacePath?: string | null;
     continueFromRunId?: string | null;
     workspaceAccessDialog?: DirectoryDialogOptions;
@@ -713,7 +715,9 @@ const orchestratorTimeoutLabelEl = document.getElementById("orchestrator-timeout
 const orchestratorGoalInput = document.getElementById("orchestrator-goal") as HTMLTextAreaElement;
 const orchestratorModeSelect = document.getElementById("orchestrator-mode") as HTMLSelectElement;
 const orchestratorDepthInput = document.getElementById("orchestrator-depth") as HTMLInputElement;
+const orchestratorGeminiRegionInput = document.getElementById("orchestrator-gemini-region") as HTMLInputElement;
 const orchestratorSandboxInput = document.getElementById("orchestrator-sandbox") as HTMLInputElement;
+const orchestratorGeminiAcpInput = document.getElementById("orchestrator-gemini-acp") as HTMLInputElement;
 const orchestratorRefreshButton = document.getElementById("orchestrator-refresh") as HTMLButtonElement;
 const orchestratorStopButton = document.getElementById("orchestrator-stop") as HTMLButtonElement;
 const orchestratorContinueButton = document.getElementById("orchestrator-continue") as HTMLButtonElement;
@@ -2605,9 +2609,19 @@ function calculateTerminalDimensions(container: HTMLElement, fontSize: number, f
   const rect = container.getBoundingClientRect();
   const cell = getTerminalCellDimensions(fontSize, fontFamily);
 
-  // Use either client size or rect, whichever is larger (to handle cases where display might be hidden but dimensions are set)
-  const width = Math.max(container.clientWidth, rect.width);
-  const height = Math.max(container.clientHeight, rect.height);
+  // Prefer smaller valid width to avoid inflated dimensions preventing line wraps.
+  let width = container.clientWidth > 0 && rect.width > 0 
+    ? Math.min(container.clientWidth, rect.width) 
+    : Math.max(container.clientWidth, rect.width);
+  let height = container.clientHeight > 0 && rect.height > 0
+    ? Math.min(container.clientHeight, rect.height)
+    : Math.max(container.clientHeight, rect.height);
+
+  // Cap initial dimensions to viewport if container dimensions seem excessive or are not yet stabilized.
+  const maxWidth = appWindow.innerWidth - 80;
+  const maxHeight = appWindow.innerHeight - 120;
+  if (width > maxWidth) width = maxWidth;
+  if (height > maxHeight) height = maxHeight;
 
   const availableWidth = Math.max(80, width - options.widthPadding);
   const availableHeight = Math.max(80, height - options.heightPadding);
@@ -2626,7 +2640,7 @@ function ensureInteractiveSessionTerminal() {
     interactiveSessionDialogTerminalEl,
     fontSizePreference,
     fontFamilyPreference,
-    { widthPadding: 24, heightPadding: 12, minCols: 40, minRows: 10 }
+    { widthPadding: 48, heightPadding: 12, minCols: 40, minRows: 10 }
   );
 
   interactiveSessionTerminal = new appWindow.Terminal({
@@ -4118,6 +4132,7 @@ function renderOrchestratorTree() {
       card.title = node.objective;
       card.addEventListener("click", () => {
         selectedOrchestratorNodeId = node.id;
+        updateOrchestratorControls();
         renderOrchestratorTree();
         renderOrchestratorDetail();
       });
@@ -4568,27 +4583,35 @@ function resolveReadOnlyTerminalDimension(
 
 function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): boolean {
   const parentElement = container.parentElement;
-  const parentRect = parentElement?.getBoundingClientRect() ?? null;
-  const maxViewportWidth = Math.max(80, appWindow.innerWidth - 48);
+  if (!parentElement) return false;
+
+  // Use a more stable width measurement from the grandparent or window to cap the expansion.
+  // This prevents the terminal from pushing the parent container out of bounds.
+  const grandparentWidth = parentElement.parentElement?.clientWidth ?? appWindow.innerWidth;
+  const maxViewportWidth = Math.max(80, Math.min(grandparentWidth - 48, appWindow.innerWidth - 48));
 
   // Subtract padding and borders to prevent infinite resize loop.
-  // #orchestrator-node-terminal has padding: 10px 12px.
+  // #orchestrator-node-terminal has padding: 10px 12px and some margins.
   const widthPadding = 32;
   const heightPadding = 32;
 
+  // Prefer clientWidth for the actual available content space, but cap it by viewport constraints.
   const availableWidth = resolveReadOnlyTerminalDimension(
     [
-      (parentElement?.clientWidth ?? 0) - widthPadding,
-      (parentRect?.width ?? 0) - widthPadding
+      Math.min(
+        parentElement.clientWidth > 0 ? parentElement.clientWidth : Number.POSITIVE_INFINITY,
+        parentElement.getBoundingClientRect().width > 0 ? parentElement.getBoundingClientRect().width : Number.POSITIVE_INFINITY
+      ) - widthPadding
     ],
     80,
     maxViewportWidth
   );
+
   const maxViewportHeight = Math.max(80, appWindow.innerHeight - 120);
   const availableHeight = resolveReadOnlyTerminalDimension(
     [
-      (parentElement?.clientHeight ?? 0) - heightPadding,
-      (parentRect?.height ?? 0) - heightPadding
+      (parentElement.clientHeight > 0 ? parentElement.clientHeight : 0) - heightPadding,
+      (parentElement.getBoundingClientRect().height > 0 ? parentElement.getBoundingClientRect().height : 0) - heightPadding
     ],
     80,
     maxViewportHeight
@@ -5180,7 +5203,7 @@ async function loadOrchestratorRuns(preserveSelection = true) {
 }
 
 function isOrchestratorMode(value: string): value is OrchestratorMode {
-  return value === "gemini_only" || value === "codex_only" || value === "cross_review";
+  return value === "gemini_only" || value === "gemini_3_only" || value === "codex_only" || value === "cross_review";
 }
 
 async function stopOrchestratorRun() {
@@ -5216,7 +5239,9 @@ async function runOrchestrator(options?: {
 }) {
   const continueFromRunId = options?.continueFromRunId ?? null;
   const continuationMode = options?.continuationMode ?? "resume";
+  console.log("[runOrchestrator] called", { continueFromRunId, continuationMode, goalOverride: options?.goalOverride?.substring(0, 80), selectedOrchestratorRunId });
   if (continueFromRunId && !selectedOrchestratorRunId) {
+    console.log("[runOrchestrator] EARLY RETURN: continueFromRunId set but selectedOrchestratorRunId is null");
     logLocalized("errors.orchestratorContinueMissing");
     return;
   }
@@ -5226,7 +5251,9 @@ async function runOrchestrator(options?: {
       ? (selectedOrchestratorRun?.run.goal ?? orchestratorRuns.find((run) => run.id === continueFromRunId)?.goal ?? "")
       : ""
   );
+  console.log("[runOrchestrator] resolved goal:", goal?.substring(0, 80), "length:", goal.length);
   if (goal.length === 0) {
+    console.log("[runOrchestrator] EARLY RETURN: goal is empty");
     logLocalized("errors.orchestratorGoalMissing");
     return;
   }
@@ -5264,6 +5291,8 @@ async function runOrchestrator(options?: {
       maxDepth,
       cliTimeoutSeconds: Number(orchestratorTimeoutInput.value) || 0,
       sandbox: orchestratorSandboxInput.checked,
+      useGeminiAcpMode: orchestratorGeminiAcpInput.checked,
+      geminiRegion: orchestratorGeminiRegionInput.value.trim() || null,
       workspacePath: currentWorkspacePath,
       continueFromRunId,
       workspaceAccessDialog: {
@@ -6262,15 +6291,20 @@ orchestratorContinueButton.addEventListener("click", () => {
 });
 
 orchestratorRetryNodeButton.addEventListener("click", () => {
+  console.log("[RetryNode] click handler fired", { selectedOrchestratorRunId, selectedOrchestratorNodeId, nodesCount: selectedOrchestratorRun?.nodes.length });
   if (!selectedOrchestratorRunId || !selectedOrchestratorNodeId) {
+    console.log("[RetryNode] EARLY RETURN: missing runId or nodeId");
     logLocalized("errors.orchestratorRetryNodeMissing");
     return;
   }
   const selectedNode = selectedOrchestratorRun?.nodes.find((n) => n.id === selectedOrchestratorNodeId);
+  console.log("[RetryNode] selectedNode:", selectedNode ? { id: selectedNode.id, objective: selectedNode.objective?.substring(0, 80) } : null);
   if (!selectedNode) {
+    console.log("[RetryNode] EARLY RETURN: node not found in run snapshot");
     logLocalized("errors.orchestratorRetryNodeMissing");
     return;
   }
+  console.log("[RetryNode] calling runOrchestrator with goalOverride:", selectedNode.objective?.substring(0, 80));
   void runOrchestrator({
     continueFromRunId: selectedOrchestratorRunId,
     continuationMode: "resume",
@@ -6393,4 +6427,12 @@ loadOrchestratorRuns().catch((error: unknown) => {
 
 refreshToolStatuses().catch((error: unknown) => {
   console.error("Failed to refresh tool statuses on init:", error);
+});
+
+const storedGeminiAcpMode = window.localStorage.getItem("tasksaw-gemini-acp-mode");
+if (storedGeminiAcpMode !== null) {
+  orchestratorGeminiAcpInput.checked = storedGeminiAcpMode === "true";
+}
+orchestratorGeminiAcpInput.addEventListener("change", () => {
+  window.localStorage.setItem("tasksaw-gemini-acp-mode", String(orchestratorGeminiAcpInput.checked));
 });

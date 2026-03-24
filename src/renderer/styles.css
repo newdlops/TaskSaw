@@ -1185,6 +1185,8 @@ body[data-has-sessions="false"] #sidebar {
   border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
   overflow: hidden;
   contain: layout style;
+  word-break: break-all;
+  white-space: pre-wrap;
 }
 
 #orchestrator-node-terminal .xterm,
@@ -1197,7 +1199,7 @@ body[data-has-sessions="false"] #sidebar {
 
 #orchestrator-node-terminal .xterm-screen canvas {
   display: block;
-  max-width: 100%;
+  max-width: none;
 }
 
 .orchestrator-tree-node.role-stage {
@@ -1817,7 +1819,7 @@ body[data-has-sessions="false"] #sidebar {
 #interactive-session-dialog-terminal .xterm-viewport {
   min-width: 0;
   width: 100%;
-  max-width: 100%;
+  max-width: none;
 }
 
 #interactive-session-dialog-terminal .xterm {
@@ -1826,7 +1828,7 @@ body[data-has-sessions="false"] #sidebar {
 
 #interactive-session-dialog-terminal .xterm-screen canvas {
   display: block;
-  max-width: 100%;
+  max-width: none;
 }
 
 .approval-dialog-list {

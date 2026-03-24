@@ -125,7 +125,7 @@ export class OrchestratorService {
     const continuation = this.resolveContinuationSeed(explicitContinuation, cachedContinuation);
     const goal = this.resolveRunGoal(input, continuationSnapshot);
     let activeRunId: string | null = null;
-    const runtime = new OrchestratorRuntime(await this.createRegistry(workspacePath, modeConfig.toolModels, input.sandbox ?? true, input.cliTimeoutSeconds), {
+    const runtime = new OrchestratorRuntime(await this.createRegistry(workspacePath, modeConfig.toolModels, input.sandbox ?? true, input.cliTimeoutSeconds, input.useGeminiAcpMode, input.geminiRegion), {
       persistence: this.persistence,
       enableRootBootstrapSketch: true,
       requestUserApproval,
@@ -756,7 +756,7 @@ export class OrchestratorService {
       ? this.selectGemini3PlanningModel(catalogsByTool.get("gemini")!)
       : undefined;
     const gemini3WorkerModel = catalogsByTool.has("gemini")
-      ? this.selectGemini3WorkerModel(catalogsByTool.get("gemini")!, gemini3PlanningModel)
+      ? this.selectGemini3WorkerModel(catalogsByTool.get("gemini")!, gemini3PlanningModel!)
       : undefined;
 
     if (mode === "gemini_only" || mode === "gemini_3_only") {
@@ -850,6 +850,8 @@ export class OrchestratorService {
   }
 
   private selectCodexWorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef | undefined): ModelRef | undefined {
+    // Token efficiency strategy: strongly prefer mini family for worker models.
+    // Mini models use significantly fewer tokens for execution and gather phases.
     const preferredMiniModel = this.pickBestCandidate(
       this.listSelectableModels(catalog).filter((model) => this.isCodexMiniFamilyModel(model.model)),
       (model) =>
@@ -857,15 +859,17 @@ export class OrchestratorService {
         + (model.isDefault ? 10_000 : 0)
         + (this.scoreLighterReasoningPreference(model) * 10)
     );
+
+    // If a mini model exists, use it immediately — skip all other candidates.
+    if (preferredMiniModel) {
+      return this.toModelRef(catalog.provider, preferredMiniModel, "lower", "worker");
+    }
+
+    // No mini model available — fall back to recommended/current/any with forced low reasoning.
     const recommendedWorkerModel = this.findCatalogModel(catalog, catalog.recommendedWorkerModelId);
     const currentModel = this.findCatalogModel(catalog, catalog.currentModelId);
-    const selectedModel = (recommendedWorkerModel && (this.isCodexMiniFamilyModel(recommendedWorkerModel.model) || !preferredMiniModel))
-      ? recommendedWorkerModel
-      : (currentModel && this.isCodexMiniFamilyModel(currentModel.model))
-        ? currentModel
-        : preferredMiniModel
-          ?? recommendedWorkerModel
-          ?? currentModel
+    const selectedModel = recommendedWorkerModel
+      ?? currentModel
       ?? this.pickBestCandidate(this.listSelectableModels(catalog), (model) =>
         (model.hidden ? -1_000_000 : 0)
         + (model.isDefault ? 10_000 : 0)
@@ -909,44 +913,67 @@ export class OrchestratorService {
     return this.toModelRef(catalog.provider, selectedModel, "lower", "worker");
   }
 
-  private selectGemini3PlanningModel(catalog: ManagedToolModelCatalog): ModelRef | undefined {
-    const candidates = this.listSelectableModels(catalog).filter((model) => 
-      this.isStableGemini3Model(model.model)
+  private selectGemini3PlanningModel(catalog: ManagedToolModelCatalog): ModelRef {
+    // Try to find a stable (non-preview, non-exp) Gemini model from the catalog,
+    // preferring Gemini 3+ if available, otherwise fall back to latest stable (2.5)
+    const stableCandidates = this.listSelectableModels(catalog).filter((model) =>
+      this.isStableGeminiModel(model.model)
     );
 
-    const selectedModel = this.pickBestCandidate(candidates, (model) => {
+    const stableModel = this.pickBestCandidate(stableCandidates, (model) => {
       let score = model.isDefault ? 1 : 0;
       if (model.model.includes("pro")) score += 2;
+      // Prefer higher versions
+      if (model.model.startsWith("gemini-3")) score += 10;
+      if (model.model.startsWith("gemini-2.5")) score += 5;
       return score;
     });
 
-    if (!selectedModel) {
-      return undefined;
+    if (stableModel) {
+      return this.toModelRef(catalog.provider, stableModel, "upper", "planner");
     }
 
-    return this.toModelRef(catalog.provider, selectedModel, "upper", "planner");
+    // Hardcode fallback: gemini-2.5-pro (latest confirmed stable model)
+    return {
+      id: "gemini-2.5-pro",
+      provider: catalog.provider,
+      model: "gemini-2.5-pro",
+      tier: "upper",
+      reasoningEffort: "high"
+    };
   }
 
-  private selectGemini3WorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef | undefined): ModelRef | undefined {
-    const candidates = this.listSelectableModels(catalog).filter((model) => 
-      this.isStableGemini3Model(model.model)
+  private selectGemini3WorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef): ModelRef {
+    // Try to find a stable (non-preview, non-exp) Gemini model from the catalog
+    const stableCandidates = this.listSelectableModels(catalog).filter((model) =>
+      this.isStableGeminiModel(model.model)
     );
 
-    const selectedModel = this.pickBestCandidate(candidates, (model) => {
+    const stableModel = this.pickBestCandidate(stableCandidates, (model) => {
       let score = model.isDefault ? 1 : 0;
       if (model.model.includes("flash")) score += 2;
+      // Prefer higher versions
+      if (model.model.startsWith("gemini-3")) score += 10;
+      if (model.model.startsWith("gemini-2.5")) score += 5;
       return score;
     });
 
-    if (!selectedModel) {
-      return planningModel;
+    if (stableModel) {
+      return this.toModelRef(catalog.provider, stableModel, "lower", "worker");
     }
 
-    return this.toModelRef(catalog.provider, selectedModel, "lower", "worker");
+    // Hardcode fallback: gemini-2.5-flash (latest confirmed stable model)
+    return {
+      id: "gemini-2.5-flash",
+      provider: catalog.provider,
+      model: "gemini-2.5-flash",
+      tier: "lower",
+      reasoningEffort: "low"
+    };
   }
 
-  private isStableGemini3Model(model: string): boolean {
-    return this.isConcreteGeminiModel(model) && model.startsWith("gemini-3") && !model.includes("preview") && !model.includes("exp");
+  private isStableGeminiModel(model: string): boolean {
+    return this.isConcreteGeminiModel(model) && !model.includes("preview") && !model.includes("exp");
   }
 
   private isConcreteGeminiModel(model: string): boolean {
@@ -969,7 +996,9 @@ export class OrchestratorService {
     workspacePath: string,
     toolModels: Partial<Record<ManagedToolId, ModelRef[]>>,
     sandbox: boolean,
-    cliTimeoutSeconds?: number | null
+    cliTimeoutSeconds?: number | null,
+    useGeminiAcpMode?: boolean,
+    geminiRegion?: string | null
   ): Promise<ModelAdapterRegistry> {
     const registry = new ModelAdapterRegistry();
     const cliRunnerPath = path.join(this.appRootPath, "dist", "main", "node-cli-runner.js");
@@ -989,6 +1018,7 @@ export class OrchestratorService {
             model: codexModel,
             flavor: "codex",
             executablePath: codexCommand.command,
+            executableArgs: [cliRunnerPath, codexEntryPath, ...codexConfigArgs],
             cwd: workspacePath,
             env: {
               ...codexEnv,
@@ -1013,7 +1043,7 @@ export class OrchestratorService {
     if (geminiModels.length > 0) {
       await this.toolManager.prepareWorkspaceContext("gemini", workspacePath);
       const geminiCommand = await this.toolManager.resolveLaunchCommand("gemini");
-      const geminiEnv = this.toolManager.buildManagedExecutionEnvironment("gemini");
+      const geminiEnv = this.toolManager.buildManagedExecutionEnvironment("gemini", geminiRegion);
       const geminiAcpModulePath = this.toolManager.getGeminiAcpModulePath();
       const geminiFallbackModelIds = this.uniqueModels(geminiModels).map((model) => model.model);
       
@@ -1022,14 +1052,14 @@ export class OrchestratorService {
         if (!geminiFallbackModelIds.includes("gemini-2.5-flash-lite")) {
           geminiFallbackModelIds.push("gemini-2.5-flash-lite");
         }
-        if (!geminiFallbackModelIds.includes("gemini-3.0-flash")) {
-          geminiFallbackModelIds.push("gemini-3.0-flash");
-        }
         if (!geminiFallbackModelIds.includes("gemini-2.5-flash")) {
           geminiFallbackModelIds.push("gemini-2.5-flash");
         }
+        if (!geminiFallbackModelIds.includes("gemini-3-flash-preview")) {
+          geminiFallbackModelIds.push("gemini-3-flash-preview");
+        }
         if (!geminiFallbackModelIds.some((id) => id.includes("pro"))) {
-          geminiFallbackModelIds.push("gemini-3.0-pro");
+          geminiFallbackModelIds.push("gemini-2.5-pro");
         }
       }
 
@@ -1054,12 +1084,13 @@ export class OrchestratorService {
             model: geminiModel,
             flavor: "gemini",
             executablePath: geminiCommand.command,
+            executableArgs: [cliRunnerPath, ...geminiCommand.args],
             cwd: workspacePath,
             env: {
               ...geminiEnv,
               ...geminiCommand.env
             },
-            customInvoke: sharedGeminiInvoke,
+            customInvoke: useGeminiAcpMode !== false ? sharedGeminiInvoke : undefined,
             supportedCapabilities: ORCHESTRATOR_CAPABILITIES
           })
         );

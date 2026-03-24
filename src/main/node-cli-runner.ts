@@ -16,6 +16,19 @@ async function main() {
 
   const resolvedEntryPath = path.resolve(entryPath);
   process.argv = [process.execPath, resolvedEntryPath, ...cliArgs];
+// [디버깅 추가] gemini-cli가 출력하려는 모든 내용을 캡처해서 확인
+  const originalWrite = process.stdout.write.bind(process.stdout);
+
+// TS 에러를 피하기 위해 any 타입의 가변 인자로 받아서 그대로 넘겨줍니다.
+  process.stdout.write = (...args: any[]): boolean => {
+    const chunk = args[0];
+    if (chunk) {
+      // 터미널뿐만 아니라 확실히 볼 수 있게 로그 파일로 빼거나 에러 스트림으로 출력
+      process.stderr.write(`[CLI 캡처]: ${chunk.toString()}\n`);
+    }
+    return (originalWrite as any)(...args);
+  };
+
   await dynamicImport(pathToFileURL(resolvedEntryPath).href);
 }
 

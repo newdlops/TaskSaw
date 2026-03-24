@@ -85,6 +85,8 @@ export type RunOrchestratorInput = {
   maxDepth?: number | null;
   cliTimeoutSeconds?: number | null;
   sandbox?: boolean;
+  useGeminiAcpMode?: boolean;
+  geminiRegion?: string | null;
   workspacePath?: string | null;
   continueFromRunId?: string | null;
   workspaceAccessDialog?: DirectoryDialogOptions;
