@@ -372,6 +372,10 @@ export function registerIpc(
     return orchestratorService.getRun(runId);
   });
 
+  ipcMain.handle("orchestrator:reset-workspace-cache", async (_event, workspacePath: string) => {
+    orchestratorService.clearWorkspaceCaches([workspacePath]);
+  });
+
   ipcMain.handle("app:reset", async () => {
     ptyManager.resetAllSessions();
     orchestratorService.resetAllRuns(workspaceAccessManager.listKnownWorkspacePaths());

@@ -671,14 +671,14 @@ export class OrchestratorService {
         return true;
       }
     }
-
     return false;
   }
 
-  private clearWorkspaceCaches(workspacePaths: string[]) {
+  clearWorkspaceCaches(workspacePaths: string[]) {
     const seen = new Set<string>();
     for (const workspacePath of workspacePaths) {
       const normalizedPath = workspacePath.trim();
+      const cachePath = path.join(workspacePath, ".tasksaw");
       if (!normalizedPath || seen.has(normalizedPath)) {
         continue;
       }

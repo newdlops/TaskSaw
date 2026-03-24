@@ -51,6 +51,9 @@ contextBridge.exposeInMainWorld("tasksaw", {
   getOrchestratorRun: (runId: string): Promise<OrchestratorRunDetail> =>
       ipcRenderer.invoke("orchestrator:get-run", runId),
 
+  clearWorkspaceCache: (workspacePath: string): Promise<void> =>
+      ipcRenderer.invoke("orchestrator:reset-workspace-cache", workspacePath),
+
   selectDirectory: (options?: DirectoryDialogOptions): Promise<string | null> =>
       ipcRenderer.invoke("dialog:select-directory", options),
 

@@ -304,6 +304,7 @@ type TasksawApi = {
   }): Promise<boolean>;
   listOrchestratorRuns(): Promise<OrchestratorRunSummary[]>;
   getOrchestratorRun(runId: string): Promise<OrchestratorRunDetail>;
+  clearWorkspaceCache(workspacePath: string): Promise<void>;
   selectDirectory(options?: DirectoryDialogOptions): Promise<string | null>;
   createDirectory(options?: DirectoryDialogOptions): Promise<string | null>;
   writeTerminal(sessionId: string, data: string): void;
@@ -356,6 +357,7 @@ const TEXT = {
       orchestratorModeCodexOnly: "Codex Only: live Codex model",
       orchestratorGoalPlaceholder: "Describe the task you want the orchestrator to run",
       orchestratorRun: "Run Orchestrator",
+      orchestratorRunFresh: "Run Fresh",
       orchestratorStop: "Stop Run",
       orchestratorContinue: "Resume Selected",
       orchestratorRunNextAction: "Run Next Action",
@@ -525,6 +527,7 @@ const TEXT = {
       orchestratorModeCodexOnly: "Codex 단독: 실시간 Codex 모델",
       orchestratorGoalPlaceholder: "오케스트레이터가 수행할 작업을 입력하세요",
       orchestratorRun: "오케스트레이터 실행",
+      orchestratorRunFresh: "완전 새로 시작",
       orchestratorStop: "실행 중단",
       orchestratorContinue: "같은 목표 재개",
       orchestratorRunNextAction: "다음 과제 실행",
@@ -695,6 +698,7 @@ const orchestratorStopButton = document.getElementById("orchestrator-stop") as H
 const orchestratorContinueButton = document.getElementById("orchestrator-continue") as HTMLButtonElement;
 const orchestratorRunNextActionButton = document.getElementById("orchestrator-run-next-action") as HTMLButtonElement;
 const orchestratorRunButton = document.getElementById("orchestrator-run") as HTMLButtonElement;
+const orchestratorRunFreshButton = document.getElementById("orchestrator-run-fresh") as HTMLButtonElement;
 const orchestratorRunsTitleEl = document.getElementById("orchestrator-runs-title") as HTMLDivElement;
 const orchestratorRunListEl = document.getElementById("orchestrator-run-list") as HTMLUListElement;
 const orchestratorDetailTitleEl = document.getElementById("orchestrator-detail-title") as HTMLDivElement;
@@ -2544,6 +2548,25 @@ function getNextPendingInteractiveSession(): OrchestratorPendingInteractiveSessi
   return null;
 }
 
+function getTerminalCellDimensions(fontSize: number, fontFamily: string): { width: number; height: number } {
+  // Use canvas for efficient measurement.
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) {
+    // Precise fallback matching the previous 0.603 multiplier.
+    return { width: fontSize * 0.603, height: Math.floor(fontSize * 1.3) };
+  }
+  context.font = `${fontSize}px ${fontFamily}`;
+  // 'W' is a standard wide character for monospace measurement.
+  const metrics = context.measureText("W");
+  return {
+    width: metrics.width,
+    // Monospace line-height is typically 1.2-1.35x. 
+    // The previous hardcoded 18 for 14px was ~1.28x.
+    height: Math.floor(fontSize * 1.3)
+  };
+}
+
 function ensureInteractiveSessionTerminal() {
   if (interactiveSessionTerminal || typeof appWindow.Terminal !== "function") {
     return;
@@ -2575,9 +2598,12 @@ function fitInteractiveSessionTerminal() {
   }
 
   const rect = interactiveSessionDialogTerminalEl.getBoundingClientRect();
-  // Use 10.5 as divisor for 14px font in the dialog and limit to 100 cols.
-  const cols = Math.min(100, Math.max(40, Math.floor(Math.max(rect.width, 360) / 10.5)));
-  const rows = Math.max(10, Math.floor(Math.max(rect.height, 200) / 18));
+  const fontSize = (interactiveSessionTerminal.options as any).fontSize || 14;
+  const fontFamily = (interactiveSessionTerminal.options as any).fontFamily || "monospace";
+  const cell = getTerminalCellDimensions(fontSize, fontFamily);
+
+  const cols = Math.max(40, Math.floor(Math.max(rect.width, 360) / cell.width));
+  const rows = Math.max(10, Math.floor(Math.max(rect.height, 200) / cell.height));
   interactiveSessionTerminal.resize(cols, rows);
   appWindow.tasksaw.resizeTerminal(request.sessionId, cols, rows);
 }
@@ -4429,10 +4455,12 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
     return false;
   }
 
-  // Use 11 instead of 10.5 as divisor for cols to be safer for 13px font and prevent overflow.
-  // Limit cols to 85 (down from 90) to enforce even more aggressive word wrapping.
-  const cols = Math.min(85, Math.max(32, Math.floor(availableWidth / 11)));
-  const rows = Math.max(12, Math.floor(availableHeight / 18));
+  const fontSize = (terminal.options as any).fontSize || 13;
+  const fontFamily = (terminal.options as any).fontFamily || "monospace";
+  const cell = getTerminalCellDimensions(fontSize, fontFamily);
+
+  const cols = Math.max(32, Math.floor(availableWidth / cell.width));
+  const rows = Math.max(12, Math.floor(availableHeight / cell.height));
 
   if (terminal.cols === cols && terminal.rows === rows) {
     return true;
@@ -4559,6 +4587,7 @@ function updateOrchestratorControls() {
   const missingWorkspace = currentWorkspacePath === null;
   const controlsDisabled = isOrchestratorRunning || isResetting;
   orchestratorRunButton.disabled = controlsDisabled || missingWorkspace;
+  orchestratorRunFreshButton.disabled = controlsDisabled || missingWorkspace;
   orchestratorStopButton.disabled = !isOrchestratorRunning || !liveOrchestratorRunId || isOrchestratorStopRequested || isResetting;
   orchestratorContinueButton.disabled = controlsDisabled || !selectedOrchestratorRunId || missingWorkspace;
   orchestratorRunNextActionButton.disabled = controlsDisabled || !getSelectedNextAction(selectedOrchestratorRun) || missingWorkspace;
@@ -4603,6 +4632,7 @@ function refreshLocalizedContent() {
   orchestratorRunNextActionButton.title = translate("ui.orchestratorRunNextActionTooltip");
   orchestratorStopButton.textContent = translate("ui.orchestratorStop");
   orchestratorRunButton.textContent = translate("ui.orchestratorRun");
+  orchestratorRunFreshButton.textContent = translate("ui.orchestratorRunFresh");
   orchestratorRefreshButton.textContent = translate("ui.orchestratorRefresh");
   orchestratorRunsTitleEl.textContent = translate("ui.orchestratorRunsTitle");
   orchestratorDetailTitleEl.textContent = translate("ui.orchestratorDetailTitle");
@@ -5392,8 +5422,13 @@ function fitSession(sessionId: string, terminal: XtermTerminal) {
     viewportRect && viewportRect.height > 0 ? viewportRect.height : fallbackRect.height,
     200
   );
-  const cols = Math.max(40, Math.floor(availableWidth / 9));
-  const rows = Math.max(10, Math.floor(availableHeight / 18));
+
+  const fontSize = (terminal.options as any).fontSize || 14;
+  const fontFamily = (terminal.options as any).fontFamily || "monospace";
+  const cell = getTerminalCellDimensions(fontSize, fontFamily);
+
+  const cols = Math.max(40, Math.floor(availableWidth / cell.width));
+  const rows = Math.max(10, Math.floor(availableHeight / cell.height));
 
   const previousDimensions = terminalDimensions.get(sessionId);
   if (previousDimensions?.cols === cols && previousDimensions.rows === rows) {
@@ -6077,6 +6112,13 @@ orchestratorRunNextActionButton.addEventListener("click", () => {
 });
 orchestratorRunButton.addEventListener("click", () => {
   void runOrchestrator();
+});
+orchestratorRunFreshButton.addEventListener("click", () => {
+  if (currentWorkspacePath) {
+    void appWindow.tasksaw.clearWorkspaceCache(currentWorkspacePath).then(() => {
+      void runOrchestrator();
+    });
+  }
 });
 orchestratorModeSelect.addEventListener("change", () => {
   const nextMode = orchestratorModeSelect.value;
