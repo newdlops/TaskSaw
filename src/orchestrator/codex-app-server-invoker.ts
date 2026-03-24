@@ -36,6 +36,7 @@ type CodexAppServerInvokerOptions = {
   cwd?: string;
   env?: Record<string, string>;
   dependencies?: CodexAppServerInvokerDependencies;
+  timeoutMs?: number;
 };
 
 type JsonRpcId = number | string;

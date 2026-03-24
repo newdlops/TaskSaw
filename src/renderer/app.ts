@@ -360,6 +360,8 @@ const TEXT = {
       orchestratorRunFresh: "Run Fresh",
       orchestratorStop: "Stop Run",
       orchestratorContinue: "Resume Selected",
+      orchestratorRetryNode: "Retry Node",
+      orchestratorRetryNodeTooltip: "Start a new run with the selected node's objective, preserving memory",
       orchestratorRunNextAction: "Run Next Action",
       orchestratorResumeTooltip: "Resume the selected run with the same goal. TaskSaw reuses the previous run's full evidence bundles, working memory, and project structure so the orchestrator can continue from the same local context.",
       orchestratorRunNextActionTooltip: "Start a new run from the selected review handoff task. TaskSaw uses the selected next action objective as the new goal and carries forward only the trimmed handoff memory that the previous review marked as relevant.",
@@ -477,6 +479,7 @@ const TEXT = {
       failedReset: "Failed to reset TaskSaw data: {message}",
       orchestratorGoalMissing: "Enter an orchestrator goal first.",
       orchestratorContinueMissing: "Select an orchestrator run to continue.",
+      orchestratorRetryNodeMissing: "Select a node to retry.",
       orchestratorNextActionMissing: "Select a review next action from the selected run first.",
       orchestratorWorkspaceMissing: "Select the workspace folder before running the orchestrator.",
       orchestratorStopUnavailable: "There is no active orchestrator run to stop.",
@@ -530,6 +533,8 @@ const TEXT = {
       orchestratorRunFresh: "완전 새로 시작",
       orchestratorStop: "실행 중단",
       orchestratorContinue: "같은 목표 재개",
+      orchestratorRetryNode: "선택 노드부터 재개",
+      orchestratorRetryNodeTooltip: "선택한 노드의 목표로 새 실행을 시작하며, 이전 기억을 유지합니다",
       orchestratorRunNextAction: "다음 과제 실행",
       orchestratorResumeTooltip: "선택한 실행을 같은 목표로 다시 이어서 시작합니다. 이전 실행의 evidence bundle, working memory, project structure를 그대로 승계해 같은 로컬 맥락에서 재개합니다.",
       orchestratorRunNextActionTooltip: "선택한 리뷰 handoff의 다음 과제를 새 목표로 시작합니다. 이전 리뷰가 중요하다고 표시한 축약 메모리만 승계해 다음 작업에 맞는 가벼운 컨텍스트로 이어갑니다.",
@@ -647,6 +652,7 @@ const TEXT = {
       failedReset: "TaskSaw 데이터 초기화 실패: {message}",
       orchestratorGoalMissing: "먼저 오케스트레이터 목표를 입력하세요.",
       orchestratorContinueMissing: "이어갈 오케스트레이터 실행을 먼저 선택하세요.",
+      orchestratorRetryNodeMissing: "재개할 노드를 먼저 선택하세요.",
       orchestratorNextActionMissing: "선택한 실행에서 리뷰 다음 과제를 먼저 고르세요.",
       orchestratorWorkspaceMissing: "오케스트레이터를 실행하기 전에 워크스페이스 폴더를 선택하세요.",
       orchestratorStopUnavailable: "중단할 활성 오케스트레이터 실행이 없습니다.",
@@ -696,6 +702,7 @@ const orchestratorSandboxInput = document.getElementById("orchestrator-sandbox")
 const orchestratorRefreshButton = document.getElementById("orchestrator-refresh") as HTMLButtonElement;
 const orchestratorStopButton = document.getElementById("orchestrator-stop") as HTMLButtonElement;
 const orchestratorContinueButton = document.getElementById("orchestrator-continue") as HTMLButtonElement;
+const orchestratorRetryNodeButton = document.getElementById("orchestrator-run-retry-node") as HTMLButtonElement;
 const orchestratorRunNextActionButton = document.getElementById("orchestrator-run-next-action") as HTMLButtonElement;
 const orchestratorRunButton = document.getElementById("orchestrator-run") as HTMLButtonElement;
 const orchestratorRunFreshButton = document.getElementById("orchestrator-run-fresh") as HTMLButtonElement;
@@ -4590,6 +4597,7 @@ function updateOrchestratorControls() {
   orchestratorRunFreshButton.disabled = controlsDisabled || missingWorkspace;
   orchestratorStopButton.disabled = !isOrchestratorRunning || !liveOrchestratorRunId || isOrchestratorStopRequested || isResetting;
   orchestratorContinueButton.disabled = controlsDisabled || !selectedOrchestratorRunId || missingWorkspace;
+  orchestratorRetryNodeButton.disabled = controlsDisabled || !selectedOrchestratorNodeId || missingWorkspace;
   orchestratorRunNextActionButton.disabled = controlsDisabled || !getSelectedNextAction(selectedOrchestratorRun) || missingWorkspace;
   orchestratorRefreshButton.disabled = controlsDisabled;
   orchestratorModeSelect.disabled = controlsDisabled;
@@ -4628,6 +4636,8 @@ function refreshLocalizedContent() {
   orchestratorGoalInput.placeholder = translate("ui.orchestratorGoalPlaceholder");
   orchestratorContinueButton.textContent = translate("ui.orchestratorContinue");
   orchestratorContinueButton.title = translate("ui.orchestratorResumeTooltip");
+  orchestratorRetryNodeButton.textContent = translate("ui.orchestratorRetryNode");
+  orchestratorRetryNodeButton.title = translate("ui.orchestratorRetryNodeTooltip");
   orchestratorRunNextActionButton.textContent = translate("ui.orchestratorRunNextAction");
   orchestratorRunNextActionButton.title = translate("ui.orchestratorRunNextActionTooltip");
   orchestratorStopButton.textContent = translate("ui.orchestratorStop");
@@ -6107,6 +6117,24 @@ orchestratorContinueButton.addEventListener("click", () => {
     continuationMode: "resume"
   });
 });
+
+orchestratorRetryNodeButton.addEventListener("click", () => {
+  if (!selectedOrchestratorRunId || !selectedOrchestratorNodeId) {
+    logLocalized("errors.orchestratorRetryNodeMissing");
+    return;
+  }
+  const selectedNode = selectedOrchestratorRun?.nodes.find((n) => n.id === selectedOrchestratorNodeId);
+  if (!selectedNode) {
+    logLocalized("errors.orchestratorRetryNodeMissing");
+    return;
+  }
+  void runOrchestrator({
+    continueFromRunId: selectedOrchestratorRunId,
+    continuationMode: "resume",
+    goalOverride: selectedNode.objective
+  });
+});
+
 orchestratorRunNextActionButton.addEventListener("click", () => {
   void runSelectedNextAction();
 });

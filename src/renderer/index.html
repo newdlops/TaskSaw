@@ -109,6 +109,7 @@
             <button id="orchestrator-refresh" type="button">Refresh Runs</button>
             <button id="orchestrator-stop" type="button">Stop Run</button>
             <button id="orchestrator-continue" type="button">Resume Selected</button>
+            <button id="orchestrator-run-retry-node" type="button">Retry Node</button>
             <button id="orchestrator-run-next-action" type="button">Run Next Action</button>
             <button id="orchestrator-run" type="button">Run Orchestrator</button>
             <button id="orchestrator-run-fresh" type="button" title="Clear workspace memory and start fresh">Run Fresh</button>
@@ -133,6 +134,10 @@
             <label class="orchestrator-form-field orchestrator-depth-field">
               <span id="orchestrator-depth-label">Max Depth</span>
               <input id="orchestrator-depth" type="number" min="1" max="6" step="1" value="2" />
+            </label>
+            <label class="orchestrator-form-field orchestrator-timeout-field">
+              <span id="orchestrator-timeout-label">CLI Timeout</span>
+              <input id="orchestrator-timeout" type="number" min="0" max="3600" step="60" value="0" />
             </label>
         </div>
 

@@ -119,7 +119,7 @@ export class OrchestratorService {
     const continuation = this.resolveContinuationSeed(explicitContinuation, cachedContinuation);
     const goal = this.resolveRunGoal(input, continuationSnapshot);
     let activeRunId: string | null = null;
-    const runtime = new OrchestratorRuntime(await this.createRegistry(workspacePath, modeConfig.toolModels, input.sandbox ?? true), {
+    const runtime = new OrchestratorRuntime(await this.createRegistry(workspacePath, modeConfig.toolModels, input.sandbox ?? true, input.cliTimeoutSeconds), {
       persistence: this.persistence,
       enableRootBootstrapSketch: true,
       requestUserApproval,
@@ -167,7 +167,7 @@ export class OrchestratorService {
         }
       });
 
-      return result.snapshot;
+      return this.injectHistoricalNodes(result.snapshot);
     } finally {
       if (activeRunId) {
         this.activeRuns.delete(activeRunId);
@@ -211,7 +211,38 @@ export class OrchestratorService {
   }
 
   getRun(runId: string): RunSnapshot {
-    return this.persistence.loadSnapshot(runId);
+    const snapshot = this.persistence.loadSnapshot(runId);
+    return this.injectHistoricalNodes(snapshot);
+  }
+
+  private injectHistoricalNodes(snapshot: RunSnapshot): RunSnapshot {
+    const historicalNodes: import("../orchestrator").PlanNode[] = [];
+    let currentParentId = snapshot.run.continuedFromRunId;
+    const visited = new Set<string>();
+
+    while (currentParentId && !visited.has(currentParentId)) {
+      visited.add(currentParentId);
+      try {
+        const parentSnapshot = this.persistence.loadSnapshot(currentParentId);
+        const doneNodes = parentSnapshot.nodes.filter((n) => n.phase === "done");
+        
+        // We prepend them because we traverse from newest-parent to oldest-parent
+        historicalNodes.unshift(...doneNodes);
+        
+        currentParentId = parentSnapshot.run.continuedFromRunId;
+      } catch {
+        break;
+      }
+    }
+
+    if (historicalNodes.length > 0) {
+      return {
+        ...snapshot,
+        nodes: [...historicalNodes, ...snapshot.nodes]
+      };
+    }
+
+    return snapshot;
   }
 
   resetAllRuns(workspacePaths: string[] = []) {
@@ -881,7 +912,8 @@ export class OrchestratorService {
   private async createRegistry(
     workspacePath: string,
     toolModels: Partial<Record<ManagedToolId, ModelRef[]>>,
-    sandbox: boolean
+    sandbox: boolean,
+    cliTimeoutSeconds?: number | null
   ): Promise<ModelAdapterRegistry> {
     const registry = new ModelAdapterRegistry();
     const cliRunnerPath = path.join(this.appRootPath, "dist", "main", "node-cli-runner.js");
@@ -913,7 +945,8 @@ export class OrchestratorService {
               env: {
                 ...codexEnv,
                 ...codexCommand.env
-              }
+              },
+              timeoutMs: typeof cliTimeoutSeconds === "number" && cliTimeoutSeconds > 0 ? Math.trunc(cliTimeoutSeconds) * 1000 : undefined
             }),
             supportedCapabilities: ORCHESTRATOR_CAPABILITIES
           })
@@ -955,7 +988,8 @@ export class OrchestratorService {
           ...geminiEnv,
           ...geminiCommand.env
         },
-        temperature: 0
+        temperature: 0,
+        timeoutMs: typeof cliTimeoutSeconds === "number" && cliTimeoutSeconds > 0 ? Math.trunc(cliTimeoutSeconds) * 1000 : undefined
       });
 
       for (const geminiModel of this.uniqueModels(geminiModels)) {

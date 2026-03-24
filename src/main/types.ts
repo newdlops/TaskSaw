@@ -81,6 +81,7 @@ export type RunOrchestratorInput = {
   continuationMode?: OrchestratorContinuationMode | null;
   nextActionIndex?: number | null;
   maxDepth?: number | null;
+  cliTimeoutSeconds?: number | null;
   sandbox?: boolean;
   workspacePath?: string | null;
   continueFromRunId?: string | null;
