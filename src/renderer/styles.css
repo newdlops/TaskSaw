@@ -82,6 +82,33 @@ body.dialog-open {
   flex-wrap: wrap;
 }
 
+.font-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.font-control label {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.font-control input,
+.font-control select {
+  background: var(--button-bg);
+  color: var(--button-text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 4px;
+  font-size: 12px;
+}
+
+.font-control input[type="number"] {
+  width: 48px;
+}
+
 .tool-usage {
   display: inline-flex;
   align-items: center;
@@ -547,7 +574,7 @@ body[data-has-sessions="false"] #sidebar {
 
 .orchestrator-node-live-body {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.85fr);
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.85fr);
   grid-template-rows: auto minmax(280px, 1fr);
   gap: 12px;
   min-width: 0;

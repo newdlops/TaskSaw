@@ -71,6 +71,23 @@
       <button type="button" data-theme-option="light">Light</button>
       <button type="button" data-theme-option="dark">Dark</button>
     </div>
+
+    <div class="topbar-group" role="group" aria-label="Font Settings">
+      <div class="font-control">
+        <label for="font-size-input" id="font-size-label">Size</label>
+        <input id="font-size-input" type="number" min="8" max="32" step="1" value="14" />
+      </div>
+      <div class="font-control">
+        <label for="font-family-input" id="font-family-label">Font</label>
+        <select id="font-family-input">
+          <option value="monospace">Monospace</option>
+          <option value="Menlo, Monaco, 'Courier New', monospace">Menlo/Monaco</option>
+          <option value="'Fira Code', monospace">Fira Code</option>
+          <option value="'JetBrains Mono', monospace">JetBrains Mono</option>
+          <option value="'Source Code Pro', monospace">Source Code Pro</option>
+        </select>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -128,6 +145,7 @@
               <select id="orchestrator-mode">
                 <option value="cross_review">Cross Review</option>
                 <option value="gemini_only">Gemini Only</option>
+                <option value="gemini_3_only">Gemini 3 Only</option>
                 <option value="codex_only">Codex Only</option>
               </select>
             </label>

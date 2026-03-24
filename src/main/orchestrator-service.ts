@@ -58,6 +58,12 @@ const ORCHESTRATOR_MODE_CONFIG: Record<
     acceptanceCriterionId: "gemini-run-completed",
     acceptanceCriterionDescription: "The Gemini-only orchestration completes successfully"
   },
+  gemini_3_only: {
+    title: "Gemini 3 Orchestrator Run (Stable)",
+    requiredTools: ["gemini"],
+    acceptanceCriterionId: "gemini-3-run-completed",
+    acceptanceCriterionDescription: "The Gemini 3-only orchestration completes successfully"
+  },
   codex_only: {
     title: "Codex Orchestrator Run",
     requiredTools: ["codex"],
@@ -746,24 +752,34 @@ export class OrchestratorService {
       ? this.selectGeminiWorkerModel(catalogsByTool.get("gemini")!, geminiPlanningModel)
       : undefined;
 
-    if (mode === "gemini_only") {
-      if (!geminiPlanningModel) {
-        throw new Error("Gemini mode requires a discovered Gemini model");
+    const gemini3PlanningModel = catalogsByTool.has("gemini")
+      ? this.selectGemini3PlanningModel(catalogsByTool.get("gemini")!)
+      : undefined;
+    const gemini3WorkerModel = catalogsByTool.has("gemini")
+      ? this.selectGemini3WorkerModel(catalogsByTool.get("gemini")!, gemini3PlanningModel)
+      : undefined;
+
+    if (mode === "gemini_only" || mode === "gemini_3_only") {
+      const activeGeminiPlanningModel = mode === "gemini_3_only" ? gemini3PlanningModel : geminiPlanningModel;
+      const activeGeminiWorkerModel = mode === "gemini_3_only" ? gemini3WorkerModel : geminiWorkerModel;
+
+      if (!activeGeminiPlanningModel) {
+        throw new Error(`Gemini mode requires a discovered Gemini model for mode ${mode}`);
       }
-      const workerModel = geminiWorkerModel ?? geminiPlanningModel;
+      const workerModel = activeGeminiWorkerModel ?? activeGeminiPlanningModel;
 
       return {
         title: baseConfig.title,
         assignedModels: {
-          abstractPlanner: geminiPlanningModel,
+          abstractPlanner: activeGeminiPlanningModel,
           gatherer: workerModel,
-          concretePlanner: geminiPlanningModel,
+          concretePlanner: activeGeminiPlanningModel,
           reviewer: workerModel,
           executor: workerModel,
           verifier: workerModel
         },
         toolModels: {
-          gemini: this.uniqueModels([geminiPlanningModel, workerModel])
+          gemini: this.uniqueModels([activeGeminiPlanningModel, workerModel])
         },
         acceptanceCriterionId: baseConfig.acceptanceCriterionId,
         acceptanceCriterionDescription: baseConfig.acceptanceCriterionDescription
@@ -891,6 +907,46 @@ export class OrchestratorService {
     }
 
     return this.toModelRef(catalog.provider, selectedModel, "lower", "worker");
+  }
+
+  private selectGemini3PlanningModel(catalog: ManagedToolModelCatalog): ModelRef | undefined {
+    const candidates = this.listSelectableModels(catalog).filter((model) => 
+      this.isStableGemini3Model(model.model)
+    );
+
+    const selectedModel = this.pickBestCandidate(candidates, (model) => {
+      let score = model.isDefault ? 1 : 0;
+      if (model.model.includes("pro")) score += 2;
+      return score;
+    });
+
+    if (!selectedModel) {
+      return undefined;
+    }
+
+    return this.toModelRef(catalog.provider, selectedModel, "upper", "planner");
+  }
+
+  private selectGemini3WorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef | undefined): ModelRef | undefined {
+    const candidates = this.listSelectableModels(catalog).filter((model) => 
+      this.isStableGemini3Model(model.model)
+    );
+
+    const selectedModel = this.pickBestCandidate(candidates, (model) => {
+      let score = model.isDefault ? 1 : 0;
+      if (model.model.includes("flash")) score += 2;
+      return score;
+    });
+
+    if (!selectedModel) {
+      return planningModel;
+    }
+
+    return this.toModelRef(catalog.provider, selectedModel, "lower", "worker");
+  }
+
+  private isStableGemini3Model(model: string): boolean {
+    return this.isConcreteGeminiModel(model) && model.startsWith("gemini-3") && !model.includes("preview") && !model.includes("exp");
   }
 
   private isConcreteGeminiModel(model: string): boolean {

@@ -3,7 +3,7 @@ type ManagedToolId = Extract<SessionKind, "codex" | "gemini">;
 type ThemePreference = "light" | "dark";
 type ResolvedTheme = "light" | "dark";
 type LanguageCode = "en" | "ko";
-type OrchestratorMode = "gemini_only" | "codex_only" | "cross_review";
+type OrchestratorMode = "gemini_only" | "gemini_3_only" | "codex_only" | "cross_review";
 type OrchestratorContinuationMode = "resume" | "next_action";
 type OrchestratorNodeRole = "task" | "stage";
 type XtermTerminal = import("@xterm/xterm").Terminal;
@@ -265,6 +265,8 @@ type TasksawApi = {
     title?: string;
     commandText?: string;
     hidden?: boolean;
+    cols?: number;
+    rows?: number;
     workspaceAccessDialog?: DirectoryDialogOptions;
   }): Promise<SessionInfo | null>;
   listSessions(): Promise<SessionInfo[]>;
@@ -278,6 +280,7 @@ type TasksawApi = {
     continuationMode?: OrchestratorContinuationMode | null;
     nextActionIndex?: number | null;
     maxDepth?: number | null;
+    cliTimeoutSeconds?: number | null;
     sandbox?: boolean;
     workspacePath?: string | null;
     continueFromRunId?: string | null;
@@ -331,6 +334,9 @@ const TEXT = {
       workspaceCreate: "Create Workspace",
       sessionsTitle: "Sessions",
       themeGroupLabel: "Theme",
+      fontGroupLabel: "Font Settings",
+      fontSizeLabel: "Size",
+      fontFamilyLabel: "Font",
       languageGroupLabel: "Language",
       themeLight: "Light",
       themeDark: "Dark",
@@ -354,6 +360,7 @@ const TEXT = {
       orchestratorDepthLabel: "Max Depth",
       orchestratorModeCrossReview: "Cross Review: live Codex + live Gemini",
       orchestratorModeGeminiOnly: "Gemini Only: live Gemini model",
+      orchestratorModeGemini3Only: "Gemini 3 Only: stable Gemini 3 models",
       orchestratorModeCodexOnly: "Codex Only: live Codex model",
       orchestratorGoalPlaceholder: "Describe the task you want the orchestrator to run",
       orchestratorRun: "Run Orchestrator",
@@ -363,6 +370,7 @@ const TEXT = {
       orchestratorRetryNode: "Retry Node",
       orchestratorRetryNodeTooltip: "Start a new run with the selected node's objective, preserving memory",
       orchestratorRunNextAction: "Run Next Action",
+      orchestratorTimeoutLabel: "CLI Timeout",
       orchestratorResumeTooltip: "Resume the selected run with the same goal. TaskSaw reuses the previous run's full evidence bundles, working memory, and project structure so the orchestrator can continue from the same local context.",
       orchestratorRunNextActionTooltip: "Start a new run from the selected review handoff task. TaskSaw uses the selected next action objective as the new goal and carries forward only the trimmed handoff memory that the previous review marked as relevant.",
       orchestratorRefresh: "Refresh Runs",
@@ -504,6 +512,9 @@ const TEXT = {
       workspaceCreate: "워크스페이스 만들기",
       sessionsTitle: "세션",
       themeGroupLabel: "테마",
+      fontGroupLabel: "폰트 설정",
+      fontSizeLabel: "크기",
+      fontFamilyLabel: "폰트",
       languageGroupLabel: "언어",
       themeLight: "라이트",
       themeDark: "다크",
@@ -527,6 +538,7 @@ const TEXT = {
       orchestratorDepthLabel: "최대 깊이",
       orchestratorModeCrossReview: "상호 리뷰: 실시간 Codex + 실시간 Gemini",
       orchestratorModeGeminiOnly: "Gemini 단독: 실시간 Gemini 모델",
+      orchestratorModeGemini3Only: "Gemini 3 전용: 안정화(Stable) 최신 모델만 사용",
       orchestratorModeCodexOnly: "Codex 단독: 실시간 Codex 모델",
       orchestratorGoalPlaceholder: "오케스트레이터가 수행할 작업을 입력하세요",
       orchestratorRun: "오케스트레이터 실행",
@@ -536,6 +548,7 @@ const TEXT = {
       orchestratorRetryNode: "선택 노드부터 재개",
       orchestratorRetryNodeTooltip: "선택한 노드의 목표로 새 실행을 시작하며, 이전 기억을 유지합니다",
       orchestratorRunNextAction: "다음 과제 실행",
+      orchestratorTimeoutLabel: "명령 시간제한",
       orchestratorResumeTooltip: "선택한 실행을 같은 목표로 다시 이어서 시작합니다. 이전 실행의 evidence bundle, working memory, project structure를 그대로 승계해 같은 로컬 맥락에서 재개합니다.",
       orchestratorRunNextActionTooltip: "선택한 리뷰 handoff의 다음 과제를 새 목표로 시작합니다. 이전 리뷰가 중요하다고 표시한 축약 메모리만 승계해 다음 작업에 맞는 가벼운 컨텍스트로 이어갑니다.",
       orchestratorRefresh: "실행 목록 새로고침",
@@ -695,6 +708,8 @@ const orchestratorSubtitleEl = document.getElementById("orchestrator-subtitle") 
 const orchestratorGoalLabelEl = document.getElementById("orchestrator-goal-label") as HTMLSpanElement;
 const orchestratorModeLabelEl = document.getElementById("orchestrator-mode-label") as HTMLSpanElement;
 const orchestratorDepthLabelEl = document.getElementById("orchestrator-depth-label") as HTMLSpanElement;
+const orchestratorTimeoutInput = document.getElementById("orchestrator-timeout") as HTMLInputElement;
+const orchestratorTimeoutLabelEl = document.getElementById("orchestrator-timeout-label") as HTMLSpanElement;
 const orchestratorGoalInput = document.getElementById("orchestrator-goal") as HTMLTextAreaElement;
 const orchestratorModeSelect = document.getElementById("orchestrator-mode") as HTMLSelectElement;
 const orchestratorDepthInput = document.getElementById("orchestrator-depth") as HTMLInputElement;
@@ -794,6 +809,10 @@ const terminalRoot = document.getElementById("terminal-root") as HTMLDivElement;
 const logbarMessageEl = document.getElementById("logbar-message") as HTMLDivElement;
 const themeSwitcher = document.getElementById("theme-switcher") as HTMLDivElement;
 const languageSwitcher = document.getElementById("language-switcher") as HTMLDivElement;
+const fontSizeInput = document.getElementById("font-size-input") as HTMLInputElement;
+const fontFamilyInput = document.getElementById("font-family-input") as HTMLSelectElement;
+const fontSizeLabel = document.getElementById("font-size-label") as HTMLLabelElement;
+const fontFamilyLabel = document.getElementById("font-family-label") as HTMLLabelElement;
 const themeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-theme-option]"));
 const languageButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-language-option]"));
 
@@ -812,6 +831,8 @@ const selectedNextActionIndexByRun = new Map<string, number>();
 const THEME_STORAGE_KEY = "tasksaw-theme";
 const WORKSPACE_STORAGE_KEY = "tasksaw-last-workspace";
 const LANGUAGE_STORAGE_KEY = "tasksaw-language";
+const FONT_SIZE_STORAGE_KEY = "tasksaw-font-size";
+const FONT_FAMILY_STORAGE_KEY = "tasksaw-font-family";
 const MAIN_SPLITTER_RATIO_STORAGE_KEY = "tasksaw-main-splitter-ratio";
 const MAIN_SPLITTER_MIN_RATIO = 0;
 const MAIN_SPLITTER_MAX_RATIO = 1;
@@ -879,6 +900,8 @@ const XTERM_THEMES = {
 let activeSessionId: string | null = null;
 let themePreference: ThemePreference = getInitialThemePreference();
 let languagePreference: LanguageCode = getInitialLanguagePreference();
+let fontSizePreference: number = getInitialFontSize();
+let fontFamilyPreference: string = getInitialFontFamily();
 let currentWorkspacePath: string | null = getInitialWorkspacePath();
 let lastLogMessage: UiMessage = null;
 let isToolUpdateRunning = false;
@@ -942,6 +965,10 @@ function translateKind(kind: SessionKind): string {
 function translateOrchestratorMode(mode: OrchestratorMode): string {
   if (mode === "gemini_only") {
     return translate("ui.orchestratorModeGeminiOnly");
+  }
+
+  if (mode === "gemini_3_only") {
+    return translate("ui.orchestratorModeGemini3Only");
   }
 
   if (mode === "codex_only") {
@@ -2560,18 +2587,34 @@ function getTerminalCellDimensions(fontSize: number, fontFamily: string): { widt
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d");
   if (!context) {
-    // Precise fallback matching the previous 0.603 multiplier.
-    return { width: fontSize * 0.603, height: Math.floor(fontSize * 1.3) };
+    // Precise fallback matching the previous 0.603 multiplier, with a conservative buffer.
+    return { width: (fontSize * 0.603) + 0.15, height: Math.floor(fontSize * 1.3) };
   }
   context.font = `${fontSize}px ${fontFamily}`;
   // 'W' is a standard wide character for monospace measurement.
   const metrics = context.measureText("W");
   return {
-    width: metrics.width,
-    // Monospace line-height is typically 1.2-1.35x. 
+    width: metrics.width + 0.15,
+    // Monospace line-height is typically 1.2-1.35x.
     // The previous hardcoded 18 for 14px was ~1.28x.
     height: Math.floor(fontSize * 1.3)
   };
+}
+
+function calculateTerminalDimensions(container: HTMLElement, fontSize: number, fontFamily: string, options: { widthPadding: number; heightPadding: number; minCols: number; minRows: number }): { cols: number; rows: number } {
+  const rect = container.getBoundingClientRect();
+  const cell = getTerminalCellDimensions(fontSize, fontFamily);
+
+  // Use either client size or rect, whichever is larger (to handle cases where display might be hidden but dimensions are set)
+  const width = Math.max(container.clientWidth, rect.width);
+  const height = Math.max(container.clientHeight, rect.height);
+
+  const availableWidth = Math.max(80, width - options.widthPadding);
+  const availableHeight = Math.max(80, height - options.heightPadding);
+
+  const cols = Math.max(options.minCols, Math.floor(availableWidth / cell.width));
+  const rows = Math.max(options.minRows, Math.floor(availableHeight / cell.height));
+  return { cols, rows };
 }
 
 function ensureInteractiveSessionTerminal() {
@@ -2579,12 +2622,20 @@ function ensureInteractiveSessionTerminal() {
     return;
   }
 
+  const { cols, rows } = calculateTerminalDimensions(
+    interactiveSessionDialogTerminalEl,
+    fontSizePreference,
+    fontFamilyPreference,
+    { widthPadding: 24, heightPadding: 12, minCols: 40, minRows: 10 }
+  );
+
   interactiveSessionTerminal = new appWindow.Terminal({
-    cols: 40,
-    rows: 12,
+    cols,
+    rows,
     convertEol: true,
     cursorBlink: true,
-    fontSize: 14,
+    fontSize: fontSizePreference,
+    fontFamily: fontFamilyPreference,
     theme: XTERM_THEMES[resolveTheme(themePreference)]
   });
   interactiveSessionTerminal.open(interactiveSessionDialogTerminalEl);
@@ -2609,8 +2660,12 @@ function fitInteractiveSessionTerminal() {
   const fontFamily = (interactiveSessionTerminal.options as any).fontFamily || "monospace";
   const cell = getTerminalCellDimensions(fontSize, fontFamily);
 
-  const cols = Math.max(40, Math.floor(Math.max(rect.width, 360) / cell.width));
-  const rows = Math.max(10, Math.floor(Math.max(rect.height, 200) / cell.height));
+  // Subtract internal terminal padding (approx 12px each side = 24px) to ensure no overflow.
+  const availableWidth = Math.max(80, rect.width - 24);
+  const availableHeight = Math.max(80, rect.height - 12);
+
+  const cols = Math.max(40, Math.floor(availableWidth / cell.width));
+  const rows = Math.max(10, Math.floor(availableHeight / cell.height));
   interactiveSessionTerminal.resize(cols, rows);
   appWindow.tasksaw.resizeTerminal(request.sessionId, cols, rows);
 }
@@ -2645,6 +2700,11 @@ function renderInteractiveSessionDialog() {
     return;
   }
 
+  interactiveSessionDialogEl.hidden = false;
+  syncDialogBodyState();
+  // Force layout reflow to ensure dimensions are available for terminal initialization.
+  void interactiveSessionDialogEl.offsetHeight;
+
   ensureInteractiveSessionTerminal();
   interactiveSessionDialogTitleEl.textContent = request.title || translate("ui.interactiveSessionTitle");
   interactiveSessionDialogStatusEl.textContent = getInteractiveSessionStatusLabel(request);
@@ -2653,8 +2713,6 @@ function renderInteractiveSessionDialog() {
   interactiveSessionDialogTerminateButton.hidden = request.exited;
   interactiveSessionDialogTerminateButton.disabled = request.exited;
   interactiveSessionDialogCloseButton.hidden = !request.exited;
-  interactiveSessionDialogEl.hidden = false;
-  syncDialogBodyState();
 
   if (interactiveSessionTerminal) {
     interactiveSessionTerminal.reset();
@@ -2724,7 +2782,9 @@ async function ensureInteractiveSessionModalSession(request: OrchestratorPending
       cwd: request.cwd,
       title: request.title || translate("ui.interactiveSessionTitle"),
       commandText: request.commandText,
-      hidden: true
+      hidden: true,
+      cols: interactiveSessionTerminal?.cols,
+      rows: interactiveSessionTerminal?.rows
     });
     if (!session) {
       request.exited = true;
@@ -3976,14 +4036,18 @@ function renderOrchestratorDetail() {
   orchestratorNodeResponseOpenButton.disabled = liveView.progress === null;
   orchestratorNodePlanOpenButton.disabled = !liveView.hasExecutionPlan;
   orchestratorNodeLogOpenButton.disabled = !liveView.hasLog;
+
+  renderApprovalQueueButton();
+  renderOrchestratorDetailTabs();
+  // Force layout reflow to ensure orchestratorNodeTerminalEl dimensions are ready.
+  void orchestratorDetailPanelNodeEl.offsetHeight;
+
   renderOrchestratorNodeTerminalTranscript(liveView.terminal, selectedNodeRenderKey);
   orchestratorNodeLogEl.textContent = liveView.log;
   orchestratorWorkingMemoryEl.textContent = buildWorkingMemoryText(selectedOrchestratorRun);
   orchestratorWorkingMemoryOpenButton.disabled = selectedOrchestratorRun === null;
   orchestratorWorkingMemoryCopyButton.disabled = selectedOrchestratorRun === null;
   orchestratorLogEl.textContent = buildOrchestratorLog(selectedOrchestratorRun);
-  renderApprovalQueueButton();
-  renderOrchestratorDetailTabs();
   syncLogViewerContent();
   renderApprovalDialog();
 }
@@ -4154,6 +4218,78 @@ function getInitialLanguagePreference(): LanguageCode {
   }
 
   return window.navigator.language.toLowerCase().startsWith("ko") ? "ko" : "en";
+}
+
+function getInitialFontSize(): number {
+  try {
+    const stored = window.localStorage.getItem(FONT_SIZE_STORAGE_KEY);
+    const parsed = stored ? Number.parseInt(stored, 10) : 14;
+    return Number.isFinite(parsed) && parsed >= 8 && parsed <= 32 ? parsed : 14;
+  } catch {
+    return 14;
+  }
+}
+
+function getInitialFontFamily(): string {
+  try {
+    return window.localStorage.getItem(FONT_FAMILY_STORAGE_KEY) || "monospace";
+  } catch {
+    return "monospace";
+  }
+}
+
+function applyFontSettings(fontSize: number, fontFamily: string, persist = true) {
+  fontSizePreference = fontSize;
+  fontFamilyPreference = fontFamily;
+
+  if (persist) {
+    try {
+      window.localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(fontSize));
+      window.localStorage.setItem(FONT_FAMILY_STORAGE_KEY, fontFamily);
+    } catch {
+      // Ignore
+    }
+  }
+
+  syncFontSettingsControls();
+
+  // Update all terminals
+  terminals.forEach((terminal) => {
+    terminal.options.fontSize = fontSize;
+    terminal.options.fontFamily = fontFamily;
+  });
+
+  if (orchestratorNodeTerminal) {
+    orchestratorNodeTerminal.options.fontSize = fontSize - 1;
+    orchestratorNodeTerminal.options.fontFamily = fontFamily;
+  }
+
+  if (interactiveSessionTerminal) {
+    interactiveSessionTerminal.options.fontSize = fontSize;
+    interactiveSessionTerminal.options.fontFamily = fontFamily;
+  }
+
+  fitEveryTerminal();
+}
+
+function fitEveryTerminal() {
+  // Fit active session
+  fitAllSessions();
+
+  // Fit orchestrator node terminal
+  if (orchestratorNodeTerminal) {
+    scheduleFitOrchestratorNodeTerminal();
+  }
+
+  // Fit interactive session terminal
+  if (interactiveSessionTerminal) {
+    scheduleFitInteractiveSessionTerminal();
+  }
+}
+
+function syncFontSettingsControls() {
+  if (fontSizeInput) fontSizeInput.value = String(fontSizePreference);
+  if (fontFamilyInput) fontFamilyInput.value = fontFamilyPreference;
 }
 
 function getInitialWorkspacePath(): string | null {
@@ -4433,7 +4569,7 @@ function resolveReadOnlyTerminalDimension(
 function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): boolean {
   const parentElement = container.parentElement;
   const parentRect = parentElement?.getBoundingClientRect() ?? null;
-  const maxViewportWidth = Math.max(360, appWindow.innerWidth - 48);
+  const maxViewportWidth = Math.max(80, appWindow.innerWidth - 48);
 
   // Subtract padding and borders to prevent infinite resize loop.
   // #orchestrator-node-terminal has padding: 10px 12px.
@@ -4445,16 +4581,16 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
       (parentElement?.clientWidth ?? 0) - widthPadding,
       (parentRect?.width ?? 0) - widthPadding
     ],
-    360,
+    80,
     maxViewportWidth
   );
-  const maxViewportHeight = Math.max(220, appWindow.innerHeight - 120);
+  const maxViewportHeight = Math.max(80, appWindow.innerHeight - 120);
   const availableHeight = resolveReadOnlyTerminalDimension(
     [
       (parentElement?.clientHeight ?? 0) - heightPadding,
       (parentRect?.height ?? 0) - heightPadding
     ],
-    220,
+    80,
     maxViewportHeight
   );
 
@@ -4482,13 +4618,21 @@ function ensureOrchestratorNodeTerminal() {
     return;
   }
 
+  const { cols, rows } = calculateTerminalDimensions(
+    orchestratorNodeTerminalEl,
+    fontSizePreference - 1,
+    fontFamilyPreference,
+    { widthPadding: 32, heightPadding: 32, minCols: 32, minRows: 12 }
+  );
+
   const terminal = new appWindow.Terminal({
-    cols: 40,
-    rows: 12,
+    cols,
+    rows,
     convertEol: true,
     cursorBlink: false,
     disableStdin: true,
-    fontSize: 13,
+    fontSize: fontSizePreference - 1,
+    fontFamily: fontFamilyPreference,
     theme: XTERM_THEMES[resolveTheme(themePreference)]
   });
   terminal.open(orchestratorNodeTerminalEl);
@@ -4600,6 +4744,7 @@ function updateOrchestratorControls() {
   orchestratorRetryNodeButton.disabled = controlsDisabled || !selectedOrchestratorNodeId || missingWorkspace;
   orchestratorRunNextActionButton.disabled = controlsDisabled || !getSelectedNextAction(selectedOrchestratorRun) || missingWorkspace;
   orchestratorRefreshButton.disabled = controlsDisabled;
+  orchestratorTimeoutInput.disabled = controlsDisabled;
   orchestratorModeSelect.disabled = controlsDisabled;
   resetAppButton.disabled = isToolUpdateRunning || isResetting || isOrchestratorRunning;
 }
@@ -4630,6 +4775,7 @@ function refreshLocalizedContent() {
   sessionSectionTitle.textContent = translate("ui.sessionsTitle");
   orchestratorTitleEl.textContent = translate("ui.orchestratorTitle");
   orchestratorSubtitleEl.textContent = translate("ui.orchestratorSubtitle");
+  orchestratorTimeoutLabelEl.textContent = translate("ui.orchestratorTimeoutLabel");
   orchestratorGoalLabelEl.textContent = translate("ui.orchestratorGoalLabel");
   orchestratorModeLabelEl.textContent = translate("ui.orchestratorModeLabel");
   orchestratorDepthLabelEl.textContent = translate("ui.orchestratorDepthLabel");
@@ -4674,9 +4820,11 @@ function refreshLocalizedContent() {
   workspaceEmptyCopyEl.textContent = translate("ui.noOpenTabsCopy");
   const crossReviewOption = orchestratorModeSelect.querySelector('option[value="cross_review"]');
   const geminiOnlyOption = orchestratorModeSelect.querySelector('option[value="gemini_only"]');
+  const gemini3OnlyOption = orchestratorModeSelect.querySelector('option[value="gemini_3_only"]');
   const codexOnlyOption = orchestratorModeSelect.querySelector('option[value="codex_only"]');
   if (crossReviewOption) crossReviewOption.textContent = translate("ui.orchestratorModeCrossReview");
   if (geminiOnlyOption) geminiOnlyOption.textContent = translate("ui.orchestratorModeGeminiOnly");
+  if (gemini3OnlyOption) gemini3OnlyOption.textContent = translate("ui.orchestratorModeGemini3Only");
   if (codexOnlyOption) codexOnlyOption.textContent = translate("ui.orchestratorModeCodexOnly");
   orchestratorModeSelect.value = orchestratorMode;
   terminalRoot.dataset.emptyMessage = translate("ui.emptyState");
@@ -5114,6 +5262,7 @@ async function runOrchestrator(options?: {
       continuationMode: continueFromRunId ? continuationMode : null,
       nextActionIndex: continueFromRunId ? (options?.nextActionIndex ?? null) : null,
       maxDepth,
+      cliTimeoutSeconds: Number(orchestratorTimeoutInput.value) || 0,
       sandbox: orchestratorSandboxInput.checked,
       workspacePath: currentWorkspacePath,
       continueFromRunId,
@@ -5392,16 +5541,9 @@ function updateTerminalRootState() {
 }
 
 function fitAllSessions() {
-  const activeTerminalTabId = activeWorkspaceTabId !== null && activeWorkspaceTabId !== "orchestrator"
-    ? activeWorkspaceTabId
-    : null;
-
-  if (activeTerminalTabId) {
-    const terminal = terminals.get(activeTerminalTabId);
-    if (terminal) {
-      fitSession(activeTerminalTabId, terminal);
-    }
-  }
+  terminals.forEach((terminal, sessionId) => {
+    fitSession(sessionId, terminal);
+  });
 }
 
 function scheduleFitAllSessions() {
@@ -5426,11 +5568,11 @@ function fitSession(sessionId: string, terminal: XtermTerminal) {
   const fallbackRect = terminalRoot.getBoundingClientRect();
   const availableWidth = Math.max(
     viewportRect && viewportRect.width > 0 ? viewportRect.width : fallbackRect.width,
-    360
+    80
   );
   const availableHeight = Math.max(
     viewportRect && viewportRect.height > 0 ? viewportRect.height : fallbackRect.height,
-    200
+    80
   );
 
   const fontSize = (terminal.options as any).fontSize || 14;
@@ -5543,7 +5685,8 @@ function mountTerminal(session: SessionInfo) {
   const terminal = new appWindow.Terminal({
     convertEol: true,
     cursorBlink: true,
-    fontSize: 14,
+    fontSize: fontSizePreference,
+    fontFamily: fontFamilyPreference,
     theme: XTERM_THEMES[resolveTheme(themePreference)]
   });
 
@@ -6172,7 +6315,22 @@ for (const button of languageButtons) {
 
 applyThemePreference(themePreference, false);
 applyLanguagePreference(languagePreference, false);
+applyFontSettings(fontSizePreference, fontFamilyPreference, false);
 initializeMainSplitter();
+
+fontSizeInput.addEventListener("change", () => {
+  const newSize = Number.parseInt(fontSizeInput.value, 10);
+  if (Number.isFinite(newSize) && newSize >= 8 && newSize <= 32) {
+    applyFontSettings(newSize, fontFamilyPreference);
+  } else {
+    fontSizeInput.value = String(fontSizePreference);
+  }
+});
+
+fontFamilyInput.addEventListener("change", () => {
+  applyFontSettings(fontSizePreference, fontFamilyInput.value);
+});
+
 window.setInterval(() => {
   orchestratorElapsedClock += 1;
   if (shouldTickSelectedNodeProgress(selectedOrchestratorRun)) {

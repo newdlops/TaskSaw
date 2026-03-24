@@ -2,7 +2,7 @@ import type { OutputLanguageCode, RunSnapshot, RunStatus } from "../orchestrator
 
 export type SessionKind = "shell" | "codex" | "gemini";
 export type ManagedToolId = Extract<SessionKind, "codex" | "gemini">;
-export type OrchestratorMode = "gemini_only" | "codex_only" | "cross_review";
+export type OrchestratorMode = "gemini_only" | "gemini_3_only" | "codex_only" | "cross_review";
 export type OrchestratorContinuationMode = "resume" | "next_action";
 
 export type DirectoryDialogOptions = {
@@ -71,6 +71,8 @@ export type CreateSessionInput = {
   title?: string;
   commandText?: string;
   hidden?: boolean;
+  cols?: number;
+  rows?: number;
   workspaceAccessDialog?: DirectoryDialogOptions;
 };
 
