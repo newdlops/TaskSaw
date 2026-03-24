@@ -914,7 +914,7 @@ let selectedOrchestratorRunId: string | null = null;
 let selectedOrchestratorRun: OrchestratorRunDetail | null = null;
 let isOrchestratorRunning = false;
 let isOrchestratorStopRequested = false;
-let orchestratorMode: OrchestratorMode = "cross_review";
+let orchestratorMode: OrchestratorMode = "gemini_only";
 let liveOrchestratorRunId: string | null = null;
 let liveOrchestratorRefreshHandle: number | null = null;
 let mainSplitterRatio = getInitialMainSplitterRatio();
@@ -6284,9 +6284,21 @@ orchestratorStopButton.addEventListener("click", () => {
   void stopOrchestratorRun();
 });
 orchestratorContinueButton.addEventListener("click", () => {
+  console.log("[ResumeWithSameGoal] click handler fired", { selectedOrchestratorRunId, goal: selectedOrchestratorRun?.run.goal });
+  if (!selectedOrchestratorRunId || !selectedOrchestratorRun) {
+    console.log("[ResumeWithSameGoal] EARLY RETURN: missing runId or snapshot");
+    logLocalized("errors.orchestratorContinueMissing");
+    return;
+  }
+  
+  // 1. Copy the original goal back to the input field
+  const originalGoal = selectedOrchestratorRun.run.goal;
+  orchestratorGoalInput.value = originalGoal;
+  
+  // 2. Start a completely fresh run (no history, no continuation)
   void runOrchestrator({
-    continueFromRunId: selectedOrchestratorRunId,
-    continuationMode: "resume"
+    continueFromRunId: null,
+    goalOverride: originalGoal
   });
 });
 
@@ -6304,11 +6316,11 @@ orchestratorRetryNodeButton.addEventListener("click", () => {
     logLocalized("errors.orchestratorRetryNodeMissing");
     return;
   }
-  console.log("[RetryNode] calling runOrchestrator with goalOverride:", selectedNode.objective?.substring(0, 80));
+  console.log("[RetryNode] calling runOrchestrator with goalOverride (node objective):", selectedNode.objective?.substring(0, 80));
   void runOrchestrator({
     continueFromRunId: selectedOrchestratorRunId,
     continuationMode: "resume",
-    goalOverride: selectedNode.objective
+    goalOverride: selectedNode.objective // Use the selected node's objective as the new root goal
   });
 });
 

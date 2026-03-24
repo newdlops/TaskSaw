@@ -230,10 +230,13 @@ export class OrchestratorService {
       visited.add(currentParentId);
       try {
         const parentSnapshot = this.persistence.loadSnapshot(currentParentId);
-        const doneNodes = parentSnapshot.nodes.filter((n) => n.phase === "done");
+        
+        // Include all nodes from the parent to preserve the tree hierarchy.
+        // Filtering only 'done' nodes causes children to become orphans if their parent wasn't finished.
+        const parentNodes = parentSnapshot.nodes;
         
         // We prepend them because we traverse from newest-parent to oldest-parent
-        historicalNodes.unshift(...doneNodes);
+        historicalNodes.unshift(...parentNodes);
         
         currentParentId = parentSnapshot.run.continuedFromRunId;
       } catch {
@@ -288,9 +291,11 @@ export class OrchestratorService {
     input: RunOrchestratorInput,
     continuationSnapshot: RunSnapshot | undefined
   ): boolean {
-    void input;
     void continuationSnapshot;
-    return true;
+    // Only use cached continuation (workspace seed) if the user requested to continue or retry a node.
+    // Fresh runs (including 'Resume with same goal' which we implement as a fresh run with pre-filled goal) 
+    // should NOT use old memory to ensure a truly fresh start.
+    return Boolean(input.continueFromRunId || input.continuationMode);
   }
 
   private resolveRunGoal(input: RunOrchestratorInput, continuationSnapshot: RunSnapshot | undefined): string {

@@ -4,6 +4,12 @@ import { pathToFileURL } from "node:url";
 const dynamicImport = new Function("specifier", "return import(specifier);") as (specifier: string) => Promise<unknown>;
 
 async function main() {
+  if (process.env.TASKSAW_AGENT_INCEPTION_DETECTED) {
+    process.stderr.write("[TASKSAW] Agent Inception detected! Refusing to run another TaskSaw instance within this context to prevent infinite loops.\n");
+    process.exit(1);
+  }
+  process.env.TASKSAW_AGENT_INCEPTION_DETECTED = "1";
+
   const [, , entryPath, ...cliArgs] = process.argv;
   if (!entryPath) {
     throw new Error("TaskSaw node CLI runner requires an entry path");
