@@ -58,6 +58,8 @@ type GeminiAcpInvokerOptions = {
   acpModulePath: string;
   cwd?: string;
   env?: Record<string, string>;
+  initialRegion?: string;
+  fallbackRegion?: string;
   timeoutMs?: number;
   promptInactivityTimeoutMs?: number;
   modeId?: string;
@@ -312,6 +314,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const invalidStreamRetryCount = Math.max(0, options.invalidStreamRetryCount ?? 1);
   const defaultTemperature = options.temperature ?? 0.2;
   const workspaceRoot = options.cwd ?? process.cwd();
+  let currentRegion = options.initialRegion;
   let activeRuntime: GeminiPromptRuntime | null = null;
   let activeSession: GeminiLiveSession | null = null;
   let invocationQueue: Promise<void> = Promise.resolve();
@@ -955,6 +958,15 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
           lastError = error;
           await invalidateSession();
           const message = formatGeminiAcpError(error);
+
+          // Handle region fallback for timeout error specifically if a fallback region is configured.
+          if (options.fallbackRegion && currentRegion !== options.fallbackRegion && isRetryableGeminiTimeoutMessage(message)) {
+            currentRegion = options.fallbackRegion;
+            retryNotes.push(`timeout in ${options.initialRegion}, falling back to ${options.fallbackRegion}`);
+            // We don't break, we continue the loop with the same attemptIndex (or maybe just let it retry naturally).
+            // Actually, the loop continues for each model/retry.
+          }
+
           const shouldRetry = !context.abortSignal.aborted
             && attemptIndex < attemptModels.length - 1
             && (
@@ -1043,6 +1055,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
         env: {
           ...process.env,
           ...options.env,
+          ...(currentRegion ? { GEMINI_REGION: currentRegion, GOOGLE_CLOUD_REGION: currentRegion } : {}),
           NODE_ENV: "production", // Optimize for production
           GEMINI_CLI_NO_UPDATE_CHECK: "1", // Disable update checks for faster startup
           NODE_OPTIONS: "--no-warnings" // Reduce noise and overhead
@@ -1562,7 +1575,9 @@ function isRetryableGeminiCapacityMessage(message: string): boolean {
 
 function isRetryableGeminiTimeoutMessage(message: string): boolean {
   const normalized = message.toLowerCase();
-  return normalized.includes("prompt inactive for");
+  return normalized.includes("prompt inactive for")
+    || normalized.includes("timed out")
+    || normalized.includes("timedout");
 }
 
 function formatGeminiAcpError(error: unknown): string {

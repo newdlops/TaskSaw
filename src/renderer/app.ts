@@ -2625,20 +2625,20 @@ function calculateTerminalDimensions(container: HTMLElement, fontSize: number, f
     : Math.max(container.clientHeight, rect.height);
 
   // Cap initial dimensions to viewport if container dimensions seem excessive or are not yet stabilized.
-  const maxWidth = appWindow.innerWidth - 80;
+  const maxWidth = appWindow.innerWidth - 10;
   const maxHeight = appWindow.innerHeight - 120;
   if (width > maxWidth) width = maxWidth;
   if (height > maxHeight) height = maxHeight;
 
-  const availableWidth = Math.max(80, width - options.widthPadding);
-  const availableHeight = Math.max(80, height - options.heightPadding);
+  const availableWidth = Math.max(10, (width || maxWidth) - options.widthPadding);
+  const availableHeight = Math.max(10, (height || maxHeight) - options.heightPadding);
 
   let cols = Math.max(options.minCols, Math.floor(availableWidth / cell.width));
   let rows = Math.max(options.minRows, Math.floor(availableHeight / cell.height));
 
   if (width === 0 || height === 0 || !container.offsetParent) {
-    cols = Math.max(options.minCols, 80);
-    rows = Math.max(options.minRows, 24);
+    cols = Math.max(options.minCols, Math.floor(availableWidth / cell.width));
+    rows = Math.max(options.minRows, Math.floor(availableHeight / cell.height));
   }
 
   return { cols, rows };
@@ -2653,7 +2653,7 @@ function ensureInteractiveSessionTerminal() {
     interactiveSessionDialogTerminalEl,
     fontSizePreference,
     fontFamilyPreference,
-    { widthPadding: 48, heightPadding: 12, minCols: 40, minRows: 10 }
+    { widthPadding: 48, heightPadding: 12, minCols: 10, minRows: 10 }
   );
 
   interactiveSessionTerminal = new appWindow.Terminal({
@@ -2688,10 +2688,10 @@ function fitInteractiveSessionTerminal() {
   const cell = getTerminalCellDimensions(fontSize, fontFamily);
 
   // Subtract internal terminal padding (approx 12px each side = 24px) to ensure no overflow.
-  const availableWidth = Math.max(80, rect.width - 24);
-  const availableHeight = Math.max(80, rect.height - 12);
+  const availableWidth = Math.max(10, (rect.width || (appWindow.innerWidth - 10)) - 24);
+  const availableHeight = Math.max(10, (rect.height || (appWindow.innerHeight - 120)) - 12);
 
-  const cols = Math.max(40, Math.floor(availableWidth / cell.width));
+  const cols = Math.max(10, Math.floor(availableWidth / cell.width));
   const rows = Math.max(10, Math.floor(availableHeight / cell.height));
   interactiveSessionTerminal.resize(cols, rows);
   appWindow.tasksaw.resizeTerminal(request.sessionId, cols, rows);
@@ -4618,7 +4618,7 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
   // Use a more stable width measurement from the grandparent or window to cap the expansion.
   // This prevents the terminal from pushing the parent container out of bounds.
   const grandparentWidth = parentElement.parentElement?.clientWidth ?? appWindow.innerWidth;
-  const maxViewportWidth = Math.max(80, Math.min(grandparentWidth - 48, appWindow.innerWidth - 48));
+  const maxViewportWidth = Math.max(10, Math.min(grandparentWidth - 48, appWindow.innerWidth - 48));
 
   // Subtract padding and borders to prevent infinite resize loop.
   // #orchestrator-node-terminal has padding: 10px 12px and some margins.
@@ -4633,17 +4633,17 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
         parentElement.getBoundingClientRect().width > 0 ? parentElement.getBoundingClientRect().width : Number.POSITIVE_INFINITY
       ) - widthPadding
     ],
-    80,
+    10,
     maxViewportWidth
   );
 
-  const maxViewportHeight = Math.max(80, appWindow.innerHeight - 120);
+  const maxViewportHeight = Math.max(10, appWindow.innerHeight - 120);
   const availableHeight = resolveReadOnlyTerminalDimension(
     [
       (parentElement.clientHeight > 0 ? parentElement.clientHeight : 0) - heightPadding,
       (parentElement.getBoundingClientRect().height > 0 ? parentElement.getBoundingClientRect().height : 0) - heightPadding
     ],
-    80,
+    10,
     maxViewportHeight
   );
 
@@ -4655,7 +4655,7 @@ function fitReadOnlyTerminal(container: HTMLElement, terminal: XtermTerminal): b
   const fontFamily = (terminal.options as any).fontFamily || "monospace";
   const cell = getTerminalCellDimensions(fontSize, fontFamily);
 
-  const cols = Math.max(32, Math.floor(availableWidth / cell.width));
+  const cols = Math.max(10, Math.floor(availableWidth / cell.width));
   const rows = Math.max(12, Math.floor(availableHeight / cell.height));
 
   if (terminal.cols === cols && terminal.rows === rows) {
@@ -4675,7 +4675,7 @@ function ensureOrchestratorNodeTerminal() {
     orchestratorNodeTerminalEl,
     fontSizePreference - 1,
     fontFamilyPreference,
-    { widthPadding: 32, heightPadding: 32, minCols: 32, minRows: 12 }
+    { widthPadding: 32, heightPadding: 32, minCols: 10, minRows: 12 }
   );
 
   const terminal = new appWindow.Terminal({
@@ -5641,15 +5641,15 @@ function fitSession(sessionId: string, terminal: XtermTerminal) {
   const cell = getTerminalCellDimensions(fontSize, fontFamily);
 
   const availableWidth = Math.max(
-    viewportRect && viewportRect.width > 0 ? viewportRect.width : Math.min(fallbackRect.width, 80 * cell.width),
-    80
+    viewportRect && viewportRect.width > 0 ? viewportRect.width : fallbackRect.width - 48,
+    10
   );
   const availableHeight = Math.max(
-    viewportRect && viewportRect.height > 0 ? viewportRect.height : Math.min(fallbackRect.height, 24 * cell.height),
-    80
+    viewportRect && viewportRect.height > 0 ? viewportRect.height : fallbackRect.height - 32,
+    10
   );
 
-  const cols = Math.max(40, Math.floor(availableWidth / cell.width));
+  const cols = Math.max(10, Math.floor(availableWidth / cell.width));
   const rows = Math.max(10, Math.floor(availableHeight / cell.height));
 
   const previousDimensions = terminalDimensions.get(sessionId);
@@ -5753,6 +5753,8 @@ function mountTerminal(session: SessionInfo) {
   }
 
   const terminal = new appWindow.Terminal({
+    cols: 10,
+    rows: 10,
     convertEol: true,
     cursorBlink: true,
     fontSize: fontSizePreference,
@@ -5876,9 +5878,18 @@ async function createSession(kind: SessionKind) {
     logLocalized("logs.preparingTool", { tool: translateKind(kind) });
   }
 
+  const { cols, rows } = calculateTerminalDimensions(
+    terminalRoot,
+    fontSizePreference,
+    fontFamilyPreference,
+    { widthPadding: 48, heightPadding: 12, minCols: 10, minRows: 10 }
+  );
+
   const session = await appWindow.tasksaw.createSession({
     kind,
     cwd: currentWorkspacePath,
+    cols,
+    rows,
     workspaceAccessDialog: {
       defaultPath: currentWorkspacePath,
       title: translate("ui.permissionDialogTitle"),

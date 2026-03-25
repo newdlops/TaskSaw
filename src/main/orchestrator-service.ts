@@ -1074,6 +1074,8 @@ export class OrchestratorService {
         acpModulePath: geminiAcpModulePath,
         cwd: workspacePath,
         fallbackModelIds: geminiFallbackModelIds,
+        initialRegion: geminiRegion ?? "asia-northeast3",
+        fallbackRegion: geminiRegion === null ? "us-central1" : undefined,
         sandbox,
         env: {
           ...geminiEnv,

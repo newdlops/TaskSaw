@@ -76,7 +76,7 @@ export class PtyManager {
       const { command, args, env: launchEnv } = await this.resolveCommand(input, sessionEnv, sessionPaths);
       const ptyProcess = pty.spawn(command, args, {
         name: "xterm-256color",
-        cols: input.cols ?? 80,
+        cols: input.cols ?? 10,
         rows: input.rows ?? 24,
         cwd: workspaceDirectory,
         env: launchEnv
@@ -164,7 +164,7 @@ export class PtyManager {
       
       const ptyProcess = pty.spawn(command, args, {
         name: "xterm-256color",
-        cols: 80,
+        cols: 10,
         rows: 24,
         cwd: workspaceDirectory,
         env: launchEnv
