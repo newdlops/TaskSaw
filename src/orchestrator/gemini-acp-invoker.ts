@@ -306,7 +306,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
     : undefined;
   const promptInactivityTimeoutMs = typeof options.promptInactivityTimeoutMs === "number" && Number.isFinite(options.promptInactivityTimeoutMs)
     ? Math.max(1_000, Math.trunc(options.promptInactivityTimeoutMs))
-    : 300_000;
+    : 180_000; // Increased from 60_000 to prevent premature timeouts during complex reasoning/gather
   const command = [options.executablePath, ...options.executableArgs, ...(options.sandbox ? ["--sandbox"] : []), "--acp"];
   const fallbackModelIds = options.fallbackModelIds ?? [];
   const invalidStreamRetryCount = Math.max(0, options.invalidStreamRetryCount ?? 1);
@@ -899,6 +899,9 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
             // a child process entered stdin-waiting state. Open an interactive
             // modal session and use its transcript as the output.
             if (stdinWaitDetectedCommand && context.requestInteractiveSession) {
+              // CRITICAL: We MUST invalidate the session here because the child process
+              // inside gemini-cli is hanging on stdin. Keeping the session alive would
+              // cause subsequent prompts to hang as well.
               await invalidateSession(session);
               try {
                 const response = await context.requestInteractiveSession({
@@ -937,15 +940,16 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               };
             }
 
+            // If any other error occurs (like timeout or disconnect), we MUST invalidate
+            // to prevent a "stuck" session from being reused.
+            await invalidateSession(session);
             throw error;
           } finally {
             promptActivity.stop();
             (activeStdinMonitor as StdinWaitMonitorHandle | null)?.stop();
             activeStdinMonitor = null;
             activeRuntime = null;
-            // Always invalidate the session after each prompt to prevent stale
-            // ACP connections from hanging the next node invocation.
-            await invalidateSession(session);
+            // Note: We don't invalidateSession here in the 'success' case to allow reuse.
           }
         } catch (error) {
           lastError = error;
@@ -1031,15 +1035,21 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
       return activeSession;
     }
 
-    const acpModule = await loadAcpModule(options.acpModulePath);
-    const child = spawnProcess(options.executablePath, [...options.executableArgs, ...(options.sandbox ? ["--sandbox"] : []), "--acp"], {
-      cwd: options.cwd,
-      env: {
-        ...process.env,
-        ...options.env
-      },
-      stdio: ["pipe", "pipe", "pipe"]
-    });
+    // Start loading the module and spawning the process in parallel to shave off startup time.
+    const [acpModule, child] = await Promise.all([
+      loadAcpModule(options.acpModulePath),
+      Promise.resolve().then(() => spawnProcess(options.executablePath, [...options.executableArgs, ...(options.sandbox ? ["--sandbox"] : []), "--acp"], {
+        cwd: options.cwd,
+        env: {
+          ...process.env,
+          ...options.env,
+          NODE_ENV: "production", // Optimize for production
+          GEMINI_CLI_NO_UPDATE_CHECK: "1", // Disable update checks for faster startup
+          NODE_OPTIONS: "--no-warnings" // Reduce noise and overhead
+        },
+        stdio: ["pipe", "pipe", "pipe"]
+      }))
+    ]);
 
     let stderrBuffer = "";
     child.stderr?.on("data", (chunk: Buffer | string) => {

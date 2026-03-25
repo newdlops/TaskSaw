@@ -715,7 +715,13 @@ const orchestratorTimeoutLabelEl = document.getElementById("orchestrator-timeout
 const orchestratorGoalInput = document.getElementById("orchestrator-goal") as HTMLTextAreaElement;
 const orchestratorModeSelect = document.getElementById("orchestrator-mode") as HTMLSelectElement;
 const orchestratorDepthInput = document.getElementById("orchestrator-depth") as HTMLInputElement;
-const orchestratorGeminiRegionInput = document.getElementById("orchestrator-gemini-region") as HTMLInputElement;
+const orchestratorGeminiRegionSelect = document.getElementById("orchestrator-gemini-region") as HTMLSelectElement;
+
+orchestratorGeminiRegionSelect.addEventListener("change", () => {
+  geminiRegionPreference = orchestratorGeminiRegionSelect.value;
+  localStorage.setItem("gemini_region", geminiRegionPreference);
+  updateOrchestratorControls();
+});
 const orchestratorSandboxInput = document.getElementById("orchestrator-sandbox") as HTMLInputElement;
 const orchestratorGeminiAcpInput = document.getElementById("orchestrator-gemini-acp") as HTMLInputElement;
 const orchestratorRefreshButton = document.getElementById("orchestrator-refresh") as HTMLButtonElement;
@@ -915,6 +921,7 @@ let selectedOrchestratorRun: OrchestratorRunDetail | null = null;
 let isOrchestratorRunning = false;
 let isOrchestratorStopRequested = false;
 let orchestratorMode: OrchestratorMode = "gemini_only";
+let geminiRegionPreference: string = getInitialGeminiRegion();
 let liveOrchestratorRunId: string | null = null;
 let liveOrchestratorRefreshHandle: number | null = null;
 let mainSplitterRatio = getInitialMainSplitterRatio();
@@ -2626,8 +2633,14 @@ function calculateTerminalDimensions(container: HTMLElement, fontSize: number, f
   const availableWidth = Math.max(80, width - options.widthPadding);
   const availableHeight = Math.max(80, height - options.heightPadding);
 
-  const cols = Math.max(options.minCols, Math.floor(availableWidth / cell.width));
-  const rows = Math.max(options.minRows, Math.floor(availableHeight / cell.height));
+  let cols = Math.max(options.minCols, Math.floor(availableWidth / cell.width));
+  let rows = Math.max(options.minRows, Math.floor(availableHeight / cell.height));
+
+  if (width === 0 || height === 0 || !container.offsetParent) {
+    cols = Math.max(options.minCols, 80);
+    rows = Math.max(options.minRows, 24);
+  }
+
   return { cols, rows };
 }
 
@@ -4307,6 +4320,23 @@ function syncFontSettingsControls() {
   if (fontFamilyInput) fontFamilyInput.value = fontFamilyPreference;
 }
 
+function getInitialGeminiRegion(): string {
+  return localStorage.getItem("gemini_region") || "auto";
+}
+
+const GEMINI_REGIONS = [
+  { value: "auto", label: "자동 (Default)" },
+  { value: "asia-northeast3", label: "한국 (서울)" },
+  { value: "asia-northeast1", label: "일본 (도쿄)" },
+  { value: "asia-northeast2", label: "일본 (오사카)" },
+  { value: "asia-southeast1", label: "싱가포르" },
+  { value: "us-central1", label: "미국 (중부)" },
+  { value: "us-east4", label: "미국 (동부)" },
+  { value: "us-west1", label: "미국 (서부)" },
+  { value: "europe-west1", label: "벨기에" },
+  { value: "europe-west4", label: "네덜란드" }
+] as const;
+
 function getInitialWorkspacePath(): string | null {
   const storedPath = readStoredWorkspacePath();
   return storedPath.length > 0 ? storedPath : null;
@@ -4850,6 +4880,16 @@ function refreshLocalizedContent() {
   if (gemini3OnlyOption) gemini3OnlyOption.textContent = translate("ui.orchestratorModeGemini3Only");
   if (codexOnlyOption) codexOnlyOption.textContent = translate("ui.orchestratorModeCodexOnly");
   orchestratorModeSelect.value = orchestratorMode;
+
+  orchestratorGeminiRegionSelect.innerHTML = "";
+  for (const region of GEMINI_REGIONS) {
+    const option = document.createElement("option");
+    option.value = region.value;
+    option.textContent = region.label;
+    orchestratorGeminiRegionSelect.appendChild(option);
+  }
+  orchestratorGeminiRegionSelect.value = geminiRegionPreference;
+
   terminalRoot.dataset.emptyMessage = translate("ui.emptyState");
   themeSwitcher.setAttribute("aria-label", translate("ui.themeGroupLabel"));
   languageSwitcher.setAttribute("aria-label", translate("ui.languageGroupLabel"));
@@ -5292,7 +5332,7 @@ async function runOrchestrator(options?: {
       cliTimeoutSeconds: Number(orchestratorTimeoutInput.value) || 0,
       sandbox: orchestratorSandboxInput.checked,
       useGeminiAcpMode: orchestratorGeminiAcpInput.checked,
-      geminiRegion: orchestratorGeminiRegionInput.value.trim() || null,
+      geminiRegion: geminiRegionPreference === "auto" ? null : geminiRegionPreference,
       workspacePath: currentWorkspacePath,
       continueFromRunId,
       workspaceAccessDialog: {
@@ -5595,18 +5635,19 @@ function fitSession(sessionId: string, terminal: XtermTerminal) {
   const terminalViewport = terminalContainers.get(sessionId);
   const viewportRect = terminalViewport?.getBoundingClientRect();
   const fallbackRect = terminalRoot.getBoundingClientRect();
-  const availableWidth = Math.max(
-    viewportRect && viewportRect.width > 0 ? viewportRect.width : fallbackRect.width,
-    80
-  );
-  const availableHeight = Math.max(
-    viewportRect && viewportRect.height > 0 ? viewportRect.height : fallbackRect.height,
-    80
-  );
 
   const fontSize = (terminal.options as any).fontSize || 14;
   const fontFamily = (terminal.options as any).fontFamily || "monospace";
   const cell = getTerminalCellDimensions(fontSize, fontFamily);
+
+  const availableWidth = Math.max(
+    viewportRect && viewportRect.width > 0 ? viewportRect.width : Math.min(fallbackRect.width, 80 * cell.width),
+    80
+  );
+  const availableHeight = Math.max(
+    viewportRect && viewportRect.height > 0 ? viewportRect.height : Math.min(fallbackRect.height, 24 * cell.height),
+    80
+  );
 
   const cols = Math.max(40, Math.floor(availableWidth / cell.width));
   const rows = Math.max(10, Math.floor(availableHeight / cell.height));

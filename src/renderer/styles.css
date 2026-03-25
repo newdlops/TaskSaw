@@ -1819,7 +1819,7 @@ body[data-has-sessions="false"] #sidebar {
 #interactive-session-dialog-terminal .xterm-viewport {
   min-width: 0;
   width: 100%;
-  max-width: none;
+  max-width: 100%;
 }
 
 #interactive-session-dialog-terminal .xterm {

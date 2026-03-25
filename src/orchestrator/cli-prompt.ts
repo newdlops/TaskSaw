@@ -248,7 +248,11 @@ function buildStageInstructions(
 
   if (workflowStage === "task_orchestration" && capability === "concretePlan") {
     return [
-      "Plan execution using the current projectStructure memory.",
+      "Plan execution using the current projectStructure memory and gathered evidence.",
+      "CRITICAL: Do NOT guess or speculate if the gathered evidence is insufficient or contradictory. Early convergence on a wrong implementation plan is strictly prohibited.",
+      "If you cannot name the exact line of code, the specific configuration key, or the precise API response needed for execution, set needsAdditionalGather=true immediately.",
+      "When requesting additional gather (needsAdditionalGather=true), provide 1-3 highly targeted additionalGatherObjectives that point exactly to the missing pieces of information. This ensures token efficiency by avoiding broad re-scans.",
+      "Do not proceed to implementation (childTasks) if there are still open technical unknowns or unconfirmed assumptions that could lead to a 'wrong answer'.",
       "Set needsProjectStructureInspection=true only for repository-structure gaps: contradictory file paths, entrypoints, modules, runtime boundaries, IPC/preload wiring, or renderer DOM locations that must be re-read from the workspace.",
       "Do not request projectStructure inspection for non-structural gaps such as unsupported product capabilities, missing external quota APIs, absent managed-tool features, auth limitations, or implementation tradeoffs. Treat those as execution-planning facts instead.",
       "If the key blocker is a missing or unsupported data source rather than ambiguous repository structure, keep needsProjectStructureInspection=false and explain the blocker or fallback in executionNotes or childTasks.",
@@ -291,6 +295,8 @@ function buildStageInstructions(
       "Gather only the minimum evidence needed to unblock the next concrete plan or execution step.",
       "Treat the abstract plan's inspection targets and evidence requirements as the current gather contract.",
       "Stay within that contract unless each named target has been exhausted and you can justify widening the search in the returned evidence.",
+      "When returning evidenceBundles, ensure each fact is specific, concrete, and contains technical details (paths, symbols, actual values, error messages, or configuration snippets). Do not generalize or summarize multiple distinct findings into a single vague fact. Every technical detail discovered is crucial for the planning phase.",
+      "If a tool output contains a crucial error, configuration, or structural pattern, record it exactly as a fact with its context.",
       "Prefer confirming or disproving the current memory's open questions at the named files, entrypoints, modules, relevantTargets, or managed tool locations before running broader searches.",
       "If the current memory already suggests a likely absence or integration gap, confirm that directly and return compact evidence instead of expanding the search surface.",
       "If an external CLI/API surface already appears absent or unsupported, stop after enough evidence to establish that fact. Do not keep probing undocumented alternative commands, slash commands, or ad hoc flags.",
@@ -378,9 +384,9 @@ function serializeModelAssignment(contextAssignment: ModelInvocationContext["nod
 
 // ── Token efficiency: phase-aware payload helpers ──────────────────────────
 
-const MAX_EVIDENCE_FACTS = 10;
-const MAX_EVIDENCE_UNKNOWNS = 5;
-const MAX_EVIDENCE_TARGETS = 8;
+const MAX_EVIDENCE_FACTS = 25; // Increased from 10
+const MAX_EVIDENCE_UNKNOWNS = 12; // Increased from 5
+const MAX_EVIDENCE_TARGETS = 20; // Increased from 8
 
 function isFullContextPhase(capability: OrchestratorCapability): boolean {
   return capability === "abstractPlan" || capability === "concretePlan";
@@ -415,7 +421,7 @@ function buildPhaseEvidenceBundles(
     summary: bundle.summary,
     facts: truncateArray(
       bundle.facts.map((fact) => fact.statement),
-      summaryOnlyPhase ? 5 : MAX_EVIDENCE_FACTS
+      summaryOnlyPhase ? 12 : MAX_EVIDENCE_FACTS
     ),
     unknowns: summaryOnlyPhase
       ? []

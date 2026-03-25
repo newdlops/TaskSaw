@@ -751,7 +751,6 @@ export class ToolManager {
         NO_PROXY: "*"
       };
     }
-
     const geminiEnv: Record<string, string> = {
       ...baseEnv,
       SANDBOX: "tasksaw-managed",
@@ -764,6 +763,7 @@ export class ToolManager {
 
     if (geminiRegion) {
       geminiEnv.GEMINI_REGION = geminiRegion;
+      geminiEnv.GOOGLE_CLOUD_REGION = geminiRegion;
     } else if (process.env.GEMINI_REGION) {
       geminiEnv.GEMINI_REGION = process.env.GEMINI_REGION;
     }
