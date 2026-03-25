@@ -75,7 +75,7 @@ const EXTERNAL_BLOCKER_PATTERN = /\b(?:operation not permitted|permission denied
 type RootPhaseResults = {
   abstractPlan: AbstractPlanResult;
   gather: GatherResult;
-  consolidatedEvidence: EvidenceBundle;
+  evidenceBundles: EvidenceBundle[];
   concretePlan: ConcretePlanResult;
   review?: ReviewResult;
   execute?: ExecuteResult;
@@ -105,7 +105,7 @@ export type HappyPathExecutionResult = {
   phaseResults: {
     abstractPlan: AbstractPlanResult;
     gather: GatherResult;
-    consolidatedEvidence: EvidenceBundle;
+    evidenceBundles: EvidenceBundle[];
     concretePlan: ConcretePlanResult;
     review?: ReviewResult;
     execute: ExecuteResult;
@@ -244,7 +244,7 @@ export class OrchestratorRuntime {
       phaseResults: {
         abstractPlan: execution.phaseResults.abstractPlan,
         gather: execution.phaseResults.gather,
-        consolidatedEvidence: execution.phaseResults.consolidatedEvidence,
+        evidenceBundles: execution.phaseResults.evidenceBundles,
         concretePlan: execution.phaseResults.concretePlan,
         review: execution.phaseResults.review,
         execute,
@@ -420,9 +420,9 @@ export class OrchestratorRuntime {
   private async executePlanningNode(startingNode: PlanNode, allowDecomposition: boolean): Promise<NodeExecutionOutcome> {
     const nodeId = startingNode.id;
     const isProjectStructureInspection = this.isProjectStructureInspectionNode(startingNode);
-    let planningEvidence = this.getNodeEvidenceBundles(startingNode);
+    let evidenceBundles = this.getNodeEvidenceBundles(startingNode);
 
-    if (!isProjectStructureInspection && this.shouldRunBootstrapSketch(startingNode, planningEvidence)) {
+    if (!isProjectStructureInspection && this.shouldRunBootstrapSketch(startingNode, evidenceBundles)) {
       this.engine.appendEvent(startingNode.runId, startingNode.id, "scheduler_progress", {
         message: "No prior clues found. Starting low-cost bootstrap sketch before root planning."
       });
@@ -433,7 +433,7 @@ export class OrchestratorRuntime {
         kind: "planning",
         role: "gatherer",
         capability: "gather",
-        evidenceBundles: planningEvidence
+        evidenceBundles: evidenceBundles
       });
       const bootstrapSketch = bootstrapSketchStage.result;
       this.mergeProjectStructureReport(bootstrapSketchStage.stageNode, bootstrapSketch.projectStructure);
@@ -448,7 +448,7 @@ export class OrchestratorRuntime {
         this.ingestEvidenceBundle(bootstrapSketchStage.stageNode.id, storedBundle);
       }
 
-      planningEvidence = [...planningEvidence, ...bootstrapBundles];
+      evidenceBundles = [...evidenceBundles, ...bootstrapBundles];
     }
 
     let currentNode = this.engine.transitionNode(nodeId, "abstract_plan");
@@ -459,12 +459,12 @@ export class OrchestratorRuntime {
         currentNode,
         "abstractPlan",
         `Define the search scope, evidence requirements, and inspection targets for:\n${currentNode.objective}`,
-        planningEvidence
+        evidenceBundles
       ),
       kind: "planning",
       role: "abstractPlanner",
       capability: "abstractPlan",
-      evidenceBundles: planningEvidence
+      evidenceBundles: evidenceBundles
     });
     let abstractPlan = abstractPlanStage.result;
     this.recordAbstractPlanning(abstractPlanStage.stageNode, abstractPlan);
@@ -478,7 +478,7 @@ export class OrchestratorRuntime {
         currentNode,
         "gather",
         `Gather file, symbol, and evidence findings for:\n${currentNode.objective}`,
-        planningEvidence,
+        evidenceBundles,
         {
           targetsToInspect: abstractPlan.targetsToInspect,
           evidenceRequirements: abstractPlan.evidenceRequirements
@@ -487,7 +487,7 @@ export class OrchestratorRuntime {
       kind: "planning",
       role: "gatherer",
       capability: "gather",
-      evidenceBundles: planningEvidence
+      evidenceBundles: evidenceBundles
     });
     let gather = gatherStage.result;
     this.mergeProjectStructureReport(gatherStage.stageNode, gather.projectStructure);
@@ -504,24 +504,19 @@ export class OrchestratorRuntime {
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "evidence_consolidation");
-    const bundleIdsForConsolidation = [
-      ...planningEvidence.map((bundle) => bundle.id),
-      ...gatheredBundles.map((bundle) => bundle.id)
-    ];
-    let consolidatedEvidence = this.evidenceStore.mergeBundles({
-      runId: currentNode.runId,
-      nodeId: currentNode.id,
-      bundleIds: bundleIdsForConsolidation,
-      summary: gather.summary
-    });
-    this.evidenceStore.upsertBundle(consolidatedEvidence);
+    
+    // Skip destructive merge and pass raw bundles to preserve full context
+    const rawEvidenceBundles = [...evidenceBundles, ...gatheredBundles];
     const consolidationStage = this.createCompletedStageNode(currentNode, {
       phase: "evidence_consolidation",
       title: "Evidence Consolidation",
-      objective: `Consolidate the gathered evidence into a compact bundle for:\n${currentNode.objective}`,
+      objective: `Bypass merge and pass raw gathered evidence into a compact bundle for:\n${currentNode.objective}`,
       kind: "planning"
     });
-    this.engine.attachEvidenceBundle(consolidationStage.id, consolidatedEvidence.id);
+    
+    for (const bundle of rawEvidenceBundles) {
+      this.engine.attachEvidenceBundle(consolidationStage.id, bundle.id);
+    }
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
     currentNode = this.engine.transitionNode(nodeId, "concrete_plan");
@@ -532,14 +527,14 @@ export class OrchestratorRuntime {
       kind: "planning",
       role: "concretePlanner",
       capability: "concretePlan",
-      evidenceBundles: [consolidatedEvidence]
+      evidenceBundles: rawEvidenceBundles
     });
     let concretePlan = concretePlanStage.result;
     this.recordDecision(currentNode.runId, concretePlanStage.stageNode.id, "Concrete plan created", concretePlan.summary);
     if (!isProjectStructureInspection && currentNode.depth === 0) {
       const inspectedPlan = await this.resolveProjectStructureInspectionLoop(
         currentNode,
-        consolidatedEvidence,
+        rawEvidenceBundles,
         concretePlan
       );
       currentNode = inspectedPlan.node;
@@ -549,7 +544,7 @@ export class OrchestratorRuntime {
     if (!isProjectStructureInspection) {
       const guardedConcretePlan = this.requireExplicitEvidenceBeforeFallback(
         currentNode,
-        consolidatedEvidence,
+        rawEvidenceBundles,
         concretePlan
       );
       if (guardedConcretePlan !== concretePlan) {
@@ -563,7 +558,7 @@ export class OrchestratorRuntime {
       }
       const approvalRedirectedConcretePlan = this.redirectDiagnosticWorkaroundToApprovalBackedGather(
         currentNode,
-        consolidatedEvidence,
+        rawEvidenceBundles,
         concretePlan
       );
       if (approvalRedirectedConcretePlan !== concretePlan) {
@@ -580,17 +575,15 @@ export class OrchestratorRuntime {
     if (!isProjectStructureInspection) {
       const refinedPlan = await this.resolveFocusedGatherLoop({
         node: currentNode,
-        planningEvidence,
+        evidenceBundles,
         abstractPlan,
         gather,
-        consolidatedEvidence,
         concretePlan
       });
       currentNode = refinedPlan.node;
-      planningEvidence = refinedPlan.planningEvidence;
+      evidenceBundles = refinedPlan.evidenceBundles;
       abstractPlan = refinedPlan.abstractPlan;
       gather = refinedPlan.gather;
-      consolidatedEvidence = refinedPlan.consolidatedEvidence;
       concretePlan = refinedPlan.concretePlan;
       concretePlanStage = refinedPlan.concretePlanStage;
     }
@@ -598,7 +591,7 @@ export class OrchestratorRuntime {
     const phaseResults: NodePhaseResults = {
       abstractPlan,
       gather,
-      consolidatedEvidence,
+      evidenceBundles,
       concretePlan
     };
 
@@ -616,7 +609,7 @@ export class OrchestratorRuntime {
         concretePlanSummary: concretePlan.summary,
         outputs: [],
         verifySummaries: [concretePlan.summary],
-        evidenceBundles: [consolidatedEvidence]
+        evidenceBundles: evidenceBundles
       });
       this.markPendingAcceptanceCriteriaMet(currentNode.id);
       this.throwIfCancelled(currentNode.runId, currentNode.id);
@@ -686,7 +679,7 @@ export class OrchestratorRuntime {
         executeSummary: phaseResults.execute?.summary,
         outputs,
         verifySummaries,
-        evidenceBundles: [consolidatedEvidence]
+        evidenceBundles: evidenceBundles
       });
       this.markPendingAcceptanceCriteriaMet(currentNode.id);
       currentNode = this.engine.transitionNode(nodeId, "done");
@@ -726,7 +719,7 @@ export class OrchestratorRuntime {
       });
     }
 
-    const executionOutcome = await this.executeExecutionLeafForPlan(currentNode, consolidatedEvidence, concretePlan);
+    const executionOutcome = await this.executeExecutionLeafForPlan(currentNode, evidenceBundles, concretePlan);
     phaseResults.review = executionOutcome.phaseResults.review;
     phaseResults.execute = executionOutcome.phaseResults.execute;
     phaseResults.verify = executionOutcome.phaseResults.verify;
@@ -739,7 +732,7 @@ export class OrchestratorRuntime {
       executeSummary: executionOutcome.phaseResults.execute?.summary,
       outputs: executionOutcome.outputs,
       verifySummaries: executionOutcome.verifySummaries,
-      evidenceBundles: [consolidatedEvidence]
+      evidenceBundles: evidenceBundles
     });
     if (executionOutcome.verificationPassed) {
       this.markPendingAcceptanceCriteriaMet(currentNode.id);
@@ -777,6 +770,18 @@ export class OrchestratorRuntime {
     });
     const execute = executeStage.result;
     phaseResults.execute = execute;
+
+    const executeEvents = this.engine.listEvents(currentNode.runId).filter(
+      (e) => e.nodeId === executeStage.stageNode.id && (e.type === "terminal_output" || e.type === "approval_requested")
+    );
+
+    if (execute.completed === true && executeEvents.length === 0) {
+      const failureSummary = `Execution hallucination blocked: The agent reported success but no tool calls or terminal outputs were recorded. Physical verification failed.`;
+      this.recordDecision(currentNode.runId, executeStage.stageNode.id, "Execution hallucination blocked", failureSummary);
+      this.recordExecutionStatus(currentNode, "failed", failureSummary);
+      throw new ExecutionNotCompletedError(currentNode.id, failureSummary);
+    }
+
     if (execute.completed === false) {
       const failureSummary = execute.blockedReason
         ? `${execute.summary} (${execute.blockedReason})`
@@ -923,7 +928,7 @@ export class OrchestratorRuntime {
         kind: "execution",
         role: "reviewer",
         capability: "review",
-        evidenceBundles: executionEvidence,
+        evidenceBundles: evidenceBundles,
         escalateOnFailure: false
       });
       const review = reviewStage.result;
@@ -944,7 +949,7 @@ export class OrchestratorRuntime {
 
   private async executeExecutionLeafForPlan(
     planNode: PlanNode,
-    consolidatedEvidence: EvidenceBundle,
+    evidenceBundles: EvidenceBundle[],
     concretePlan: ConcretePlanResult
   ): Promise<NodeExecutionOutcome> {
     this.throwIfCancelled(planNode.runId, planNode.id);
@@ -955,7 +960,9 @@ export class OrchestratorRuntime {
       assignedModels: this.buildExecutionAssignedModels(planNode),
       reviewPolicy: planNode.reviewPolicy
     });
-    this.engine.attachEvidenceBundle(childNode.id, consolidatedEvidence.id);
+    for (const bundle of evidenceBundles) {
+      this.engine.attachEvidenceBundle(childNode.id, bundle.id);
+    }
     this.engine.appendEvent(planNode.runId, childNode.id, "scheduler_progress", {
       message: "Executing dedicated execution node",
       parentNodeId: planNode.id
@@ -1087,14 +1094,14 @@ export class OrchestratorRuntime {
   }
 
   private requireRootPhaseResults(phaseResults: NodePhaseResults, nodeId: string): RootPhaseResults {
-    if (!phaseResults.abstractPlan || !phaseResults.gather || !phaseResults.consolidatedEvidence || !phaseResults.concretePlan) {
+    if (!phaseResults.abstractPlan || !phaseResults.gather || !phaseResults.evidenceBundles || !phaseResults.concretePlan) {
       throw new Error(`Root planning node ${nodeId} did not produce the required planning phase results`);
     }
 
     return {
       abstractPlan: phaseResults.abstractPlan,
       gather: phaseResults.gather,
-      consolidatedEvidence: phaseResults.consolidatedEvidence,
+      evidenceBundles: phaseResults.evidenceBundles,
       concretePlan: phaseResults.concretePlan,
       review: phaseResults.review,
       execute: phaseResults.execute,
@@ -1424,7 +1431,7 @@ export class OrchestratorRuntime {
 
   private async resolveProjectStructureInspectionLoop(
     node: PlanNode,
-    consolidatedEvidence: EvidenceBundle,
+    evidenceBundles: EvidenceBundle[],
     initialPlan: ConcretePlanResult
   ): Promise<{ node: PlanNode; concretePlan: ConcretePlanResult }> {
     let currentNode = node;
@@ -1454,7 +1461,7 @@ export class OrchestratorRuntime {
         kind: "planning",
         role: "concretePlanner",
         capability: "concretePlan",
-        evidenceBundles: [consolidatedEvidence]
+        evidenceBundles: evidenceBundles
       });
       concretePlan = concretePlanStage.result;
       this.recordDecision(
@@ -1503,25 +1510,22 @@ export class OrchestratorRuntime {
 
   private async resolveFocusedGatherLoop(input: {
     node: PlanNode;
-    planningEvidence: EvidenceBundle[];
+    evidenceBundles: EvidenceBundle[];
     abstractPlan: AbstractPlanResult;
     gather: GatherResult;
-    consolidatedEvidence: EvidenceBundle;
     concretePlan: ConcretePlanResult;
   }): Promise<{
     node: PlanNode;
-    planningEvidence: EvidenceBundle[];
+    evidenceBundles: EvidenceBundle[];
     abstractPlan: AbstractPlanResult;
     gather: GatherResult;
-    consolidatedEvidence: EvidenceBundle;
     concretePlan: ConcretePlanResult;
     concretePlanStage: { stageNode: PlanNode; result: ConcretePlanResult };
   }> {
     let currentNode = input.node;
-    let planningEvidence = input.planningEvidence;
+    let evidenceBundles = input.evidenceBundles;
     let abstractPlan = input.abstractPlan;
     let gather = input.gather;
-    let consolidatedEvidence = input.consolidatedEvidence;
     let concretePlan = input.concretePlan;
     let concretePlanStage: { stageNode: PlanNode; result: ConcretePlanResult } = {
       stageNode: currentNode,
@@ -1562,12 +1566,12 @@ export class OrchestratorRuntime {
               ? `Focused refinement objectives:\n${focusedObjectives.map((objective, index) => `${index + 1}. ${objective}`).join("\n")}`
               : ""
           ].filter((value) => value.length > 0).join("\n\n"),
-          [consolidatedEvidence]
+          evidenceBundles
         ),
         kind: "planning",
         role: "abstractPlanner",
         capability: "abstractPlan",
-        evidenceBundles: [consolidatedEvidence]
+        evidenceBundles: evidenceBundles
       });
       abstractPlan = focusedReplanStage.result;
       this.recordAbstractPlanning(focusedReplanStage.stageNode, abstractPlan);
@@ -1581,7 +1585,7 @@ export class OrchestratorRuntime {
           currentNode,
           "gather",
           `Gather only the targeted follow-up evidence for:\n${currentNode.objective}`,
-          [consolidatedEvidence],
+          evidenceBundles,
           {
             targetsToInspect: abstractPlan.targetsToInspect,
             evidenceRequirements: abstractPlan.evidenceRequirements,
@@ -1591,7 +1595,7 @@ export class OrchestratorRuntime {
         kind: "planning",
         role: "gatherer",
         capability: "gather",
-        evidenceBundles: [consolidatedEvidence]
+        evidenceBundles: evidenceBundles
       });
       gather = focusedGatherStage.result;
       this.mergeProjectStructureReport(focusedGatherStage.stageNode, gather.projectStructure);
@@ -1606,24 +1610,20 @@ export class OrchestratorRuntime {
         this.ingestEvidenceBundle(focusedGatherStage.stageNode.id, storedBundle);
       }
 
-      planningEvidence = [...planningEvidence, ...focusedBundles];
+      evidenceBundles = [...evidenceBundles, ...focusedBundles];
 
       this.throwIfCancelled(currentNode.runId, currentNode.id);
       currentNode = this.engine.transitionNode(currentNode.id, "evidence_consolidation");
-      consolidatedEvidence = this.evidenceStore.mergeBundles({
-        runId: currentNode.runId,
-        nodeId: currentNode.id,
-        bundleIds: [consolidatedEvidence.id, ...focusedBundles.map((bundle) => bundle.id)],
-        summary: gather.summary
-      });
-      this.evidenceStore.upsertBundle(consolidatedEvidence);
+      const rawEvidenceBundles = [...evidenceBundles, ...focusedBundles];
       const consolidationStage = this.createCompletedStageNode(currentNode, {
         phase: "evidence_consolidation",
         title: "Evidence Consolidation",
-        objective: `Consolidate the focused evidence into a compact bundle for:\n${currentNode.objective}`,
+        objective: `Bypass merge and pass raw focused evidence into a compact bundle for:\n${currentNode.objective}`,
         kind: "planning"
       });
-      this.engine.attachEvidenceBundle(consolidationStage.id, consolidatedEvidence.id);
+      for (const bundle of rawEvidenceBundles) {
+        this.engine.attachEvidenceBundle(consolidationStage.id, bundle.id);
+      }
 
       this.throwIfCancelled(currentNode.runId, currentNode.id);
       currentNode = this.engine.transitionNode(currentNode.id, "concrete_plan");
@@ -1634,7 +1634,7 @@ export class OrchestratorRuntime {
         kind: "planning",
         role: "concretePlanner",
         capability: "concretePlan",
-        evidenceBundles: [consolidatedEvidence]
+        evidenceBundles: rawEvidenceBundles
       });
       concretePlan = concretePlanStage.result;
       this.recordDecision(
@@ -1645,7 +1645,7 @@ export class OrchestratorRuntime {
       );
       const approvalRedirectedConcretePlan = this.redirectDiagnosticWorkaroundToApprovalBackedGather(
         currentNode,
-        consolidatedEvidence,
+        rawEvidenceBundles,
         concretePlan
       );
       if (approvalRedirectedConcretePlan !== concretePlan) {
@@ -1661,10 +1661,9 @@ export class OrchestratorRuntime {
 
     return {
       node: currentNode,
-      planningEvidence,
+      evidenceBundles,
       abstractPlan,
       gather,
-      consolidatedEvidence,
       concretePlan,
       concretePlanStage
     };
@@ -2697,7 +2696,7 @@ export class OrchestratorRuntime {
 
   private requireExplicitEvidenceBeforeFallback(
     node: PlanNode,
-    consolidatedEvidence: EvidenceBundle,
+    evidenceBundles: EvidenceBundle[],
     concretePlan: ConcretePlanResult
   ): ConcretePlanResult {
     const attempt = this.focusedGatherAttemptsByNode.get(node.id) ?? 0;
@@ -2725,35 +2724,39 @@ export class OrchestratorRuntime {
       return concretePlan;
     }
 
-    const evidenceText = [
-      consolidatedEvidence.summary,
-      ...consolidatedEvidence.facts.map((fact) => fact.statement),
-      ...consolidatedEvidence.hypotheses.map((hypothesis) => hypothesis.statement),
-      ...consolidatedEvidence.unknowns.map((unknown) => unknown.question),
-      ...consolidatedEvidence.relevantTargets.flatMap((target) => [
+    const evidenceText = evidenceBundles.flatMap((bundle) => [
+      bundle.summary,
+      ...bundle.facts.map((fact) => fact.statement),
+      ...bundle.hypotheses.map((hypothesis) => hypothesis.statement),
+      ...bundle.unknowns.map((unknown) => unknown.question),
+      ...bundle.relevantTargets.flatMap((target) => [
         target.filePath ?? "",
         target.symbol ?? "",
         target.note ?? ""
       ]),
-      ...consolidatedEvidence.references.flatMap((reference) => [
+      ...bundle.references.flatMap((reference) => [
         reference.note ?? "",
         reference.location?.filePath ?? "",
         reference.location?.symbol ?? "",
         reference.location?.label ?? "",
         reference.location?.uri ?? ""
       ]),
-      ...consolidatedEvidence.snippets.map((snippet) => snippet.content)
-    ]
+      ...bundle.snippets.map((snippet) => snippet.content)
+    ])
       .filter((entry) => entry.length > 0)
       .join("\n");
 
     const hasRepositoryEvidence = REPOSITORY_EVIDENCE_PATTERN.test(evidenceText);
     const hasExternalSurfaceEvidence = EXTERNAL_SURFACE_EVIDENCE_PATTERN.test(evidenceText)
-      || consolidatedEvidence.references.some((reference) =>
-        reference.sourceType === "terminal" || reference.sourceType === "search" || reference.sourceType === "web"
+      || evidenceBundles.some((bundle) =>
+        bundle.references.some((reference) =>
+          reference.sourceType === "terminal" || reference.sourceType === "search" || reference.sourceType === "web"
+        )
       )
-      || consolidatedEvidence.snippets.some((snippet) =>
-        snippet.kind === "terminal" || snippet.kind === "search_result"
+      || evidenceBundles.some((bundle) =>
+        bundle.snippets.some((snippet) =>
+          snippet.kind === "terminal" || snippet.kind === "search_result"
+        )
       );
     const hasExplicitBlockerEvidence = DATA_SOURCE_BLOCKER_PATTERN.test(evidenceText);
 
@@ -2779,7 +2782,7 @@ export class OrchestratorRuntime {
 
   private redirectDiagnosticWorkaroundToApprovalBackedGather(
     node: PlanNode,
-    consolidatedEvidence: EvidenceBundle,
+    evidenceBundles: EvidenceBundle[],
     concretePlan: ConcretePlanResult
   ): ConcretePlanResult {
     const attempt = this.focusedGatherAttemptsByNode.get(node.id) ?? 0;
@@ -2796,7 +2799,7 @@ export class OrchestratorRuntime {
       return concretePlan;
     }
 
-    if (!this.hasStableExternalBlockerEvidence(node.runId, [consolidatedEvidence])) {
+    if (!this.hasStableExternalBlockerEvidence(node.runId, evidenceBundles)) {
       return concretePlan;
     }
 
@@ -3231,4 +3234,6 @@ function truncateResolutionSource(value: string, maxLength = 180): string {
   }
 
   return `${value.slice(0, maxLength)}...`;
+}
+...`;
 }

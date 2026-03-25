@@ -194,6 +194,7 @@ function buildStageInstructions(
 
   if (workflowStage === "bootstrap_sketch" && capability === "gather") {
     return [
+      "Before deep planning, perform a brief pre-flight check to determine available environment tools (e.g. npm, yarn, python, go, rustc) using safe, read-only shell commands (like --version or which).",
       "Produce a low-cost, approximate sketch of the repository before deeper planning starts.",
       "Limit yourself to top-level structure, likely entrypoints, main runtime boundaries, and a few anchor files or directories.",
       "Stay at seed level only: capture clues and open questions, then defer any detailed inspection to the later planning and gather stages.",
@@ -275,6 +276,7 @@ function buildStageInstructions(
 
   if (workflowStage === "task_orchestration" && capability === "abstractPlan") {
     return [
+      "Always account for the tools available in the environment before planning commands. If the environment tools are unknown, explicitly request a pre-flight check in the evidence requirements.",
       "Start from the provided evidence, workingMemory, and projectStructure before doing any new search.",
       "Turn the existing open questions, contradictions, keyFiles, entryPoints, relevantTargets, and recent memory decisions into 1-3 concrete inspection targets.",
       "Inspection targets must be explicit file paths, modules, entrypoints, symbols, managed-tool locations, or clearly named external surfaces. Avoid generic targets like repository, codebase, current implementation, or relevant files.",
