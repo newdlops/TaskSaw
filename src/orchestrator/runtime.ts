@@ -321,6 +321,10 @@ export class OrchestratorRuntime {
     this.projectStructureInspectionNodeIdsByRun.set(run.id, new Set());
     this.projectStructureInspectionAttemptsByNode.set(rootNode.id, 0);
     this.focusedGatherAttemptsByNode.set(rootNode.id, 0);
+
+    // 1. Mandatory Pre-flight Environment Discovery (Capability Check)
+    await this.runPreFlightDiscovery(run.id, rootNode.id, run.workspacePath ?? null);
+
     const seededEvidenceCount = this.seedContinuationContext(rootNode, input.continuation);
     this.persistence?.saveSnapshot(this.getSnapshot(run.id));
     this.engine.appendEvent(run.id, rootNode.id, "scheduler_progress", {
@@ -772,11 +776,11 @@ export class OrchestratorRuntime {
     phaseResults.execute = execute;
 
     const executeEvents = this.engine.listEvents(currentNode.runId).filter(
-      (e) => e.nodeId === executeStage.stageNode.id && (e.type === "terminal_output" || e.type === "approval_requested")
+      (e) => e.nodeId === executeStage.stageNode.id && (e.type === "terminal_output" || e.type === "approval_requested" || e.type === "evidence_attached")
     );
 
     if (execute.completed === true && executeEvents.length === 0) {
-      const failureSummary = `Execution hallucination blocked: The agent reported success but no tool calls or terminal outputs were recorded. Physical verification failed.`;
+      const failureSummary = `Physical Verification Failed (Execution Hallucination): The agent reported completion but no actual tool calls, terminal outputs, or new evidence were recorded. Logic changes must be performed through verified tool interactions.`;
       this.recordDecision(currentNode.runId, executeStage.stageNode.id, "Execution hallucination blocked", failureSummary);
       this.recordExecutionStatus(currentNode, "failed", failureSummary);
       throw new ExecutionNotCompletedError(currentNode.id, failureSummary);
@@ -928,7 +932,7 @@ export class OrchestratorRuntime {
         kind: "execution",
         role: "reviewer",
         capability: "review",
-        evidenceBundles: evidenceBundles,
+        evidenceBundles: executionEvidence,
         escalateOnFailure: false
       });
       const review = reviewStage.result;
@@ -2596,6 +2600,60 @@ export class OrchestratorRuntime {
     };
   }
 
+  private async runPreFlightDiscovery(runId: string, rootNodeId: string, workspacePath: string | null): Promise<void> {
+    const rootNode = this.engine.getNode(rootNodeId);
+    if (!rootNode) return;
+
+    this.engine.appendEvent(runId, rootNodeId, "scheduler_progress", {
+      message: "Running pre-flight environment discovery"
+    });
+
+    const discoveryCommands = [
+      "env",
+      "node -v",
+      "npm -v",
+      "which npm",
+      "which git",
+      "which tsc"
+    ];
+
+    const workingMemory = this.workingMemoryByRun.get(runId);
+    if (!workingMemory) return;
+
+    for (const cmd of discoveryCommands) {
+      try {
+        const terminalSession = {
+          id: randomUUID(),
+          title: `Discovery: ${cmd}`
+        };
+
+        const adapter = this.adapterRegistry.resolve(rootNode.assignedModels.gatherer!, "gather");
+        const context = this.buildInvocationContext(rootNode, rootNode.assignedModels.gatherer!, "gather", [], terminalSession);
+        
+        // Use the adapter's gather capability to execute a simple command if possible
+        const result = await (adapter as any).executeShellCommand?.(context, {
+          command: `${cmd} < /dev/null`,
+          cwd: workspacePath ?? undefined
+        });
+        
+        if (result) {
+          const output = result.stdout.trim() || result.stderr.trim();
+          if (output.length > 0) {
+            const lines = output.split("\n");
+            const summary = lines.length > 1 ? `${lines[0]} (+${lines.length - 1} lines)` : output;
+            workingMemory.recordFact({
+              statement: `[Pre-flight] ${cmd}: ${summary.slice(0, 1000)}`,
+              confidence: "high",
+              relatedNodeIds: [rootNodeId]
+            });
+          }
+        }
+      } catch {
+        // Skip specific discovery failures
+      }
+    }
+  }
+
   private isCancellationError(error: unknown): boolean {
     if (error instanceof OrchestratorRunCancelledError) {
       return true;
@@ -3234,6 +3292,4 @@ function truncateResolutionSource(value: string, maxLength = 180): string {
   }
 
   return `${value.slice(0, maxLength)}...`;
-}
-...`;
 }

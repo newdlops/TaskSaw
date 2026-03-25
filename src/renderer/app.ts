@@ -31,6 +31,7 @@ type ManagedToolUsage = {
     weeklyRemainingPercent: number | null;
   } | null;
   gemini?: {
+    account?: string | null;
     models?: Array<{
       modelId: string;
       displayName: string;
@@ -2625,8 +2626,9 @@ function calculateTerminalDimensions(container: HTMLElement, fontSize: number, f
     : Math.max(container.clientHeight, rect.height);
 
   // Cap initial dimensions to viewport if container dimensions seem excessive or are not yet stabilized.
-  const maxWidth = appWindow.innerWidth - 10;
-  const maxHeight = appWindow.innerHeight - 120;
+  // Use a more conservative maxWidth to account for sidebar (approx 260px) and padding.
+  const maxWidth = Math.max(400, appWindow.innerWidth - 300);
+  const maxHeight = Math.max(200, appWindow.innerHeight - 150);
   if (width > maxWidth) width = maxWidth;
   if (height > maxHeight) height = maxHeight;
 
@@ -5641,11 +5643,15 @@ function fitSession(sessionId: string, terminal: XtermTerminal) {
   const cell = getTerminalCellDimensions(fontSize, fontFamily);
 
   const availableWidth = Math.max(
-    viewportRect && viewportRect.width > 0 ? viewportRect.width : fallbackRect.width - 48,
+    viewportRect && viewportRect.width > 0 
+      ? viewportRect.width 
+      : Math.min(fallbackRect.width - 48, appWindow.innerWidth - 300),
     10
   );
   const availableHeight = Math.max(
-    viewportRect && viewportRect.height > 0 ? viewportRect.height : fallbackRect.height - 32,
+    viewportRect && viewportRect.height > 0 
+      ? viewportRect.height 
+      : Math.min(fallbackRect.height - 32, appWindow.innerHeight - 150),
     10
   );
 
@@ -5774,7 +5780,12 @@ function mountTerminal(session: SessionInfo) {
   sessionKindBadges.set(session.id, kindBadge);
   sessionCloseButtons.set(session.id, closeButton);
 
-  fitSession(session.id, terminal);
+  // Use requestAnimationFrame to ensure the terminal pane is shown (hidden = false) 
+  // and attached to DOM before fitting, which prevents incorrect dimensions.
+  appWindow.requestAnimationFrame(() => {
+    fitSession(session.id, terminal);
+  });
+
   updateTerminalRootState();
   renderWorkspaceTabs();
   renderWorkspacePanels();
@@ -5966,6 +5977,10 @@ function renderToolUsageStatus(status: ManagedToolStatus) {
     } else {
       const p = remainingPercent === null ? "n/a" : `${remainingPercent}%`;
       label = `Gemini ${p} ${leftLabel}`;
+    }
+
+    if (usage?.gemini?.account) {
+      label += ` [${usage.gemini.account}]`;
     }
 
     if (usage?.statusMessage) {

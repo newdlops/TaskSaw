@@ -334,12 +334,13 @@ function buildStageInstructions(
 
   if (capability === "verify") {
     return [
-      "Verify the requested user-visible behavior, not just the presence of code changes or lint/build success.",
-      "A generic success claim is insufficient. State the concrete observed behavior or the concrete blocker that justifies the verdict.",
+      "Verify the requested user-visible behavior and system state, not just the presence of code changes, strings, or build success.",
+      "A generic success claim or a simple 'grep' for modified text is insufficient. You must provide concrete evidence of logical correctness.",
+      "CRITICAL: Perform behavioral verification. If the change involves a logic flow, try to execute a command or script that exercises that flow. Establish that the bug is fixed or the feature works as intended in its actual runtime context.",
+      "Set passed=false if the implementation is technically present but logically disconnected (e.g., a variable is updated but its value is never used by the system).",
       "Set passed=false if any requested behavior still relies on placeholder, fallback, no-data, or unsupported upstream sources instead of the requested real result.",
-      "Set passed=false if the run only added diagnostic logging or instrumentation and the promised log, payload, or external evidence has not actually been produced yet.",
-      "When additional tests are necessary in this TypeScript workspace, prefer the project's documented scripts or built dist tests after a build instead of raw node --test src/**/*.ts entrypoints.",
-      "Do not modify files, create temp scripts or temp files, run builds, or attempt follow-up fixes during verify.",
+      "When additional tests are necessary in this TypeScript workspace, prefer the project's documented scripts or built dist tests after a build.",
+      "Do not modify files, create temp scripts, or attempt follow-up fixes during verify. If verification fails, state the exact reason why and report it as a failure.",
       "Use already captured evidence first and keep any additional inspection strictly read-only and minimal."
     ].join(" ");
   }

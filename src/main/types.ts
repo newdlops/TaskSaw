@@ -20,6 +20,7 @@ export type ManagedToolUsage = {
     weeklyRemainingPercent: number | null;
   } | null;
   gemini?: {
+    account?: string | null;
     models?: Array<{
       modelId: string;
       displayName: string;

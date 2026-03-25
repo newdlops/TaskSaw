@@ -287,10 +287,13 @@ export class ToolManager {
         this.activeSessionQueryTrigger?.();
       }
 
+      const googleAccounts = this.readJsonObject(path.join(this.homeDirectory, ".gemini", "google_accounts.json"));
+      const account = typeof googleAccounts.active === "string" ? googleAccounts.active : null;
+
       return {
         remainingPercent,
         statusMessage,
-        gemini: { models: catalogModels }
+        gemini: { account, models: catalogModels }
       };
     } catch {
       return null;
