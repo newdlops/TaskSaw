@@ -344,6 +344,84 @@ test("runtime executes the minimal happy path and propagates evidence into plann
   ]);
 });
 
+test("runtime attaches a stable session scope hint to stage invocations", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const abstractPlanner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const concretePlanner: ModelRef = {
+    id: "concrete-upper",
+    provider: "mock",
+    model: "concrete-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const verifier: ModelRef = {
+    id: "verify-upper",
+    provider: "mock",
+    model: "verify-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+
+  let observedHint: ModelInvocationContext["sessionScopeHint"];
+
+  registry.register(new MockAdapter(abstractPlanner, new Set(["abstractPlan"]), {}, trace));
+  registry.register(new MockAdapter(gatherer, new Set(["gather"]), {
+    gather: async (context) => {
+      observedHint = context.sessionScopeHint;
+      return {
+        summary: "Gather done",
+        evidenceBundles: []
+      };
+    }
+  }, trace));
+  registry.register(new MockAdapter(concretePlanner, new Set(["concretePlan"]), {}, trace));
+  registry.register(new MockAdapter(executor, new Set(["execute"]), {}, trace));
+  registry.register(new MockAdapter(verifier, new Set(["verify"]), {}, trace));
+
+  const runtime = new OrchestratorRuntime(registry);
+  const execution = await runtime.executeScheduledRun({
+    goal: "Inspect session scope hints",
+    title: "Root Task",
+    objective: "Inspect session scope hints",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner,
+      gatherer,
+      concretePlanner,
+      executor,
+      verifier
+    }
+  });
+
+  assert.ok(observedHint);
+  assert.equal(observedHint.ownerTaskId, execution.snapshot.run.rootNodeId);
+  assert.equal(observedHint.ownerTaskTitle, "Root Task");
+  assert.equal(observedHint.ownerTaskObjective, "Inspect session scope hints");
+  assert.deepEqual(observedHint.ownerTaskLineage, ["Root Task: Inspect session scope hints"]);
+});
+
 test("runtime carries gathered bundles into concrete planning, execution, and phase results", async () => {
   const trace: string[] = [];
   const registry = new ModelAdapterRegistry();

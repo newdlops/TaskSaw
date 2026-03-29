@@ -14,6 +14,7 @@ import {
   OrchestratorTerminalEventDraft,
   OrchestratorUserInputRequest,
   OrchestratorUserInputResponse,
+  ModelInvocationSessionScopeHint,
   ModelInvocationContext,
   OrchestratorCapability,
   OrchestratorModelAdapter,
@@ -1432,6 +1433,48 @@ export class OrchestratorRuntime {
     return "task_orchestration";
   }
 
+  private buildSessionScopeHint(node: PlanNode): ModelInvocationSessionScopeHint {
+    const ownerTask = this.resolveSessionOwnerTask(node);
+    return {
+      ownerTaskId: ownerTask.id,
+      ownerTaskTitle: ownerTask.title,
+      ownerTaskObjective: ownerTask.objective,
+      ownerTaskLineage: this.collectSessionOwnerLineage(ownerTask)
+    };
+  }
+
+  private resolveSessionOwnerTask(node: PlanNode): PlanNode {
+    if (node.role === "task") {
+      return node;
+    }
+
+    let currentNode = node.parentId ? this.engine.getNode(node.parentId) : undefined;
+    while (currentNode) {
+      if (currentNode.role === "task") {
+        return currentNode;
+      }
+
+      currentNode = currentNode.parentId ? this.engine.getNode(currentNode.parentId) : undefined;
+    }
+
+    return node;
+  }
+
+  private collectSessionOwnerLineage(ownerTask: PlanNode): string[] {
+    const lineage: string[] = [];
+    let currentNode: PlanNode | undefined = ownerTask;
+
+    while (currentNode) {
+      if (currentNode.role === "task") {
+        lineage.push(`${currentNode.title}: ${currentNode.objective}`);
+      }
+
+      currentNode = currentNode.parentId ? this.engine.getNode(currentNode.parentId) : undefined;
+    }
+
+    return lineage.reverse();
+  }
+
   private mergeProjectStructureReport(node: PlanNode, report: GatherResult["projectStructure"]) {
     if (!report) {
       return;
@@ -2033,7 +2076,8 @@ export class OrchestratorRuntime {
           title: terminalSession.title,
           ...event
         });
-      }
+      },
+      sessionScopeHint: this.buildSessionScopeHint(node)
     };
   }
 

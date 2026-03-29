@@ -10,6 +10,7 @@ export * from "./persistence";
 export * from "./project-structure-memory";
 export * from "./runtime";
 export * from "./scheduler";
+export * from "./session-context-reuse";
 export * from "./types";
 export * from "./working-memory";
 export * from "./workspace-context-cache";

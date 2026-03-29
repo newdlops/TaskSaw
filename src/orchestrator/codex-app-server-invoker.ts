@@ -6,6 +6,14 @@ import {
   OrchestratorCapability,
   OrchestratorUserInputQuestion
 } from "./model-adapter";
+import {
+  appendSessionContextLedger,
+  buildSessionReusePrelude,
+  buildSessionReuseScope,
+  createSessionContextLedgerEntry,
+  finalizeSessionContextLedgerEntry,
+  SessionContextLedgerEntry
+} from "./session-context-reuse";
 
 type SpawnedProcess = {
   stdin: NodeJS.WritableStream | null;
@@ -37,6 +45,7 @@ type CodexAppServerInvokerOptions = {
   env?: Record<string, string>;
   dependencies?: CodexAppServerInvokerDependencies;
   timeoutMs?: number;
+  sessionPool?: CodexAppServerSessionPool;
 };
 
 type JsonRpcId = number | string;
@@ -62,8 +71,45 @@ type JsonRpcNotification = {
   params?: Record<string, unknown>;
 };
 
+type CodexActiveTurn = {
+  capability: OrchestratorCapability;
+  context: ModelInvocationContext;
+  turnId: string;
+  latestAgentMessageText: string;
+  agentMessageChunks: string[];
+  turnCompleted: ReturnType<typeof createDeferred<void>>;
+};
+
+type CodexAppServerConnection = {
+  child: SpawnedProcess;
+  stdin: NodeJS.WritableStream;
+  stdout: NodeJS.ReadableStream;
+  stderrBuffer: string;
+  threadId: string | null;
+  nextRequestId: number;
+  pendingResponses: Map<JsonRpcId, { resolve: (value: unknown) => void; reject: (error: Error) => void }>;
+  stdoutCarryover: string;
+  processingQueue: Promise<void>;
+  activeTurn: CodexActiveTurn | null;
+  initialized: boolean;
+  closed: boolean;
+};
+
+type CodexAppServerScopedSessionState = {
+  connection: CodexAppServerConnection | null;
+  invocationQueue: Promise<void>;
+  ledger: SessionContextLedgerEntry[];
+};
+
+export type CodexAppServerSessionPool = Map<string, CodexAppServerScopedSessionState>;
+
+export function createCodexAppServerSessionPool(): CodexAppServerSessionPool {
+  return new Map();
+}
+
 export function createCodexAppServerInvoker(options: CodexAppServerInvokerOptions) {
   const spawnProcess = options.dependencies?.spawnProcess ?? defaultSpawnProcess;
+  const sessionPool = options.sessionPool ?? createCodexAppServerSessionPool();
 
   return async (
     capability: OrchestratorCapability,
@@ -71,11 +117,80 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
     context: ModelInvocationContext
   ): Promise<{ stdout: string; stderr: string; command: string[] }> => {
     const command = [options.executablePath, ...options.executableArgs, "app-server"];
-    context.reportTerminalEvent?.({
-      stream: "system",
-      text: `$ ${formatTerminalCommand(command)}\n`
-    });
     const workingDirectory = options.cwd ?? process.cwd();
+    const scope = buildSessionReuseScope("codex-app-server", workingDirectory, capability, context);
+    const scopedState = getOrCreateScopedState(scope.key);
+
+    const runInvocation = scopedState.invocationQueue.then(async () => {
+      context.reportTerminalEvent?.({
+        stream: "system",
+        text: `$ ${formatTerminalCommand(command)}\n`
+      });
+      const currentLedgerEntry = createSessionContextLedgerEntry(scope, capability, prompt, context);
+      const replayPrelude = buildSessionReusePrelude(scope, scopedState.ledger, currentLedgerEntry);
+      const promptText = replayPrelude ? `${replayPrelude}\n\n${prompt}` : prompt;
+      let connection = await ensureConnection(scopedState);
+
+      try {
+        await ensureInitialized(scopedState, connection, context);
+        await ensureThread(scopedState, connection, capability, context, workingDirectory);
+        const result = await runTurn(scopedState, connection, capability, promptText, context, workingDirectory);
+        scopedState.ledger = appendSessionContextLedger(
+          scopedState.ledger,
+          finalizeSessionContextLedgerEntry(currentLedgerEntry, result.stdout)
+        );
+        return {
+          stdout: result.stdout,
+          stderr: result.stderr,
+          command
+        };
+      } catch (error) {
+        const failedConnection = connection;
+        const failedThreadId = failedConnection.threadId ?? "";
+        const failedTurnId = failedConnection.activeTurn?.turnId ?? "";
+        const stderrPreview = failedConnection.stderrBuffer.trim();
+        await invalidateSession(scopedState, failedConnection);
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          [
+            `Codex app-server invocation failed: ${message}`,
+            `command:\n${command.join(" ")}`,
+            failedThreadId ? `threadId=${failedThreadId}` : null,
+            failedTurnId ? `turnId=${failedTurnId}` : null,
+            stderrPreview ? `stderr preview:\n${stderrPreview.slice(-4_000)}` : null
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+        );
+      }
+    });
+
+    scopedState.invocationQueue = runInvocation.then(() => undefined, () => undefined);
+    return runInvocation;
+  };
+
+  function getOrCreateScopedState(scopeKey: string): CodexAppServerScopedSessionState {
+    const existing = sessionPool.get(scopeKey);
+    if (existing) {
+      return existing;
+    }
+
+    const initialState: CodexAppServerScopedSessionState = {
+      connection: null,
+      invocationQueue: Promise.resolve(),
+      ledger: []
+    };
+    sessionPool.set(scopeKey, initialState);
+    return initialState;
+  }
+
+  async function ensureConnection(
+    scopedState: CodexAppServerScopedSessionState
+  ): Promise<CodexAppServerConnection> {
+    if (isConnectionAlive(scopedState.connection)) {
+      return scopedState.connection;
+    }
+
     const child = spawnProcess(options.executablePath, [...options.executableArgs, "app-server"], {
       cwd: options.cwd,
       env: {
@@ -84,20 +199,6 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
       },
       stdio: ["pipe", "pipe", "pipe"]
     });
-
-    let stderrBuffer = "";
-    child.stderr?.on("data", (chunk: Buffer | string) => {
-      const text = chunk.toString();
-      stderrBuffer += text;
-      if (stderrBuffer.length > 8_000) {
-        stderrBuffer = stderrBuffer.slice(-8_000);
-      }
-      context.reportTerminalEvent?.({
-        stream: "stderr",
-        text
-      });
-    });
-
     const stdin = child.stdin;
     const stdout = child.stdout;
     if (!stdin || !stdout) {
@@ -105,533 +206,626 @@ export function createCodexAppServerInvoker(options: CodexAppServerInvokerOption
       throw new Error("codex app-server did not expose stdio handles");
     }
 
-    const pendingResponses = new Map<JsonRpcId, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-    let nextRequestId = 1;
-    let stdoutCarryover = "";
-    let processingQueue = Promise.resolve();
-    let latestAgentMessageText = "";
-    const agentMessageChunks: string[] = [];
-    let threadId = "";
-    let turnId = "";
-
-    const onAbort = async () => {
-      await stopChildProcess(child);
+    const connection: CodexAppServerConnection = {
+      child,
+      stdin,
+      stdout,
+      stderrBuffer: "",
+      threadId: null,
+      nextRequestId: 1,
+      pendingResponses: new Map(),
+      stdoutCarryover: "",
+      processingQueue: Promise.resolve(),
+      activeTurn: null,
+      initialized: false,
+      closed: false
     };
+    scopedState.connection = connection;
 
-    const turnCompleted = createDeferred<void>();
-    const commandCompletionStates = new Map<string, string>();
-
-    const sendRequest = (method: string, params?: Record<string, unknown>) => {
-      const id = nextRequestId++;
-      const payload = JSON.stringify({
-        id,
-        method,
-        params: params ?? null
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      const text = chunk.toString();
+      connection.stderrBuffer += text;
+      if (connection.stderrBuffer.length > 8_000) {
+        connection.stderrBuffer = connection.stderrBuffer.slice(-8_000);
+      }
+      connection.activeTurn?.context.reportTerminalEvent?.({
+        stream: "stderr",
+        text
       });
-      stdin.write(`${payload}\n`);
-      return new Promise<unknown>((resolve, reject) => {
-        pendingResponses.set(id, { resolve, reject });
-      });
-    };
-
-    const sendResponse = (id: JsonRpcId, result: unknown) => {
-      stdin.write(`${JSON.stringify({ id, result })}\n`);
-    };
-
-    const sendError = (id: JsonRpcId, message: string) => {
-      stdin.write(`${JSON.stringify({ id, error: { code: -32000, message } })}\n`);
-    };
-
-    const rejectPendingResponses = (error: Error) => {
-      for (const pending of pendingResponses.values()) {
-        pending.reject(error);
-      }
-      pendingResponses.clear();
-    };
-
-    const handleNotification = async (notification: JsonRpcNotification) => {
-      const params = asRecord(notification.params);
-
-      if (notification.method === "turn/started") {
-        turnId = readString(asRecord(params.turn).id) || turnId;
-        return;
-      }
-
-      if (notification.method === "turn/completed") {
-        turnId = readString(asRecord(params.turn).id) || turnId;
-        turnCompleted.resolve();
-        return;
-      }
-
-      if (notification.method === "error") {
-        const errorRecord = asRecord(params.error);
-        throw new Error(
-          readString(errorRecord.message)
-          || readString(params.message)
-          || "Codex app-server reported an error"
-        );
-      }
-
-      if (notification.method === "item/agentMessage/delta") {
-        const delta = readString(params.delta);
-        if (delta) {
-          agentMessageChunks.push(delta);
-          context.reportTerminalEvent?.({
-            stream: "stdout",
-            text: delta
-          });
-        }
-        return;
-      }
-
-      if (notification.method === "item/plan/delta") {
-        const delta = readString(params.delta);
-        if (delta) {
-          context.reportExecutionStatus?.("planning_update", delta);
-          context.reportTerminalEvent?.({
-            stream: "system",
-            text: `${delta}\n`
-          });
-        }
-        return;
-      }
-
-      if (notification.method === "item/mcpToolCall/progress") {
-        const message = readString(params.message);
-        if (message) {
-          context.reportExecutionStatus?.("tool_progress", message);
-          context.reportTerminalEvent?.({
-            stream: "system",
-            text: `[tool] ${message}\n`
-          });
-        }
-        return;
-      }
-
-      if (notification.method === "item/started" || notification.method === "item/completed") {
-        const item = asRecord(params.item);
-        const itemType = readString(item.type);
-
-        if (itemType === "agentMessage") {
-          const text = readString(item.text);
-          if (text) {
-            latestAgentMessageText = text;
-          }
-          return;
-        }
-
-        if (itemType === "commandExecution") {
-          const itemId = readString(item.id);
-          const command = readString(item.command) || "unknown command";
-          const status = readString(item.status) || (notification.method === "item/started" ? "inProgress" : "completed");
-
-          if (notification.method === "item/started") {
-            commandCompletionStates.set(itemId, "started");
-            context.reportExecutionStatus?.("running_command", `Running command: ${command}`, {
-              command,
-              cwd: readString(item.cwd) || null,
-              itemId: itemId || null
-            });
-            context.reportTerminalEvent?.({
-              stream: "system",
-              text: `$ ${command}\n`
-            });
-            return;
-          }
-
-          const aggregatedOutput = readString(item.aggregatedOutput);
-          if (status === "completed") {
-            context.reportExecutionStatus?.("command_completed", `Completed command: ${command}`, {
-              command,
-              itemId: itemId || null,
-              exitCode: item.exitCode ?? null,
-              outputPreview: aggregatedOutput ? aggregatedOutput.slice(-600) : null
-            });
-            context.reportTerminalEvent?.({
-              stream: "system",
-              text: `[command completed] ${command}\n`
-            });
-          } else if (status === "failed") {
-            context.reportExecutionStatus?.("command_failed", `Failed command: ${command}`, {
-              command,
-              itemId: itemId || null,
-              exitCode: item.exitCode ?? null,
-              outputPreview: aggregatedOutput ? aggregatedOutput.slice(-600) : null
-            });
-            context.reportTerminalEvent?.({
-              stream: "system",
-              text: `[command failed] ${command}\n`
-            });
-          } else if (status === "declined") {
-            context.reportExecutionStatus?.("command_declined", `Declined command: ${command}`, {
-              command,
-              itemId: itemId || null
-            });
-            context.reportTerminalEvent?.({
-              stream: "system",
-              text: `[command declined] ${command}\n`
-            });
-          }
-        }
-        return;
-      }
-
-      if (notification.method === "item/commandExecution/outputDelta") {
-        const delta = readString(params.delta);
-        if (delta) {
-          context.reportExecutionStatus?.("command_output", delta.slice(-400), {
-            itemId: readString(params.itemId) || null
-          });
-          context.reportTerminalEvent?.({
-            stream: "stdout",
-            text: delta
-          });
-        }
-        return;
-      }
-
-      if (notification.method === "item/commandExecution/terminalInteraction") {
-        const inputText = readString(params.stdin);
-        if (inputText) {
-          context.reportExecutionStatus?.("terminal_interaction", inputText, {
-            itemId: readString(params.itemId) || null,
-            processId: readString(params.processId) || null
-          });
-          context.reportTerminalEvent?.({
-            stream: "input",
-            text: inputText
-          });
-        }
-      }
-    };
-
-    const handleServerRequest = async (request: JsonRpcRequest) => {
-      const params = asRecord(request.params);
-
-      if (
-        request.method === "item/commandExecution/requestApproval"
-        || request.method === "item/fileChange/requestApproval"
-      ) {
-        const message = buildCodexApprovalMessage(request.method, params);
-        const details = buildCodexApprovalDetails(request.method, params);
-        
-        const reasonStr = `${message}\n${details ?? ""}`;
-        const isGuessAndTestLoopBlocker = reasonStr.includes("interactive") ||
-          (reasonStr.includes("unauthorized") && reasonStr.includes("CLI")) ||
-          reasonStr.includes("re-mine") ||
-          reasonStr.includes("already attempted in this phase");
-
-        if (capability === "gather" && isGuessAndTestLoopBlocker) {
-          const rejectReason = `Auto-rejected during gather to prevent blind execution loops: ${message}. Please use static analysis (e.g. reading source code, --help manuals) instead of guessing CLI arguments.`;
-          context.reportProgress?.(
-            rejectReason,
-            {
-              capability,
-              model: context.assignedModel.model,
-              guardrailReason: message
-            }
-          );
-          sendError(request.id, rejectReason);
-          return;
-        }
-
-        const approvalOptions = buildCodexApprovalOptions(request.method);
-        const approval = await context.requestUserApproval?.({
-          abortSignal: context.abortSignal,
-          title: request.method === "item/fileChange/requestApproval"
-            ? "Codex file change approval"
-            : "Codex command approval",
-          message,
-          details,
-          kind: request.method,
-          locations: extractCodexRequestLocations(params),
-          options: approvalOptions
-        });
-
-        const optionId = approval?.outcome === "selected" ? approval.optionId : "decline";
-        sendResponse(request.id, {
-          decision: optionId ?? "decline"
-        });
-        return;
-      }
-
-      if (request.method === "item/permissions/requestApproval") {
-        const message = buildCodexApprovalMessage(request.method, params);
-        const details = buildCodexApprovalDetails(request.method, params);
-
-        const reasonStr = `${message}\n${details ?? ""}`;
-        const isGuessAndTestLoopBlocker = reasonStr.includes("interactive") ||
-          (reasonStr.includes("unauthorized") && reasonStr.includes("CLI")) ||
-          reasonStr.includes("re-mine") ||
-          reasonStr.includes("already attempted in this phase");
-
-        if (capability === "gather" && isGuessAndTestLoopBlocker) {
-          const rejectReason = `Auto-rejected during gather to prevent blind execution loops: ${message}. Please use static analysis (e.g. reading source code, --help manuals) instead of guessing CLI arguments.`;
-          context.reportProgress?.(
-            rejectReason,
-            {
-              capability,
-              model: context.assignedModel.model,
-              guardrailReason: message
-            }
-          );
-          sendError(request.id, rejectReason);
-          return;
-        }
-
-        const approval = await context.requestUserApproval?.({
-          abortSignal: context.abortSignal,
-          title: "Codex permission approval",
-          message,
-          details,
-          kind: request.method,
-          locations: extractCodexRequestLocations(params),
-          options: [
-            {
-              optionId: "turn",
-              kind: "allow_once",
-              label: "Allow for turn"
-            },
-            {
-              optionId: "session",
-              kind: "allow_for_session",
-              label: "Allow for session"
-            },
-            {
-              optionId: "decline",
-              kind: "reject_once",
-              label: "Decline"
-            }
-          ]
-        });
-
-        if (!approval || approval.outcome !== "selected") {
-          sendError(request.id, "User denied the requested permissions");
-          return;
-        }
-
-        if (approval.optionId === "decline") {
-          sendError(request.id, "User denied the requested permissions");
-          return;
-        }
-
-        sendResponse(request.id, {
-          permissions: params.permissions ?? {},
-          scope: approval.optionId === "session" ? "session" : "turn"
-        });
-        return;
-      }
-
-      if (request.method === "item/tool/requestUserInput" || request.method === "mcpServer/elicitation/request") {
-        if (capability === "gather") {
-          sendError(request.id, "Auto-rejected during gather: interactive user input is not allowed during the gather phase. Please use read-only static analysis.");
-          return;
-        }
-
-        const inputRequest = await context.requestUserInput?.({
-          abortSignal: context.abortSignal,
-          title: request.method === "item/tool/requestUserInput" ? "Codex user input requested" : "Codex elicitation requested",
-          message: buildCodexInputMessage(request.method, params),
-          questions: buildCodexInputQuestions(request.method, params)
-        });
-
-        if (!inputRequest || inputRequest.outcome !== "submitted" || !inputRequest.answers) {
-          sendError(request.id, "User cancelled the requested input");
-          return;
-        }
-
-        sendResponse(
-          request.id,
-          request.method === "item/tool/requestUserInput"
-            ? { answers: normalizeCodexInputAnswers(inputRequest.answers) }
-            : {
-                response: {
-                  action: "accept",
-                  content: normalizeCodexInputAnswers(inputRequest.answers)
-                }
-              }
-        );
-        return;
-      }
-
-      sendError(request.id, `Unsupported Codex app-server request: ${request.method}`);
-    };
-
-    const handleMessage = async (rawMessage: string) => {
-      if (!rawMessage.trim()) {
-        return;
-      }
-
-      const message = JSON.parse(rawMessage) as JsonRpcResponse & JsonRpcRequest & JsonRpcNotification;
-      if (typeof message.id !== "undefined" && ("result" in message || "error" in message)) {
-        const pending = pendingResponses.get(message.id);
-        if (!pending) {
-          return;
-        }
-
-        pendingResponses.delete(message.id);
-        if (message.error) {
-          pending.reject(new Error(message.error.message ?? "Codex app-server returned an error"));
-        } else {
-          pending.resolve(message.result);
-        }
-        return;
-      }
-
-      if (typeof message.id !== "undefined" && typeof message.method === "string") {
-        await handleServerRequest({
-          id: message.id,
-          method: message.method,
-          params: asRecord(message.params)
-        });
-        return;
-      }
-
-      if (typeof message.method === "string") {
-        await handleNotification({
-          method: message.method,
-          params: asRecord(message.params)
-        });
-      }
-    };
+    });
 
     stdout.on("data", (chunk: Buffer | string) => {
-      stdoutCarryover += chunk.toString();
-      let newlineIndex = stdoutCarryover.indexOf("\n");
+      connection.stdoutCarryover += chunk.toString();
+      let newlineIndex = connection.stdoutCarryover.indexOf("\n");
 
       while (newlineIndex !== -1) {
-        const line = stdoutCarryover.slice(0, newlineIndex).trim();
-        stdoutCarryover = stdoutCarryover.slice(newlineIndex + 1);
-        processingQueue = processingQueue
+        const line = connection.stdoutCarryover.slice(0, newlineIndex).trim();
+        connection.stdoutCarryover = connection.stdoutCarryover.slice(newlineIndex + 1);
+        connection.processingQueue = connection.processingQueue
           .then(async () => {
-            await handleMessage(line);
+            await handleMessage(scopedState, connection, line);
           })
           .catch((error) => {
-            turnCompleted.reject(error instanceof Error ? error : new Error(String(error)));
+            const err = error instanceof Error ? error : new Error(String(error));
+            rejectPendingResponses(connection, err);
+            connection.activeTurn?.turnCompleted.reject(err);
           });
-        newlineIndex = stdoutCarryover.indexOf("\n");
+        newlineIndex = connection.stdoutCarryover.indexOf("\n");
       }
     });
 
     child.once("error", (error) => {
       const err = error instanceof Error ? error : new Error(String(error));
-      rejectPendingResponses(err);
-      turnCompleted.reject(err);
+      connection.closed = true;
+      rejectPendingResponses(connection, err);
+      connection.activeTurn?.turnCompleted.reject(err);
+      if (scopedState.connection === connection) {
+        scopedState.connection = null;
+      }
     });
     child.once("exit", (code, signal) => {
-      if (turnCompleted.settled) {
-        return;
+      connection.closed = true;
+      if (scopedState.connection === connection) {
+        scopedState.connection = null;
       }
 
       const error = new Error(
         `codex app-server exited before the turn completed (code=${code ?? "null"}, signal=${signal ?? "null"})`
       );
-      rejectPendingResponses(error);
-      turnCompleted.reject(error);
+      rejectPendingResponses(connection, error);
+      connection.activeTurn?.turnCompleted.reject(error);
     });
 
-    try {
+    return connection;
+  }
+
+  async function ensureInitialized(
+    scopedState: CodexAppServerScopedSessionState,
+    connection: CodexAppServerConnection,
+    context: ModelInvocationContext
+  ): Promise<void> {
+    if (connection.initialized) {
+      return;
+    }
+
+    await withAbort(
+      sendRequest(connection, "initialize", {
+        clientInfo: {
+          name: "tasksaw-codex-app-server",
+          version: "0.1.0"
+        },
+        capabilities: {
+          experimentalApi: true
+        }
+      }),
+      context.abortSignal,
+      async () => {
+        await invalidateSession(scopedState, connection);
+      },
+      "Codex app-server initialization was aborted"
+    );
+    connection.initialized = true;
+  }
+
+  async function ensureThread(
+    scopedState: CodexAppServerScopedSessionState,
+    connection: CodexAppServerConnection,
+    capability: OrchestratorCapability,
+    context: ModelInvocationContext,
+    workingDirectory: string
+  ): Promise<void> {
+    if (connection.threadId) {
+      return;
+    }
+
+    const threadResponse = asRecord(
       await withAbort(
-        sendRequest("initialize", {
-          clientInfo: {
-            name: "tasksaw-codex-app-server",
-            version: "0.1.0"
-          },
-          capabilities: {
-            experimentalApi: true
-          }
+        sendRequest(connection, "thread/start", {
+          model: context.assignedModel.model,
+          modelProvider: "openai",
+          cwd: workingDirectory,
+          approvalPolicy: capability === "execute" ? "on-request" : "never",
+          approvalsReviewer: "user",
+          sandbox: capability === "execute" ? "workspace-write" : "read-only",
+          ephemeral: false,
+          experimentalRawEvents: false,
+          persistExtendedHistory: true
         }),
         context.abortSignal,
-        onAbort,
-        "Codex app-server initialization was aborted"
-      );
+        async () => {
+          await invalidateSession(scopedState, connection);
+        },
+        "Codex app-server thread start was aborted"
+      )
+    );
+    connection.threadId = readString(asRecord(threadResponse.thread).id);
+    if (!connection.threadId) {
+      throw new Error("Codex app-server did not return a thread id");
+    }
+  }
 
-      const threadResponse = asRecord(
-        await withAbort(
-          sendRequest("thread/start", {
-            model: context.assignedModel.model,
-            modelProvider: "openai",
-            cwd: workingDirectory,
-            approvalPolicy: capability === "execute" ? "on-request" : "never",
-            approvalsReviewer: "user",
-            sandbox: capability === "execute" ? "workspace-write" : "read-only",
-            ephemeral: true,
-            experimentalRawEvents: false,
-            persistExtendedHistory: false
-          }),
-          context.abortSignal,
-          onAbort,
-          "Codex app-server thread start was aborted"
-        )
-      );
-      threadId = readString(asRecord(threadResponse.thread).id);
-      if (!threadId) {
-        throw new Error("Codex app-server did not return a thread id");
-      }
+  async function runTurn(
+    scopedState: CodexAppServerScopedSessionState,
+    connection: CodexAppServerConnection,
+    capability: OrchestratorCapability,
+    prompt: string,
+    context: ModelInvocationContext,
+    workingDirectory: string
+  ): Promise<{ stdout: string; stderr: string }> {
+    const turnState: CodexActiveTurn = {
+      capability,
+      context,
+      turnId: "",
+      latestAgentMessageText: "",
+      agentMessageChunks: [],
+      turnCompleted: createDeferred<void>()
+    };
+    connection.activeTurn = turnState;
+    const stderrStartIndex = connection.stderrBuffer.length;
+    const onAbort = async () => {
+      await invalidateSession(scopedState, connection);
+    };
 
+    try {
       const effort = context.assignedModel.reasoningEffort
         ? mapReasoningEffort(context.assignedModel.reasoningEffort)
         : null;
-      const turnStartParams: Record<string, unknown> = {
-        threadId,
-        input: [
-          {
-            type: "text",
-            text: prompt,
-            text_elements: []
-          }
-        ],
-        model: context.assignedModel.model,
-        approvalPolicy: capability === "execute" ? "on-request" : "never",
-        approvalsReviewer: "user",
-        cwd: workingDirectory,
-        sandboxPolicy: buildCodexSandboxPolicy(capability, workingDirectory),
-        effort
-      };
-
       const turnStartResult = asRecord(
         await withAbort(
-          sendRequest("turn/start", turnStartParams),
+          sendRequest(connection, "turn/start", {
+            threadId: connection.threadId,
+            input: [
+              {
+                type: "text",
+                text: prompt,
+                text_elements: []
+              }
+            ],
+            model: context.assignedModel.model,
+            approvalPolicy: capability === "execute" ? "on-request" : "never",
+            approvalsReviewer: "user",
+            cwd: workingDirectory,
+            sandboxPolicy: buildCodexSandboxPolicy(capability, workingDirectory),
+            effort
+          }),
           context.abortSignal,
           onAbort,
           "Codex app-server turn start was aborted"
         )
       );
-      turnId = readString(asRecord(turnStartResult.turn).id) || turnId;
+      turnState.turnId = readString(asRecord(turnStartResult.turn).id) || turnState.turnId;
 
-      await withAbort(turnCompleted.promise, context.abortSignal, onAbort, "Codex app-server turn was aborted");
-      await processingQueue;
+      await withAbort(turnState.turnCompleted.promise, context.abortSignal, onAbort, "Codex app-server turn was aborted");
+      await connection.processingQueue;
 
-      const stdoutText = latestAgentMessageText.trim().length > 0
-        ? latestAgentMessageText.trim()
-        : agentMessageChunks.join("").trim();
+      const stdoutText = turnState.latestAgentMessageText.trim().length > 0
+        ? turnState.latestAgentMessageText.trim()
+        : turnState.agentMessageChunks.join("").trim();
       if (!stdoutText) {
         throw new Error("Codex app-server turn completed without any agent message output");
       }
 
       return {
         stdout: stdoutText,
-        stderr: stderrBuffer,
-        command
+        stderr: connection.stderrBuffer.slice(stderrStartIndex)
       };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const stderrPreview = stderrBuffer.trim();
-      throw new Error(
-        [
-          `Codex app-server invocation failed: ${message}`,
-          `command:\n${command.join(" ")}`,
-          threadId ? `threadId=${threadId}` : null,
-          turnId ? `turnId=${turnId}` : null,
-          stderrPreview ? `stderr preview:\n${stderrPreview.slice(-4_000)}` : null
-        ]
-          .filter(Boolean)
-          .join("\n\n")
-      );
     } finally {
-      await stopChildProcess(child);
+      connection.activeTurn = null;
     }
-  };
+  }
+
+  function sendRequest(
+    connection: CodexAppServerConnection,
+    method: string,
+    params?: Record<string, unknown>
+  ): Promise<unknown> {
+    const id = connection.nextRequestId++;
+    connection.stdin.write(`${JSON.stringify({ id, method, params: params ?? null })}\n`);
+    return new Promise<unknown>((resolve, reject) => {
+      connection.pendingResponses.set(id, { resolve, reject });
+    });
+  }
+
+  function sendResponse(connection: CodexAppServerConnection, id: JsonRpcId, result: unknown) {
+    connection.stdin.write(`${JSON.stringify({ id, result })}\n`);
+  }
+
+  function sendError(connection: CodexAppServerConnection, id: JsonRpcId, message: string) {
+    connection.stdin.write(`${JSON.stringify({ id, error: { code: -32000, message } })}\n`);
+  }
+
+  function rejectPendingResponses(connection: CodexAppServerConnection, error: Error) {
+    for (const pending of connection.pendingResponses.values()) {
+      pending.reject(error);
+    }
+    connection.pendingResponses.clear();
+  }
+
+  async function handleMessage(
+    scopedState: CodexAppServerScopedSessionState,
+    connection: CodexAppServerConnection,
+    rawMessage: string
+  ) {
+    if (!rawMessage.trim()) {
+      return;
+    }
+
+    const message = JSON.parse(rawMessage) as JsonRpcResponse & JsonRpcRequest & JsonRpcNotification;
+    if (typeof message.id !== "undefined" && ("result" in message || "error" in message)) {
+      const pending = connection.pendingResponses.get(message.id);
+      if (!pending) {
+        return;
+      }
+
+      connection.pendingResponses.delete(message.id);
+      if (message.error) {
+        pending.reject(new Error(message.error.message ?? "Codex app-server returned an error"));
+      } else {
+        pending.resolve(message.result);
+      }
+      return;
+    }
+
+    if (typeof message.id !== "undefined" && typeof message.method === "string") {
+      await handleServerRequest(scopedState, connection, {
+        id: message.id,
+        method: message.method,
+        params: asRecord(message.params)
+      });
+      return;
+    }
+
+    if (typeof message.method === "string") {
+      await handleNotification(connection, {
+        method: message.method,
+        params: asRecord(message.params)
+      });
+    }
+  }
+
+  async function handleNotification(
+    connection: CodexAppServerConnection,
+    notification: JsonRpcNotification
+  ) {
+    const params = asRecord(notification.params);
+    const activeTurn = connection.activeTurn;
+
+    if (notification.method === "error") {
+      const errorRecord = asRecord(params.error);
+      throw new Error(
+        readString(errorRecord.message)
+        || readString(params.message)
+        || "Codex app-server reported an error"
+      );
+    }
+
+    if (!activeTurn) {
+      return;
+    }
+
+    const context = activeTurn.context;
+
+    if (notification.method === "turn/started") {
+      activeTurn.turnId = readString(asRecord(params.turn).id) || activeTurn.turnId;
+      return;
+    }
+
+    if (notification.method === "turn/completed") {
+      activeTurn.turnId = readString(asRecord(params.turn).id) || activeTurn.turnId;
+      activeTurn.turnCompleted.resolve();
+      return;
+    }
+
+    if (notification.method === "item/agentMessage/delta") {
+      const delta = readString(params.delta);
+      if (delta) {
+        activeTurn.agentMessageChunks.push(delta);
+        context.reportTerminalEvent?.({
+          stream: "stdout",
+          text: delta
+        });
+      }
+      return;
+    }
+
+    if (notification.method === "item/plan/delta") {
+      const delta = readString(params.delta);
+      if (delta) {
+        context.reportExecutionStatus?.("planning_update", delta);
+        context.reportTerminalEvent?.({
+          stream: "system",
+          text: `${delta}\n`
+        });
+      }
+      return;
+    }
+
+    if (notification.method === "item/mcpToolCall/progress") {
+      const message = readString(params.message);
+      if (message) {
+        context.reportExecutionStatus?.("tool_progress", message);
+        context.reportTerminalEvent?.({
+          stream: "system",
+          text: `[tool] ${message}\n`
+        });
+      }
+      return;
+    }
+
+    if (notification.method === "item/started" || notification.method === "item/completed") {
+      const item = asRecord(params.item);
+      const itemType = readString(item.type);
+
+      if (itemType === "agentMessage") {
+        const text = readString(item.text);
+        if (text) {
+          activeTurn.latestAgentMessageText = text;
+        }
+        return;
+      }
+
+      if (itemType === "commandExecution") {
+        const itemId = readString(item.id);
+        const command = readString(item.command) || "unknown command";
+        const status = readString(item.status) || (notification.method === "item/started" ? "inProgress" : "completed");
+
+        if (notification.method === "item/started") {
+          context.reportExecutionStatus?.("running_command", `Running command: ${command}`, {
+            command,
+            cwd: readString(item.cwd) || null,
+            itemId: itemId || null
+          });
+          context.reportTerminalEvent?.({
+            stream: "system",
+            text: `$ ${command}\n`
+          });
+          return;
+        }
+
+        const aggregatedOutput = readString(item.aggregatedOutput);
+        if (status === "completed") {
+          context.reportExecutionStatus?.("command_completed", `Completed command: ${command}`, {
+            command,
+            itemId: itemId || null,
+            exitCode: item.exitCode ?? null,
+            outputPreview: aggregatedOutput ? aggregatedOutput.slice(-600) : null
+          });
+          context.reportTerminalEvent?.({
+            stream: "system",
+            text: `[command completed] ${command}\n`
+          });
+        } else if (status === "failed") {
+          context.reportExecutionStatus?.("command_failed", `Failed command: ${command}`, {
+            command,
+            itemId: itemId || null,
+            exitCode: item.exitCode ?? null,
+            outputPreview: aggregatedOutput ? aggregatedOutput.slice(-600) : null
+          });
+          context.reportTerminalEvent?.({
+            stream: "system",
+            text: `[command failed] ${command}\n`
+          });
+        } else if (status === "declined") {
+          context.reportExecutionStatus?.("command_declined", `Declined command: ${command}`, {
+            command,
+            itemId: itemId || null
+          });
+          context.reportTerminalEvent?.({
+            stream: "system",
+            text: `[command declined] ${command}\n`
+          });
+        }
+      }
+      return;
+    }
+
+    if (notification.method === "item/commandExecution/outputDelta") {
+      const delta = readString(params.delta);
+      if (delta) {
+        context.reportExecutionStatus?.("command_output", delta.slice(-400), {
+          itemId: readString(params.itemId) || null
+        });
+        context.reportTerminalEvent?.({
+          stream: "stdout",
+          text: delta
+        });
+      }
+      return;
+    }
+
+    if (notification.method === "item/commandExecution/terminalInteraction") {
+      const inputText = readString(params.stdin);
+      if (inputText) {
+        context.reportExecutionStatus?.("terminal_interaction", inputText, {
+          itemId: readString(params.itemId) || null,
+          processId: readString(params.processId) || null
+        });
+        context.reportTerminalEvent?.({
+          stream: "input",
+          text: inputText
+        });
+      }
+    }
+  }
+
+  async function handleServerRequest(
+    scopedState: CodexAppServerScopedSessionState,
+    connection: CodexAppServerConnection,
+    request: JsonRpcRequest
+  ) {
+    const activeTurn = connection.activeTurn;
+    if (!activeTurn) {
+      sendError(connection, request.id, `Unsupported Codex app-server request without an active turn: ${request.method}`);
+      return;
+    }
+
+    const { capability, context } = activeTurn;
+    const params = asRecord(request.params);
+
+    if (
+      request.method === "item/commandExecution/requestApproval"
+      || request.method === "item/fileChange/requestApproval"
+    ) {
+      const message = buildCodexApprovalMessage(request.method, params);
+      const details = buildCodexApprovalDetails(request.method, params);
+      const reasonStr = `${message}\n${details ?? ""}`;
+      const isGuessAndTestLoopBlocker = reasonStr.includes("interactive")
+        || (reasonStr.includes("unauthorized") && reasonStr.includes("CLI"))
+        || reasonStr.includes("re-mine")
+        || reasonStr.includes("already attempted in this phase");
+
+      if (capability === "gather" && isGuessAndTestLoopBlocker) {
+        const rejectReason = `Auto-rejected during gather to prevent blind execution loops: ${message}. Please use static analysis (e.g. reading source code, --help manuals) instead of guessing CLI arguments.`;
+        context.reportProgress?.(rejectReason, {
+          capability,
+          model: context.assignedModel.model,
+          guardrailReason: message
+        });
+        sendError(connection, request.id, rejectReason);
+        return;
+      }
+
+      const approvalOptions = buildCodexApprovalOptions(request.method);
+      const approval = await context.requestUserApproval?.({
+        abortSignal: context.abortSignal,
+        title: request.method === "item/fileChange/requestApproval"
+          ? "Codex file change approval"
+          : "Codex command approval",
+        message,
+        details,
+        kind: request.method,
+        locations: extractCodexRequestLocations(params),
+        options: approvalOptions
+      });
+
+      const optionId = approval?.outcome === "selected" ? approval.optionId : "decline";
+      sendResponse(connection, request.id, {
+        decision: optionId ?? "decline"
+      });
+      return;
+    }
+
+    if (request.method === "item/permissions/requestApproval") {
+      const message = buildCodexApprovalMessage(request.method, params);
+      const details = buildCodexApprovalDetails(request.method, params);
+      const reasonStr = `${message}\n${details ?? ""}`;
+      const isGuessAndTestLoopBlocker = reasonStr.includes("interactive")
+        || (reasonStr.includes("unauthorized") && reasonStr.includes("CLI"))
+        || reasonStr.includes("re-mine")
+        || reasonStr.includes("already attempted in this phase");
+
+      if (capability === "gather" && isGuessAndTestLoopBlocker) {
+        const rejectReason = `Auto-rejected during gather to prevent blind execution loops: ${message}. Please use static analysis (e.g. reading source code, --help manuals) instead of guessing CLI arguments.`;
+        context.reportProgress?.(rejectReason, {
+          capability,
+          model: context.assignedModel.model,
+          guardrailReason: message
+        });
+        sendError(connection, request.id, rejectReason);
+        return;
+      }
+
+      const approval = await context.requestUserApproval?.({
+        abortSignal: context.abortSignal,
+        title: "Codex permission approval",
+        message,
+        details,
+        kind: request.method,
+        locations: extractCodexRequestLocations(params),
+        options: [
+          {
+            optionId: "turn",
+            kind: "allow_once",
+            label: "Allow for turn"
+          },
+          {
+            optionId: "session",
+            kind: "allow_for_session",
+            label: "Allow for session"
+          },
+          {
+            optionId: "decline",
+            kind: "reject_once",
+            label: "Decline"
+          }
+        ]
+      });
+
+      if (!approval || approval.outcome !== "selected" || approval.optionId === "decline") {
+        sendError(connection, request.id, "User denied the requested permissions");
+        return;
+      }
+
+      sendResponse(connection, request.id, {
+        permissions: params.permissions ?? {},
+        scope: approval.optionId === "session" ? "session" : "turn"
+      });
+      return;
+    }
+
+    if (request.method === "item/tool/requestUserInput" || request.method === "mcpServer/elicitation/request") {
+      if (capability === "gather") {
+        sendError(connection, request.id, "Auto-rejected during gather: interactive user input is not allowed during the gather phase. Please use read-only static analysis.");
+        return;
+      }
+
+      const inputRequest = await context.requestUserInput?.({
+        abortSignal: context.abortSignal,
+        title: request.method === "item/tool/requestUserInput" ? "Codex user input requested" : "Codex elicitation requested",
+        message: buildCodexInputMessage(request.method, params),
+        questions: buildCodexInputQuestions(request.method, params)
+      });
+
+      if (!inputRequest || inputRequest.outcome !== "submitted" || !inputRequest.answers) {
+        sendError(connection, request.id, "User cancelled the requested input");
+        return;
+      }
+
+      sendResponse(
+        connection,
+        request.id,
+        request.method === "item/tool/requestUserInput"
+          ? { answers: normalizeCodexInputAnswers(inputRequest.answers) }
+          : {
+              response: {
+                action: "accept",
+                content: normalizeCodexInputAnswers(inputRequest.answers)
+              }
+            }
+      );
+      return;
+    }
+
+    sendError(connection, request.id, `Unsupported Codex app-server request: ${request.method}`);
+  }
+
+  async function invalidateSession(
+    scopedState: CodexAppServerScopedSessionState,
+    targetConnection?: CodexAppServerConnection | null
+  ) {
+    const connection = targetConnection ?? scopedState.connection;
+    if (!connection) {
+      return;
+    }
+
+    if (scopedState.connection === connection) {
+      scopedState.connection = null;
+    }
+
+    connection.closed = true;
+    connection.activeTurn = null;
+    rejectPendingResponses(connection, new Error("Codex app-server session was invalidated"));
+    await stopChildProcess(connection.child);
+  }
+
+  function isConnectionAlive(connection: CodexAppServerConnection | null): connection is CodexAppServerConnection {
+    return Boolean(
+      connection
+      && !connection.closed
+      && connection.child.exitCode === null
+      && connection.child.signalCode === null
+    );
+  }
 }
 
 function buildCodexApprovalOptions(method: string): OrchestratorApprovalOption[] {

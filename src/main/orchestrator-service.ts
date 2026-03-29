@@ -4,8 +4,10 @@ import {
   CliModelAdapter,
   ConfidenceLevel,
   ContinuationSeed,
+  createCodexAppServerSessionPool,
   EvidenceBundle,
   createCodexAppServerInvoker,
+  createGeminiAcpSessionPool,
   createGeminiAcpInvoker,
   ModelAssignment,
   ModelAdapterRegistry,
@@ -90,6 +92,8 @@ export class OrchestratorService {
   private readonly runsRootDirectory: string;
   private readonly persistence: OrchestratorPersistence;
   private readonly activeRuns = new Map<string, OrchestratorRuntime>();
+  private readonly codexAppServerSessionPool = createCodexAppServerSessionPool();
+  private readonly geminiAcpSessionPool = createGeminiAcpSessionPool();
 
   constructor(
     private readonly appRootPath: string,
@@ -720,7 +724,6 @@ export class OrchestratorService {
     const seen = new Set<string>();
     for (const workspacePath of workspacePaths) {
       const normalizedPath = workspacePath.trim();
-      const cachePath = path.join(workspacePath, ".tasksaw");
       if (!normalizedPath || seen.has(normalizedPath)) {
         continue;
       }
@@ -948,7 +951,7 @@ export class OrchestratorService {
     };
   }
 
-  private selectGemini3WorkerModel(catalog: ManagedToolModelCatalog, planningModel: ModelRef): ModelRef {
+  private selectGemini3WorkerModel(catalog: ManagedToolModelCatalog, _planningModel: ModelRef): ModelRef {
     // Try to find a stable (non-preview, non-exp) Gemini model from the catalog
     const stableCandidates = this.listSelectableModels(catalog).filter((model) =>
       this.isStableGeminiModel(model.model)
@@ -1037,6 +1040,7 @@ export class OrchestratorService {
                 ...codexEnv,
                 ...codexCommand.env
               },
+              sessionPool: this.codexAppServerSessionPool,
               timeoutMs: typeof cliTimeoutSeconds === "number" && cliTimeoutSeconds > 0 ? Math.trunc(cliTimeoutSeconds) * 1000 : undefined
             }),
             supportedCapabilities: ORCHESTRATOR_CAPABILITIES
@@ -1077,6 +1081,7 @@ export class OrchestratorService {
         initialRegion: geminiRegion ?? "asia-northeast3",
         fallbackRegion: geminiRegion === null ? "us-central1" : undefined,
         sandbox,
+        sessionPool: this.geminiAcpSessionPool,
         env: {
           ...geminiEnv,
           ...geminiCommand.env

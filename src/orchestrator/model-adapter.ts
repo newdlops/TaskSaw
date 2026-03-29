@@ -158,6 +158,14 @@ export type ModelInvocationContext = {
   reportProgress?: (message: string, details?: Record<string, unknown>) => void;
   reportExecutionStatus?: (state: string, message: string, details?: Record<string, unknown>) => void;
   reportTerminalEvent?: (event: OrchestratorTerminalEventDraft) => void;
+  sessionScopeHint?: ModelInvocationSessionScopeHint;
+};
+
+export type ModelInvocationSessionScopeHint = {
+  ownerTaskId: string;
+  ownerTaskTitle: string;
+  ownerTaskObjective: string;
+  ownerTaskLineage: string[];
 };
 
 export type AbstractPlanResult = {

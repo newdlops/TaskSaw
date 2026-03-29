@@ -6,7 +6,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { CliModelAdapter } from "./cli-model-adapter";
-import { createGeminiAcpInvoker } from "./gemini-acp-invoker";
+import { createGeminiAcpInvoker, createGeminiAcpSessionPool } from "./gemini-acp-invoker";
 import { ModelInvocationContext } from "./model-adapter";
 import { ModelRef } from "./types";
 
@@ -118,6 +118,15 @@ function createContext(model: ModelRef): ModelInvocationContext {
       updatedAt: "2026-03-19T00:00:00.000Z"
     },
     evidenceBundles: []
+  };
+}
+
+function createSessionScopeHint(ownerTaskId = "task-root") {
+  return {
+    ownerTaskId,
+    ownerTaskTitle: "Root Task",
+    ownerTaskObjective: "Validate Gemini ACP invocation",
+    ownerTaskLineage: ["Root Task: Validate Gemini ACP invocation"]
   };
 }
 
@@ -359,6 +368,273 @@ test("gemini ACP invoker switches the session mode only when explicitly requeste
     sessionId: "session-1",
     modelId: "gemini-2.5-pro"
   });
+});
+
+test("gemini ACP invoker reuses scoped sessions across runs and prepends an explicit replay prelude", async () => {
+  const promptTexts: string[] = [];
+  const fakeChild = new FakeChildProcess();
+  const sessionPool = createGeminiAcpSessionPool();
+  let newSessionCount = 0;
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      sessionPool,
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return {
+                protocolVersion: 1
+              };
+            }
+
+            async newSession() {
+              newSessionCount += 1;
+              return {
+                sessionId: `session-${newSessionCount}`,
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt(params: Record<string, unknown>) {
+              const promptItems = Array.isArray(params.prompt) ? params.prompt : [];
+              const promptText = typeof promptItems[0] === "object" && promptItems[0] && "text" in promptItems[0]
+                ? String((promptItems[0] as { text?: unknown }).text ?? "")
+                : "";
+              promptTexts.push(promptText);
+
+              const responseText = promptTexts.length === 1
+                ? JSON.stringify({
+                    summary: "Gathered through ACP",
+                    evidenceBundles: []
+                  })
+                : JSON.stringify({
+                    summary: "Planned through ACP",
+                    childTasks: [],
+                    executionNotes: []
+                  });
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: responseText
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => fakeChild
+      }
+    }),
+    supportedCapabilities: ["gather", "concretePlan"]
+  });
+
+  const gatherContext = createContext(TEST_MODEL);
+  gatherContext.run = {
+    ...gatherContext.run,
+    id: "run-1",
+    rootNodeId: "task-run-1"
+  };
+  gatherContext.node = {
+    ...gatherContext.node,
+    id: "stage-gather-1",
+    runId: "run-1"
+  };
+  gatherContext.sessionScopeHint = createSessionScopeHint("task-run-1");
+
+  const gatherResult = await adapter.gather!(gatherContext);
+
+  const planContext = createContext(TEST_MODEL);
+  planContext.run = {
+    ...planContext.run,
+    id: "run-2",
+    rootNodeId: "task-run-2"
+  };
+  planContext.node = {
+    ...planContext.node,
+    id: "stage-plan-2",
+    runId: "run-2",
+    title: "Concrete Plan",
+    objective: "Turn gathered evidence into an execution plan",
+    phase: "concrete_plan",
+    assignedModels: {
+      concretePlanner: TEST_MODEL
+    }
+  };
+  planContext.sessionScopeHint = createSessionScopeHint("task-run-2");
+
+  const planResult = await adapter.concretePlan!(planContext);
+
+  assert.equal(gatherResult.summary, "Gathered through ACP");
+  assert.equal(planResult.summary, "Planned through ACP");
+  assert.equal(newSessionCount, 1);
+  assert.equal(promptTexts.length, 2);
+  assert.equal(promptTexts[0]?.includes("TASKSAW SESSION REUSE PRELUDE"), false);
+  assert.equal(promptTexts[1]?.includes("TASKSAW SESSION REUSE PRELUDE"), true);
+  assert.match(promptTexts[1] ?? "", /response=Gathered through ACP/);
+  assert.match(promptTexts[1] ?? "", /canonical source of truth/);
+});
+
+test("gemini ACP invoker isolates session reuse by task scope", async () => {
+  const promptTexts: string[] = [];
+  let newSessionCount = 0;
+
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    customInvoke: createGeminiAcpInvoker({
+      executablePath: process.execPath,
+      executableArgs: ["fake-gemini-entry.js"],
+      acpModulePath: "/tmp/fake-gemini-acp.js",
+      sessionPool: createGeminiAcpSessionPool(),
+      dependencies: {
+        loadAcpModule: async () => ({
+          PROTOCOL_VERSION: 1,
+          ndJsonStream: () => ({}),
+          ClientSideConnection: class {
+            private readonly client;
+
+            constructor(toClient: () => object) {
+              this.client = toClient() as {
+                sessionUpdate(params: {
+                  update?: {
+                    sessionUpdate?: string;
+                    content?: {
+                      type?: string;
+                      text?: string;
+                    };
+                  };
+                }): Promise<void>;
+              };
+            }
+
+            async initialize() {
+              return {
+                protocolVersion: 1
+              };
+            }
+
+            async newSession() {
+              newSessionCount += 1;
+              return {
+                sessionId: `session-${newSessionCount}`,
+                modes: {
+                  availableModes: [{ id: "plan" }]
+                }
+              };
+            }
+
+            async unstable_setSessionModel() {
+              return {};
+            }
+
+            async prompt(params: Record<string, unknown>) {
+              const promptItems = Array.isArray(params.prompt) ? params.prompt : [];
+              const promptText = typeof promptItems[0] === "object" && promptItems[0] && "text" in promptItems[0]
+                ? String((promptItems[0] as { text?: unknown }).text ?? "")
+                : "";
+              promptTexts.push(promptText);
+
+              await this.client.sessionUpdate({
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: {
+                    type: "text",
+                    text: JSON.stringify({
+                      summary: `Gathered in ${newSessionCount}`,
+                      evidenceBundles: []
+                    })
+                  }
+                }
+              });
+              return {
+                stopReason: "end_turn"
+              };
+            }
+          }
+        }),
+        spawnProcess: () => new FakeChildProcess()
+      }
+    }),
+    supportedCapabilities: ["gather"]
+  });
+
+  const firstContext = createContext(TEST_MODEL);
+  firstContext.run = {
+    ...firstContext.run,
+    id: "run-a",
+    rootNodeId: "task-a"
+  };
+  firstContext.node = {
+    ...firstContext.node,
+    id: "stage-a",
+    runId: "run-a"
+  };
+  firstContext.sessionScopeHint = createSessionScopeHint("task-a");
+
+  const secondContext = createContext(TEST_MODEL);
+  secondContext.run = {
+    ...secondContext.run,
+    id: "run-b",
+    rootNodeId: "task-b"
+  };
+  secondContext.node = {
+    ...secondContext.node,
+    id: "stage-b",
+    runId: "run-b",
+    title: "Sibling Task"
+  };
+  secondContext.sessionScopeHint = {
+    ownerTaskId: "task-b",
+    ownerTaskTitle: "Sibling Task",
+    ownerTaskObjective: "Inspect a different task scope",
+    ownerTaskLineage: ["Sibling Task: Inspect a different task scope"]
+  };
+
+  await adapter.gather!(firstContext);
+  await adapter.gather!(secondContext);
+
+  assert.equal(newSessionCount, 2);
+  assert.equal(promptTexts.length, 2);
+  assert.equal(promptTexts[0]?.includes("TASKSAW SESSION REUSE PRELUDE"), false);
+  assert.equal(promptTexts[1]?.includes("TASKSAW SESSION REUSE PRELUDE"), false);
 });
 
 test("gemini ACP invoker switches execute sessions to default approval mode and surfaces edit approvals", async () => {

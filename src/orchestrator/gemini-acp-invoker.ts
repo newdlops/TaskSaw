@@ -9,6 +9,14 @@ import {
   OrchestratorApprovalOption,
   OrchestratorCapability
 } from "./model-adapter";
+import {
+  appendSessionContextLedger,
+  buildSessionReusePrelude,
+  buildSessionReuseScope,
+  createSessionContextLedgerEntry,
+  finalizeSessionContextLedgerEntry,
+  SessionContextLedgerEntry
+} from "./session-context-reuse";
 
 const dynamicImport = new Function("specifier", "return import(specifier);") as (specifier: string) => Promise<unknown>;
 
@@ -69,6 +77,7 @@ type GeminiAcpInvokerOptions = {
   temperature?: number;
   sandbox?: boolean;
   dependencies?: GeminiAcpInvokerDependencies;
+  sessionPool?: GeminiAcpSessionPool;
 };
 
 type GeminiNewSessionResponse = {
@@ -142,6 +151,19 @@ type ReadOnlyProbeGuardState = {
   permissionCallbacksClosed: boolean;
   gatherAutoRejectCount: number;
 };
+
+type GeminiAcpScopedSessionState = {
+  activeRuntime: GeminiPromptRuntime | null;
+  activeSession: GeminiLiveSession | null;
+  invocationQueue: Promise<void>;
+  ledger: SessionContextLedgerEntry[];
+};
+
+export type GeminiAcpSessionPool = Map<string, GeminiAcpScopedSessionState>;
+
+export function createGeminiAcpSessionPool(): GeminiAcpSessionPool {
+  return new Map();
+}
 
 const DEFAULT_GEMINI_MODE_BY_CAPABILITY: Partial<Record<OrchestratorCapability, string>> = {
   execute: "default"
@@ -303,9 +325,6 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const startupTimeoutMs = typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
     ? Math.max(60_000, Math.trunc(options.timeoutMs))
     : 300_000;
-  const promptTimeoutMs = typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs)
-    ? Math.max(1_000, Math.trunc(options.timeoutMs))
-    : undefined;
   const promptInactivityTimeoutMs = typeof options.promptInactivityTimeoutMs === "number" && Number.isFinite(options.promptInactivityTimeoutMs)
     ? Math.max(1_000, Math.trunc(options.promptInactivityTimeoutMs))
     : 180_000; // Increased from 60_000 to prevent premature timeouts during complex reasoning/gather
@@ -314,17 +333,20 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const invalidStreamRetryCount = Math.max(0, options.invalidStreamRetryCount ?? 1);
   const defaultTemperature = options.temperature ?? 0.2;
   const workspaceRoot = options.cwd ?? process.cwd();
+  const sessionPool = options.sessionPool ?? createGeminiAcpSessionPool();
   let currentRegion = options.initialRegion;
-  let activeRuntime: GeminiPromptRuntime | null = null;
-  let activeSession: GeminiLiveSession | null = null;
-  let invocationQueue: Promise<void> = Promise.resolve();
 
   return async (
     capability: OrchestratorCapability,
     prompt: string,
     context: ModelInvocationContext
   ): Promise<{ stdout: string; stderr: string; command: string[] }> => {
-    const runInvocation = invocationQueue.then(async () => {
+    const scope = buildSessionReuseScope("gemini-acp", workspaceRoot, capability, context);
+    const scopedState = getOrCreateScopedState(scope.key);
+    const runInvocation = scopedState.invocationQueue.then(async () => {
+      const currentLedgerEntry = createSessionContextLedgerEntry(scope, capability, prompt, context);
+      const replayPrelude = buildSessionReusePrelude(scope, scopedState.ledger, currentLedgerEntry);
+      const promptText = replayPrelude ? `${replayPrelude}\n\n${prompt}` : prompt;
       const attemptModels = buildGeminiAttemptModels(
         context.assignedModel.model,
         fallbackModelIds,
@@ -350,8 +372,8 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
             stream: "system",
             text: `$ ${formatTerminalCommand(command)}\n`
           });
-          const session = await ensureSession(context.abortSignal);
-          await ensureSessionMode(session, desiredModeId, context.abortSignal, capability, context.workflowStage);
+          const session = await ensureSession(scopedState, context.abortSignal);
+          await ensureSessionMode(scopedState, session, desiredModeId, context.abortSignal, capability, context.workflowStage);
           const stderrStartIndex = session.stderrBuffer().length;
 
           if (!session.connection.unstable_setSessionModel) {
@@ -370,7 +392,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               ),
               context.abortSignal,
               async () => {
-                await invalidateSession(session);
+                await invalidateSession(scopedState, session);
               },
               [
                 "Gemini ACP model switching was aborted",
@@ -828,7 +850,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               }
             }
           };
-          activeRuntime = runtime;
+          scopedState.activeRuntime = runtime;
 
           try {
             context.reportProgress?.("Waiting for Gemini ACP prompt completion", {
@@ -843,7 +865,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                   prompt: [
                     {
                       type: "text",
-                      text: prompt
+                      text: promptText
                     }
                   ],
                   ...(isReadOnlyGeminiCapability(capability) ? {
@@ -860,7 +882,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                   activeStdinMonitor.stop();
                   activeStdinMonitor = null;
                 }
-                await invalidateSession(session);
+                await invalidateSession(scopedState, session);
               },
               [
                 "Gemini ACP prompt was aborted",
@@ -880,6 +902,10 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               );
             }
 
+            scopedState.ledger = appendSessionContextLedger(
+              scopedState.ledger,
+              finalizeSessionContextLedgerEntry(currentLedgerEntry, stdout)
+            );
             return {
               stdout,
               stderr: session.stderrBuffer().slice(stderrStartIndex),
@@ -890,7 +916,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               || (error instanceof Error && error.message.includes("Aborting Gemini ACP prompt"));
             
             if (isAbortError) {
-              await invalidateSession(session);
+              await invalidateSession(scopedState, session);
               return {
                 stdout: buildReadOnlyProbeLoopAbortOutput(capability, context.outputLanguage),
                 stderr: session.stderrBuffer().slice(stderrStartIndex),
@@ -905,7 +931,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               // CRITICAL: We MUST invalidate the session here because the child process
               // inside gemini-cli is hanging on stdin. Keeping the session alive would
               // cause subsequent prompts to hang as well.
-              await invalidateSession(session);
+              await invalidateSession(scopedState, session);
               try {
                 const response = await context.requestInteractiveSession({
                   abortSignal: context.abortSignal,
@@ -934,6 +960,10 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 // If interactive session request itself fails, fall through
               }
               const interactiveStdout = agentMessageChunks.join("");
+              scopedState.ledger = appendSessionContextLedger(
+                scopedState.ledger,
+                finalizeSessionContextLedgerEntry(currentLedgerEntry, interactiveStdout)
+              );
               return {
                 stdout: interactiveStdout.trim().length > 0
                   ? interactiveStdout
@@ -945,18 +975,18 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
 
             // If any other error occurs (like timeout or disconnect), we MUST invalidate
             // to prevent a "stuck" session from being reused.
-            await invalidateSession(session);
+            await invalidateSession(scopedState, session);
             throw error;
           } finally {
             promptActivity.stop();
             (activeStdinMonitor as StdinWaitMonitorHandle | null)?.stop();
             activeStdinMonitor = null;
-            activeRuntime = null;
+            scopedState.activeRuntime = null;
             // Note: We don't invalidateSession here in the 'success' case to allow reuse.
           }
         } catch (error) {
           lastError = error;
-          await invalidateSession();
+          await invalidateSession(scopedState);
           const message = formatGeminiAcpError(error);
 
           // Handle region fallback for timeout error specifically if a fallback region is configured.
@@ -996,7 +1026,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
       throw lastError instanceof Error ? lastError : new Error(formatGeminiAcpError(lastError));
     });
 
-    invocationQueue = runInvocation.then(() => undefined, () => undefined);
+    scopedState.invocationQueue = runInvocation.then(() => undefined, () => undefined);
     return runInvocation;
   };
 
@@ -1007,6 +1037,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   }
 
   async function ensureSessionMode(
+    scopedState: GeminiAcpScopedSessionState,
     session: GeminiLiveSession,
     desiredModeId: string | undefined,
     abortSignal: AbortSignal,
@@ -1031,7 +1062,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
       ),
       abortSignal,
       async () => {
-        await invalidateSession(session);
+        await invalidateSession(scopedState, session);
       },
       [
         `Gemini ACP mode switching to ${desiredModeId} was aborted`,
@@ -1042,9 +1073,16 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
     session.currentModeId = desiredModeId;
   }
 
-  async function ensureSession(abortSignal: AbortSignal): Promise<GeminiLiveSession> {
-    if (activeSession && activeSession.child.exitCode === null && activeSession.child.signalCode === null) {
-      return activeSession;
+  async function ensureSession(
+    scopedState: GeminiAcpScopedSessionState,
+    abortSignal: AbortSignal
+  ): Promise<GeminiLiveSession> {
+    if (
+      scopedState.activeSession
+      && scopedState.activeSession.child.exitCode === null
+      && scopedState.activeSession.child.signalCode === null
+    ) {
+      return scopedState.activeSession;
     }
 
     // Start loading the module and spawning the process in parallel to shave off startup time.
@@ -1071,7 +1109,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
       if (stderrBuffer.length > 8_000) {
         stderrBuffer = stderrBuffer.slice(-8_000);
       }
-      activeRuntime?.reportTerminalChunk?.("stderr", text);
+      scopedState.activeRuntime?.reportTerminalChunk?.("stderr", text);
     });
 
     try {
@@ -1079,7 +1117,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
         throw new Error("gemini --acp did not expose stdio handles");
       }
 
-      const client = new TasksawGeminiAcpClient(() => activeRuntime);
+      const client = new TasksawGeminiAcpClient(() => scopedState.activeRuntime);
       const stream = acpModule.ndJsonStream(
         Writable.toWeb(child.stdin as Writable) as unknown as WritableStream<Uint8Array>,
         Readable.toWeb(child.stdout as Readable) as unknown as ReadableStream<Uint8Array>
@@ -1145,7 +1183,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
         currentModelId: null,
         stderrBuffer: () => stderrBuffer
       };
-      activeSession = nextSession;
+      scopedState.activeSession = nextSession;
 
       return nextSession;
     } catch (error) {
@@ -1164,18 +1202,37 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
     }
   }
 
-  async function invalidateSession(targetSession?: GeminiLiveSession | null): Promise<void> {
-    const session = targetSession ?? activeSession;
+  async function invalidateSession(
+    scopedState: GeminiAcpScopedSessionState,
+    targetSession?: GeminiLiveSession | null
+  ): Promise<void> {
+    const session = targetSession ?? scopedState.activeSession;
     if (!session) {
       return;
     }
 
-    if (activeSession === session) {
-      activeSession = null;
+    if (scopedState.activeSession === session) {
+      scopedState.activeSession = null;
     }
 
-    activeRuntime = null;
+    scopedState.activeRuntime = null;
     await stopChildProcess(session.child);
+  }
+
+  function getOrCreateScopedState(scopeKey: string): GeminiAcpScopedSessionState {
+    const existing = sessionPool.get(scopeKey);
+    if (existing) {
+      return existing;
+    }
+
+    const initialState: GeminiAcpScopedSessionState = {
+      activeRuntime: null,
+      activeSession: null,
+      invocationQueue: Promise.resolve(),
+      ledger: []
+    };
+    sessionPool.set(scopeKey, initialState);
+    return initialState;
   }
 }
 
@@ -2598,16 +2655,6 @@ function startStdinWaitMonitor(
   timer = setTimeout(poll, initialDelayMs);
 
   return { stop };
-}
-
-// ---------------------------------------------------------------------------
-// Slash command quote normalization
-// ---------------------------------------------------------------------------
-
-function normalizeSlashCommandQuotes(commandText: string): string {
-  // Remove unnecessary quotes around slash commands:
-  // gemini -p "/stats session" → gemini -p /stats session
-  return commandText.replace(/"(\/[a-zA-Z][\w\s/.-]*)"/g, "$1");
 }
 
 type InactivityController = {
