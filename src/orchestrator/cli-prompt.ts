@@ -2,6 +2,58 @@ import { ModelInvocationContext, OrchestratorCapability } from "./model-adapter"
 
 export const TASKSAW_PROMPT_MARKER = "TASKSAW_PROMPT_ENVELOPE_JSON";
 
+type CliPromptEvidenceLocation = {
+  filePath?: string;
+  symbol?: string;
+  line?: number;
+  column?: number;
+  uri?: string;
+  label?: string;
+};
+
+type CliPromptEvidenceLedgerBundle = {
+  id: string;
+  summary: string;
+  confidence: string;
+  facts: Array<{
+    id: string;
+    statement: string;
+    confidence: string;
+    referenceIds: string[];
+  }>;
+  hypotheses: Array<{
+    id: string;
+    statement: string;
+    confidence: string;
+    referenceIds: string[];
+  }>;
+  unknowns: Array<{
+    id: string;
+    question: string;
+    impact: string;
+    referenceIds: string[];
+  }>;
+  relevantTargets: Array<{
+    filePath?: string;
+    symbol?: string;
+    note?: string;
+  }>;
+  snippets: Array<{
+    id: string;
+    kind: string;
+    content: string;
+    location?: CliPromptEvidenceLocation;
+    referenceId?: string;
+    rationale?: string;
+  }>;
+  references: Array<{
+    id: string;
+    sourceType: string;
+    location?: CliPromptEvidenceLocation;
+    note?: string;
+  }>;
+};
+
 export type CliPromptEnvelope = {
   phase: OrchestratorCapability;
   workflowStage: ModelInvocationContext["workflowStage"];
@@ -74,6 +126,7 @@ export type CliPromptEnvelope = {
     unknowns: string[];
     relevantTargets: string[];
   }>;
+  evidenceLedger?: CliPromptEvidenceLedgerBundle[];
   workingMemory: {
     facts: string[];
     openQuestions: string[];
@@ -151,6 +204,7 @@ export function buildCliPrompt(capability: OrchestratorCapability, context: Mode
     reviewPolicy: context.reviewPolicy,
     acceptanceCriteria: context.node.acceptanceCriteria.items.map((item) => item.description),
     evidenceBundles: buildPhaseEvidenceBundles(capability, context),
+    evidenceLedger: buildPhaseEvidenceLedger(capability, context),
     workingMemory: buildPhaseWorkingMemory(capability, context),
     projectStructure: buildPhaseProjectStructure(capability, context)
   };
@@ -250,6 +304,7 @@ function buildStageInstructions(
   if (workflowStage === "task_orchestration" && capability === "concretePlan") {
     return [
       "Plan execution using the current projectStructure memory and gathered evidence.",
+      "Use evidenceLedger as the canonical, lossless gather-to-plan handoff. The summary-only evidenceBundles field is only a skim layer.",
       "CRITICAL: Do NOT guess or speculate if the gathered evidence is insufficient or contradictory. Early convergence on a wrong implementation plan is strictly prohibited.",
       "If you cannot name the exact line of code, the specific configuration key, or the precise API response needed for execution, set needsAdditionalGather=true immediately.",
       "When requesting additional gather (needsAdditionalGather=true), provide 1-3 highly targeted additionalGatherObjectives that point exactly to the missing pieces of information. This ensures token efficiency by avoiding broad re-scans.",
@@ -400,10 +455,8 @@ function truncateArray<T>(items: T[], limit: number): T[] {
 }
 
 /**
- * Build evidence bundles with phase-appropriate detail level.
- * - Planning phases: full facts, unknowns, targets (with per-bundle caps)
- * - Gather: full facts and targets, unknowns capped
- * - Execute/verify/review: summary + top facts only
+ * Build a skim-friendly evidence summary for the prompt.
+ * concretePlan receives the full-fidelity evidence separately via evidenceLedger.
  */
 function buildPhaseEvidenceBundles(
   capability: OrchestratorCapability,
@@ -438,6 +491,54 @@ function buildPhaseEvidenceBundles(
           bundle.relevantTargets.map((target) => target.filePath ?? target.symbol ?? target.note ?? "unknown"),
           MAX_EVIDENCE_TARGETS
         )
+  }));
+}
+
+function buildPhaseEvidenceLedger(
+  capability: OrchestratorCapability,
+  context: ModelInvocationContext
+): CliPromptEnvelope["evidenceLedger"] {
+  if (capability !== "concretePlan") {
+    return undefined;
+  }
+
+  return context.evidenceBundles.map((bundle) => ({
+    id: bundle.id,
+    summary: bundle.summary,
+    confidence: bundle.confidence,
+    facts: bundle.facts.map((fact) => ({
+      id: fact.id,
+      statement: fact.statement,
+      confidence: fact.confidence,
+      referenceIds: [...fact.referenceIds]
+    })),
+    hypotheses: bundle.hypotheses.map((hypothesis) => ({
+      id: hypothesis.id,
+      statement: hypothesis.statement,
+      confidence: hypothesis.confidence,
+      referenceIds: [...hypothesis.referenceIds]
+    })),
+    unknowns: bundle.unknowns.map((unknown) => ({
+      id: unknown.id,
+      question: unknown.question,
+      impact: unknown.impact,
+      referenceIds: [...unknown.referenceIds]
+    })),
+    relevantTargets: bundle.relevantTargets.map((target) => ({ ...target })),
+    snippets: bundle.snippets.map((snippet) => ({
+      id: snippet.id,
+      kind: snippet.kind,
+      content: snippet.content,
+      location: snippet.location ? { ...snippet.location } : undefined,
+      referenceId: snippet.referenceId,
+      rationale: snippet.rationale
+    })),
+    references: bundle.references.map((reference) => ({
+      id: reference.id,
+      sourceType: reference.sourceType,
+      location: reference.location ? { ...reference.location } : undefined,
+      note: reference.note
+    }))
   }));
 }
 

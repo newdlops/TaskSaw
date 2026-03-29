@@ -97,6 +97,19 @@ type ProjectStructureInspectionRequest = {
   contradictions: string[];
 };
 
+type ShellCommandCapableAdapter = OrchestratorModelAdapter & {
+  executeShellCommand?: (
+    context: ModelInvocationContext,
+    input: {
+      command: string;
+      cwd?: string;
+    }
+  ) => Promise<{
+    stdout: string;
+    stderr: string;
+  } | undefined>;
+};
+
 export type HappyPathExecutionResult = {
   run: Run;
   rootNode: PlanNode;
@@ -452,7 +465,7 @@ export class OrchestratorRuntime {
         this.ingestEvidenceBundle(bootstrapSketchStage.stageNode.id, storedBundle);
       }
 
-      evidenceBundles = [...evidenceBundles, ...bootstrapBundles];
+      evidenceBundles = this.combineEvidenceBundles(evidenceBundles, bootstrapBundles);
     }
 
     let currentNode = this.engine.transitionNode(nodeId, "abstract_plan");
@@ -507,14 +520,16 @@ export class OrchestratorRuntime {
     }
 
     this.throwIfCancelled(currentNode.runId, currentNode.id);
+    evidenceBundles = this.combineEvidenceBundles(evidenceBundles, gatheredBundles);
+
     currentNode = this.engine.transitionNode(nodeId, "evidence_consolidation");
-    
-    // Skip destructive merge and pass raw bundles to preserve full context
-    const rawEvidenceBundles = [...evidenceBundles, ...gatheredBundles];
+
+    // Keep the raw gathered bundles intact so later stages retain the original evidence graph.
+    const rawEvidenceBundles = evidenceBundles;
     const consolidationStage = this.createCompletedStageNode(currentNode, {
       phase: "evidence_consolidation",
       title: "Evidence Consolidation",
-      objective: `Bypass merge and pass raw gathered evidence into a compact bundle for:\n${currentNode.objective}`,
+      objective: `Pass raw gathered evidence without lossy consolidation for:\n${currentNode.objective}`,
       kind: "planning"
     });
     
@@ -1614,15 +1629,15 @@ export class OrchestratorRuntime {
         this.ingestEvidenceBundle(focusedGatherStage.stageNode.id, storedBundle);
       }
 
-      evidenceBundles = [...evidenceBundles, ...focusedBundles];
+      evidenceBundles = this.combineEvidenceBundles(evidenceBundles, focusedBundles);
 
       this.throwIfCancelled(currentNode.runId, currentNode.id);
       currentNode = this.engine.transitionNode(currentNode.id, "evidence_consolidation");
-      const rawEvidenceBundles = [...evidenceBundles, ...focusedBundles];
+      const rawEvidenceBundles = evidenceBundles;
       const consolidationStage = this.createCompletedStageNode(currentNode, {
         phase: "evidence_consolidation",
         title: "Evidence Consolidation",
-        objective: `Bypass merge and pass raw focused evidence into a compact bundle for:\n${currentNode.objective}`,
+        objective: `Pass raw focused evidence without lossy consolidation for:\n${currentNode.objective}`,
         kind: "planning"
       });
       for (const bundle of rawEvidenceBundles) {
@@ -1895,6 +1910,24 @@ export class OrchestratorRuntime {
     return node.evidenceBundleIds
       .map((bundleId) => this.evidenceStore.getBundle(bundleId))
       .filter((bundle): bundle is EvidenceBundle => Boolean(bundle));
+  }
+
+  private combineEvidenceBundles(...bundleGroups: EvidenceBundle[][]): EvidenceBundle[] {
+    const combined: EvidenceBundle[] = [];
+    const seenBundleIds = new Set<string>();
+
+    for (const group of bundleGroups) {
+      for (const bundle of group) {
+        if (seenBundleIds.has(bundle.id)) {
+          continue;
+        }
+
+        seenBundleIds.add(bundle.id);
+        combined.push(bundle);
+      }
+    }
+
+    return combined;
   }
 
   private buildInvocationContext(
@@ -2627,15 +2660,18 @@ export class OrchestratorRuntime {
           title: `Discovery: ${cmd}`
         };
 
-        const adapter = this.adapterRegistry.resolve(rootNode.assignedModels.gatherer!, "gather");
+        const adapter = this.adapterRegistry.resolve(
+          rootNode.assignedModels.gatherer!,
+          "gather"
+        ) as ShellCommandCapableAdapter;
         const context = this.buildInvocationContext(rootNode, rootNode.assignedModels.gatherer!, "gather", [], terminalSession);
-        
+
         // Use the adapter's gather capability to execute a simple command if possible
-        const result = await (adapter as any).executeShellCommand?.(context, {
+        const result = await adapter.executeShellCommand?.(context, {
           command: `${cmd} < /dev/null`,
           cwd: workspacePath ?? undefined
         });
-        
+
         if (result) {
           const output = result.stdout.trim() || result.stderr.trim();
           if (output.length > 0) {

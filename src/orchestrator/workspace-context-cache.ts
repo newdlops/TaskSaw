@@ -16,7 +16,7 @@ import {
   WorkingMemorySnapshot
 } from "./types";
 
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 const CACHE_DIRECTORY_NAME = ".tasksaw";
 const CACHE_CONTEXT_FILE_NAME = "context.json";
 const CACHE_OVERVIEW_FILE_NAME = "README.md";
@@ -74,13 +74,14 @@ export class WorkspaceContextCache {
     if (!this.hasMeaningfulPayload(payload)) {
       return;
     }
+    const hintPayload = this.buildHintPayload(payload);
 
     fs.rmSync(this.cacheRoot, { recursive: true, force: true });
     fs.mkdirSync(this.cacheRoot, { recursive: true });
 
     this.writeJsonFile(path.join(this.cacheRoot, CACHE_CONTEXT_FILE_NAME), payload);
-    this.writeOverviewFile(payload);
-    this.writeMirroredHintFiles(payload);
+    this.writeOverviewFile(hintPayload);
+    this.writeMirroredHintFiles(hintPayload);
   }
 
   clear() {
@@ -133,11 +134,20 @@ export class WorkspaceContextCache {
       version: CACHE_VERSION,
       updatedAt,
       sourceRunId: snapshot.run.id,
-      evidenceBundles: this.pickTop(snapshot.evidenceBundles, MAX_EVIDENCE_HINTS, (bundle) =>
+      evidenceBundles: snapshot.evidenceBundles,
+      workingMemory: snapshot.workingMemory,
+      projectStructure: snapshot.projectStructure
+    };
+  }
+
+  private buildHintPayload(payload: WorkspaceContextCachePayload): WorkspaceContextCachePayload {
+    return {
+      ...payload,
+      evidenceBundles: this.pickTop(payload.evidenceBundles, MAX_EVIDENCE_HINTS, (bundle) =>
         (this.confidenceRank(bundle.confidence) * 100) + this.timestampRank(bundle.updatedAt)
       ),
-      workingMemory: this.trimWorkingMemory(snapshot.workingMemory, updatedAt),
-      projectStructure: this.trimProjectStructure(snapshot.projectStructure, updatedAt)
+      workingMemory: this.trimWorkingMemory(payload.workingMemory, payload.updatedAt),
+      projectStructure: this.trimProjectStructure(payload.projectStructure, payload.updatedAt)
     };
   }
 
@@ -631,6 +641,7 @@ export class WorkspaceContextCache {
       "# TaskSaw Workspace Cache",
       "",
       "This directory is a shallow hint cache. If any note here conflicts with the real workspace, trust the real files.",
+      "The canonical full-fidelity continuation seed is stored in .tasksaw/context.json.",
       "",
       `Updated at: ${payload.updatedAt}`,
       `Source run: ${payload.sourceRunId}`,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildCliPrompt } from "./cli-prompt";
+import { buildCliPrompt, extractCliPromptEnvelope } from "./cli-prompt";
 import { ModelInvocationContext } from "./model-adapter";
 import { ModelRef } from "./types";
 
@@ -261,6 +261,89 @@ test("task orchestration concrete plan prompt distinguishes structural gaps from
   );
 });
 
+test("task orchestration concrete plan prompt includes a lossless evidence ledger", () => {
+  const prompt = buildCliPrompt("concretePlan", {
+    ...createContext(TEST_MODEL),
+    evidenceBundles: [
+      {
+        id: "bundle-1",
+        runId: "run-test",
+        nodeId: "node-root",
+        summary: "Renderer quota wiring evidence",
+        facts: [
+          {
+            id: "fact-1",
+            statement: "renderer/app.ts reads quota data from the preload bridge response.",
+            confidence: "high",
+            referenceIds: ["ref-1"]
+          }
+        ],
+        hypotheses: [
+          {
+            id: "hyp-1",
+            statement: "The renderer badge can be updated without changing the IPC contract.",
+            confidence: "medium",
+            referenceIds: ["ref-1"]
+          }
+        ],
+        unknowns: [
+          {
+            id: "unknown-1",
+            question: "Which response field carries the remaining percentage?",
+            impact: "high",
+            referenceIds: ["ref-1"]
+          }
+        ],
+        relevantTargets: [
+          { filePath: "src/renderer/app.ts" },
+          { symbol: "renderQuotaBadge" }
+        ],
+        snippets: [
+          {
+            id: "snippet-1",
+            kind: "code",
+            content: "const quota = await window.tasksaw.getQuota();",
+            location: {
+              filePath: "src/renderer/app.ts",
+              line: 42,
+              column: 7
+            },
+            referenceId: "ref-1",
+            rationale: "Current renderer quota read path"
+          }
+        ],
+        references: [
+          {
+            id: "ref-1",
+            sourceType: "file",
+            location: {
+              filePath: "src/renderer/app.ts",
+              line: 42,
+              column: 7
+            },
+            note: "Renderer quota lookup call site"
+          }
+        ],
+        confidence: "high",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      }
+    ]
+  });
+
+  const envelope = extractCliPromptEnvelope(prompt);
+  assert.equal(envelope.evidenceBundles[0]?.summary, "Renderer quota wiring evidence");
+  assert.equal(envelope.evidenceBundles[0]?.facts[0], "renderer/app.ts reads quota data from the preload bridge response.");
+  assert.equal(envelope.evidenceLedger?.[0]?.id, "bundle-1");
+  assert.equal(envelope.evidenceLedger?.[0]?.facts[0]?.referenceIds[0], "ref-1");
+  assert.equal(envelope.evidenceLedger?.[0]?.snippets[0]?.content, "const quota = await window.tasksaw.getQuota();");
+  assert.equal(envelope.evidenceLedger?.[0]?.references[0]?.location?.filePath, "src/renderer/app.ts");
+  assert.match(
+    prompt,
+    /Use evidenceLedger as the canonical, lossless gather-to-plan handoff\./
+  );
+});
+
 test("task orchestration abstract plan prompt avoids repeating failed logging workarounds", () => {
   const prompt = buildCliPrompt("abstractPlan", createContext(TEST_MODEL));
 
@@ -283,11 +366,11 @@ test("task orchestration verify prompt rejects placeholder successes and follow-
 
   assert.match(
     prompt,
-    /Verify the requested user-visible behavior, not just the presence of code changes or lint\/build success\./
+    /Verify the requested user-visible behavior and system state, not just the presence of code changes, strings, or build success\./
   );
   assert.match(
     prompt,
-    /A generic success claim is insufficient\. State the concrete observed behavior or the concrete blocker that justifies the verdict\./
+    /A generic success claim or a simple 'grep' for modified text is insufficient\./
   );
   assert.match(
     prompt,
@@ -295,15 +378,15 @@ test("task orchestration verify prompt rejects placeholder successes and follow-
   );
   assert.match(
     prompt,
-    /Set passed=false if the run only added diagnostic logging or instrumentation and the promised log, payload, or external evidence has not actually been produced yet\./
+    /Set passed=false if the implementation is technically present but logically disconnected/
   );
   assert.match(
     prompt,
-    /When additional tests are necessary in this TypeScript workspace, prefer the project's documented scripts or built dist tests after a build instead of raw node --test src\/\*\*\/\*\.ts entrypoints\./
+    /When additional tests are necessary in this TypeScript workspace, prefer the project's documented scripts or built dist tests after a build\./
   );
   assert.match(
     prompt,
-    /Do not modify files, create temp scripts or temp files, run builds, or attempt follow-up fixes during verify\./
+    /Do not modify files, create temp scripts, or attempt follow-up fixes during verify\./
   );
 });
 

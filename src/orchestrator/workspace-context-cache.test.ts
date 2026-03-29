@@ -254,3 +254,175 @@ test("workspace context cache can rebuild a seed from hint files when context.js
   assert.equal(seed?.workingMemory.facts.some((fact) => fact.statement === "Hint-only fact"), true);
   assert.equal(seed?.projectStructure.keyFiles.some((entry) => entry.path === "src/main/tool-manager.ts"), true);
 });
+
+test("workspace context cache keeps context.json lossless while markdown hints stay shallow", () => {
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "tasksaw-workspace-lossless-"));
+  const cache = new WorkspaceContextCache(workspacePath);
+
+  const snapshot = createSnapshot("run-cache-lossless");
+  snapshot.run.workspacePath = workspacePath;
+
+  for (let index = 0; index < 9; index += 1) {
+    snapshot.evidenceBundles.push({
+      id: `bundle-extra-${index}`,
+      runId: snapshot.run.id,
+      nodeId: "root-node",
+      summary: `Extra evidence bundle ${index}`,
+      facts: [
+        {
+          id: `evidence-fact-extra-${index}`,
+          statement: `Extra evidence fact ${index}`,
+          confidence: "medium",
+          referenceIds: []
+        }
+      ],
+      hypotheses: [],
+      unknowns: [],
+      relevantTargets: [{ filePath: `src/generated/evidence-${index}.ts` }],
+      snippets: [
+        {
+          id: `snippet-extra-${index}`,
+          kind: "code",
+          content: `extraEvidence(${index})`,
+          rationale: "Lossless payload check"
+        }
+      ],
+      references: [
+        {
+          id: `reference-extra-${index}`,
+          sourceType: "file",
+          note: `Extra evidence reference ${index}`
+        }
+      ],
+      confidence: "medium",
+      createdAt: `2026-03-20T00:${10 + index}:00.000Z`,
+      updatedAt: `2026-03-20T00:${10 + index}:00.000Z`
+    });
+  }
+
+  for (let index = 0; index < 10; index += 1) {
+    snapshot.workingMemory.facts.push({
+      id: `fact-extra-${index}`,
+      statement: `High ranked cached fact ${index}`,
+      confidence: "high",
+      referenceIds: [],
+      relatedNodeIds: ["root-node"],
+      createdAt: `2026-03-20T00:${20 + index}:00.000Z`,
+      updatedAt: `2026-03-20T00:${20 + index}:00.000Z`
+    });
+  }
+
+  snapshot.workingMemory.facts.push({
+    id: "fact-overflow",
+    statement: "Overflow fact that should remain only in the full continuation payload",
+    confidence: "low",
+    referenceIds: [],
+    relatedNodeIds: ["root-node"],
+    createdAt: "2026-03-19T00:00:00.000Z",
+    updatedAt: "2026-03-19T00:00:00.000Z"
+  });
+
+  snapshot.workingMemory.openQuestions.push({
+    id: "question-resolved",
+    question: "Resolved question that must survive lossless resume",
+    status: "resolved",
+    resolution: "Already confirmed in the previous run",
+    referenceIds: [],
+    relatedNodeIds: ["root-node"],
+    createdAt: "2026-03-20T00:30:00.000Z",
+    updatedAt: "2026-03-20T00:30:00.000Z"
+  });
+
+  for (let index = 0; index < 16; index += 1) {
+    snapshot.projectStructure.keyFiles.push({
+      id: `file-extra-${index}`,
+      path: `src/generated/high-priority-${index}.ts`,
+      summary: `High priority key file ${index}`,
+      confidence: "high",
+      referenceIds: [],
+      relatedNodeIds: ["root-node"],
+      createdAt: `2026-03-20T00:${40 + index}:00.000Z`,
+      updatedAt: `2026-03-20T00:${40 + index}:00.000Z`
+    });
+  }
+
+  snapshot.projectStructure.keyFiles.push({
+    id: "file-overflow",
+    path: "src/generated/overflow-lossless.ts",
+    summary: "Overflow key file that should stay out of shallow markdown hints",
+    confidence: "low",
+    referenceIds: [],
+    relatedNodeIds: ["root-node"],
+    createdAt: "2026-03-19T00:00:00.000Z",
+    updatedAt: "2026-03-19T00:00:00.000Z"
+  });
+
+  snapshot.projectStructure.contradictions.push({
+    id: "contradiction-resolved",
+    summary: "Resolved contradiction that must survive lossless resume",
+    status: "resolved",
+    resolution: "Entry point ambiguity was already settled",
+    referenceIds: [],
+    relatedNodeIds: ["root-node"],
+    createdAt: "2026-03-20T00:50:00.000Z",
+    updatedAt: "2026-03-20T00:50:00.000Z"
+  });
+
+  cache.saveSnapshot(snapshot);
+
+  const payload = JSON.parse(
+    fs.readFileSync(path.join(workspacePath, ".tasksaw", "context.json"), "utf8")
+  ) as {
+    version: number;
+    evidenceBundles: Array<{ id: string }>;
+    workingMemory: {
+      facts: Array<{ id: string }>;
+      openQuestions: Array<{ id: string; status: string }>;
+    };
+    projectStructure: {
+      keyFiles: Array<{ id: string; path: string }>;
+      contradictions: Array<{ id: string; status: string }>;
+    };
+  };
+
+  assert.equal(payload.version, 2);
+  assert.equal(payload.evidenceBundles.length, snapshot.evidenceBundles.length);
+  assert.equal(payload.evidenceBundles.some((bundle) => bundle.id === "bundle-extra-8"), true);
+  assert.equal(payload.workingMemory.facts.length, snapshot.workingMemory.facts.length);
+  assert.equal(payload.workingMemory.facts.some((fact) => fact.id === "fact-overflow"), true);
+  assert.equal(
+    payload.workingMemory.openQuestions.some((question) => question.id === "question-resolved" && question.status === "resolved"),
+    true
+  );
+  assert.equal(payload.projectStructure.keyFiles.length, snapshot.projectStructure.keyFiles.length);
+  assert.equal(payload.projectStructure.keyFiles.some((entry) => entry.id === "file-overflow"), true);
+  assert.equal(
+    payload.projectStructure.contradictions.some((entry) => entry.id === "contradiction-resolved" && entry.status === "resolved"),
+    true
+  );
+
+  const seed = cache.loadSeed();
+  assert.ok(seed);
+  assert.equal(seed?.evidenceBundles.length, snapshot.evidenceBundles.length);
+  assert.equal(seed?.evidenceBundles.some((bundle) => bundle.id === "bundle-extra-8"), true);
+  assert.equal(seed?.workingMemory.facts.length, snapshot.workingMemory.facts.length);
+  assert.equal(seed?.workingMemory.facts.some((fact) => fact.id === "fact-overflow"), true);
+  assert.equal(
+    seed?.workingMemory.openQuestions.some((question) => question.id === "question-resolved" && question.status === "resolved"),
+    true
+  );
+  assert.equal(seed?.projectStructure.keyFiles.length, snapshot.projectStructure.keyFiles.length);
+  assert.equal(seed?.projectStructure.keyFiles.some((entry) => entry.id === "file-overflow"), true);
+  assert.equal(
+    seed?.projectStructure.contradictions.some((entry) => entry.id === "contradiction-resolved" && entry.status === "resolved"),
+    true
+  );
+
+  const overview = fs.readFileSync(path.join(workspacePath, ".tasksaw", "README.md"), "utf8");
+  assert.equal(overview.includes("The canonical full-fidelity continuation seed is stored in .tasksaw/context.json."), true);
+  assert.equal(overview.includes("Overflow fact that should remain only in the full continuation payload"), false);
+  assert.equal(
+    fs.existsSync(path.join(workspacePath, ".tasksaw", "src", "generated", "overflow-lossless.ts.tasksaw.md")),
+    false
+  );
+});

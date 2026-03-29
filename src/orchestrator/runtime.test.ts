@@ -242,7 +242,7 @@ test("runtime executes the minimal happy path and propagates evidence into plann
       new Set(["concretePlan"]),
       {
         concretePlan: (evidenceCount, factCount, context) => {
-          assert.equal(evidenceCount, 1);
+          assert.equal(evidenceCount, 2);
           assert.equal(factCount, 2);
           assert.equal(context.workflowStage, "task_orchestration");
           assert.equal(context.projectStructure.summary, "The root task is centered on src/orchestrator");
@@ -329,7 +329,7 @@ test("runtime executes the minimal happy path and propagates evidence into plann
   assert.equal(result.snapshot.nodes.filter((node) => node.role === "stage").length, 6);
   assert.equal(result.snapshot.nodes.find((node) => node.parentId === null)?.kind, "planning");
   assert.equal(result.snapshot.nodes.find((node) => node.kind === "execution" && node.role === "task")?.kind, "execution");
-  assert.equal(result.snapshot.evidenceBundles.length, 3);
+  assert.equal(result.snapshot.evidenceBundles.length, 2);
   assert.equal(result.snapshot.workingMemory.facts.length, 2);
   assert.equal(result.snapshot.workingMemory.unknowns.length, 1);
   assert.equal(result.snapshot.workingMemory.openQuestions.length, 1);
@@ -342,6 +342,335 @@ test("runtime executes the minimal happy path and propagates evidence into plann
     "Confirm evidence bundle schema",
     "How should real adapters stream partial output?"
   ]);
+});
+
+test("runtime carries gathered bundles into concrete planning, execution, and phase results", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        abstractPlan: () => ({
+          summary: "Inspect the gathered renderer evidence",
+          targetsToInspect: ["src/renderer/app.ts"],
+          evidenceRequirements: ["Confirm the renderer quota path"]
+        }),
+        concretePlan: (_evidenceCount, _factCount, context) => {
+          assert.deepEqual(context.evidenceBundles.map((bundle) => bundle.id), ["gathered-renderer-evidence"]);
+          assert.equal(context.evidenceBundles[0]?.snippets[0]?.content, "window.tasksaw.getQuota()");
+          return {
+            summary: "Execution can proceed with the gathered renderer evidence",
+            childTasks: [],
+            executionNotes: []
+          };
+        },
+        verify: (context) => {
+          assert.deepEqual(context.evidenceBundles.map((bundle) => bundle.id), ["gathered-renderer-evidence"]);
+          return {
+            summary: "Verification saw the gathered renderer evidence",
+            passed: true,
+            findings: []
+          };
+        }
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: () => ({
+          summary: "Gathered renderer quota evidence",
+          evidenceBundles: [
+            {
+              id: "gathered-renderer-evidence",
+              summary: "Renderer quota evidence",
+              facts: [
+                {
+                  id: "renderer-fact",
+                  statement: "renderer/app.ts reads quota data through window.tasksaw.getQuota().",
+                  confidence: "high",
+                  referenceIds: []
+                }
+              ],
+              hypotheses: [],
+              unknowns: [],
+              relevantTargets: [{ filePath: "src/renderer/app.ts" }],
+              snippets: [
+                {
+                  id: "renderer-snippet",
+                  kind: "code",
+                  content: "window.tasksaw.getQuota()",
+                  rationale: "Current renderer quota fetch path"
+                }
+              ],
+              references: [
+                {
+                  id: "renderer-ref",
+                  sourceType: "file",
+                  note: "Renderer quota fetch call site"
+                }
+              ],
+              confidence: "high"
+            }
+          ]
+        })
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: (context) => {
+          assert.deepEqual(context.evidenceBundles.map((bundle) => bundle.id), ["gathered-renderer-evidence"]);
+          return {
+            summary: "Executed with gathered renderer evidence",
+            outputs: ["renderer quota execution complete"]
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry, {
+    persistence: {
+      saveSnapshot() {
+        // no-op
+      }
+    } as never
+  });
+
+  const result = await runtime.executeHappyPath({
+    goal: "Preserve gathered renderer context through planning",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    }
+  });
+
+  assert.deepEqual(result.phaseResults.evidenceBundles.map((bundle) => bundle.id), ["gathered-renderer-evidence"]);
+  assert.equal(result.phaseResults.evidenceBundles[0]?.references[0]?.note, "Renderer quota fetch call site");
+});
+
+test("runtime keeps initial gather evidence during focused replan and avoids duplicate focused bundles", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  let abstractPlanCallCount = 0;
+  let concretePlanCallCount = 0;
+  let gatherCallCount = 0;
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        abstractPlan: (context) => {
+          abstractPlanCallCount += 1;
+          if (abstractPlanCallCount === 1) {
+            return {
+              summary: "Inspect the initial quota blocker",
+              targetsToInspect: ["src/main/tool-manager.ts"],
+              evidenceRequirements: ["Confirm the initial quota blocker"]
+            };
+          }
+
+          assert.deepEqual(context.evidenceBundles.map((bundle) => bundle.id), ["initial-bundle"]);
+          return {
+            summary: "Inspect the focused follow-up target",
+            targetsToInspect: ["src/preload/preload.ts"],
+            evidenceRequirements: ["Confirm the focused follow-up evidence"]
+          };
+        },
+        concretePlan: (_evidenceCount, _factCount, context) => {
+          concretePlanCallCount += 1;
+          if (concretePlanCallCount === 1) {
+            assert.deepEqual(context.evidenceBundles.map((bundle) => bundle.id), ["initial-bundle"]);
+            return {
+              summary: "Need one more focused gather pass",
+              childTasks: [],
+              executionNotes: [],
+              needsAdditionalGather: true,
+              additionalGatherObjectives: ["Inspect the preload bridge that carries the quota response"]
+            };
+          }
+
+          assert.deepEqual(context.evidenceBundles.map((bundle) => bundle.id), ["initial-bundle", "focused-bundle"]);
+          return {
+            summary: "The combined evidence is ready for execution",
+            childTasks: [],
+            executionNotes: []
+          };
+        },
+        verify: (context) => {
+          assert.deepEqual(context.evidenceBundles.map((bundle) => bundle.id), ["initial-bundle", "focused-bundle"]);
+          return {
+            summary: "Focused evidence was preserved without duplication",
+            passed: true,
+            findings: []
+          };
+        }
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: (context) => {
+          gatherCallCount += 1;
+          if (gatherCallCount === 1) {
+            return {
+              summary: "Initial gather captured the quota blocker",
+              evidenceBundles: [
+                {
+                  id: "initial-bundle",
+                  summary: "Initial quota blocker evidence",
+                  facts: [
+                    {
+                      id: "initial-fact",
+                      statement: "tool-manager.ts still returns remainingPercent:null for the managed Gemini surface.",
+                      confidence: "high",
+                      referenceIds: []
+                    }
+                  ],
+                  hypotheses: [],
+                  unknowns: [],
+                  relevantTargets: [{ filePath: "src/main/tool-manager.ts" }],
+                  snippets: [],
+                  references: [],
+                  confidence: "high"
+                }
+              ]
+            };
+          }
+
+          assert.deepEqual(context.evidenceBundles.map((bundle) => bundle.id), ["initial-bundle"]);
+          return {
+            summary: "Focused gather captured the preload bridge evidence",
+            evidenceBundles: [
+              {
+                id: "focused-bundle",
+                summary: "Focused preload evidence",
+                facts: [
+                  {
+                    id: "focused-fact",
+                    statement: "preload.ts forwards the quota payload without rewriting remainingPercent.",
+                    confidence: "high",
+                    referenceIds: []
+                  }
+                ],
+                hypotheses: [],
+                unknowns: [],
+                relevantTargets: [{ filePath: "src/preload/preload.ts" }],
+                snippets: [],
+                references: [],
+                confidence: "high"
+              }
+            ]
+          };
+        }
+      },
+      trace
+    )
+  );
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: (context) => {
+          assert.deepEqual(context.evidenceBundles.map((bundle) => bundle.id), ["initial-bundle", "focused-bundle"]);
+          return {
+            summary: "Executed with both initial and focused evidence",
+            outputs: ["focused execution complete"]
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry, {
+    persistence: {
+      saveSnapshot() {
+        // no-op
+      }
+    } as never
+  });
+
+  const result = await runtime.executeHappyPath({
+    goal: "Carry initial gather evidence through focused replanning",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    }
+  });
+
+  assert.deepEqual(result.phaseResults.evidenceBundles.map((bundle) => bundle.id), ["initial-bundle", "focused-bundle"]);
 });
 
 test("runtime persists terminal output events emitted by adapters", async () => {
@@ -1540,7 +1869,7 @@ test("runtime seeds continuation snapshots into the next run", async () => {
           };
         },
         concretePlan: (_evidenceCount, factCount, context) => {
-          assert.equal(context.evidenceBundles.length, 1);
+          assert.equal(context.evidenceBundles.length, 2);
           assert.equal(factCount >= 2, true);
           assert.equal(context.projectStructure.directories[0]?.path, "src/orchestrator");
           return {
@@ -1725,7 +2054,7 @@ test("runtime seeds continuation snapshots into the next run", async () => {
 
   assert.equal(result.snapshot.run.status, "done");
   assert.equal(result.snapshot.run.continuedFromRunId, "previous-run");
-  assert.equal(result.snapshot.evidenceBundles.length, 3);
+  assert.equal(result.snapshot.evidenceBundles.length, 2);
   assert.equal(
     result.snapshot.events.some((event) =>
       event.type === "scheduler_progress"
