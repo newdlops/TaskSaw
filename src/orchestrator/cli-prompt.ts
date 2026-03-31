@@ -54,6 +54,16 @@ type CliPromptEvidenceLedgerBundle = {
   }>;
 };
 
+type CliPromptEvidenceBundleSummary = {
+  summary: string;
+  facts: string[];
+  unknowns: string[];
+  relevantTargets: string[];
+  snippetCount?: number;
+  referenceCount?: number;
+  snippetTargets?: string[];
+};
+
 export type CliPromptEnvelope = {
   phase: OrchestratorCapability;
   workflowStage: ModelInvocationContext["workflowStage"];
@@ -65,6 +75,10 @@ export type CliPromptEnvelope = {
   nodeTitle: string;
   objective: string;
   goal: string;
+  taskScope?: {
+    title: string;
+    objective: string;
+  };
   outputLanguage: ModelInvocationContext["outputLanguage"];
   assignedModel: {
     id: string;
@@ -120,12 +134,7 @@ export type CliPromptEnvelope = {
   executionBudget: ModelInvocationContext["executionBudget"];
   reviewPolicy: ModelInvocationContext["reviewPolicy"];
   acceptanceCriteria: string[];
-  evidenceBundles: Array<{
-    summary: string;
-    facts: string[];
-    unknowns: string[];
-    relevantTargets: string[];
-  }>;
+  evidenceBundles: CliPromptEvidenceBundleSummary[];
   evidenceLedger?: CliPromptEvidenceLedgerBundle[];
   workingMemory: {
     facts: string[];
@@ -163,20 +172,41 @@ export type CliPromptEnvelope = {
   };
 };
 
+const NEXT_OBJECTIVES_SCHEMA =
+  '"nextObjectives"?: {"abstractPlan"?: string, "gather"?: string, "concretePlan"?: string, "execute"?: string, "verify"?: string, "review"?: string}';
+
+const EVIDENCE_LOCATION_SCHEMA =
+  '{"filePath"?: string, "symbol"?: string, "line"?: number, "column"?: number, "uri"?: string, "label"?: string}';
+const EVIDENCE_REFERENCE_DRAFT_SCHEMA =
+  `{"id"?: string, "sourceType": "file" | "terminal" | "web" | "search" | "human" | "generated" | "other", "location"?: ${EVIDENCE_LOCATION_SCHEMA}, "note"?: string}`;
+const EVIDENCE_SNIPPET_DRAFT_SCHEMA =
+  `{"id"?: string, "kind": "code" | "text" | "terminal" | "search_result", "content": string, "location"?: ${EVIDENCE_LOCATION_SCHEMA}, "referenceId"?: string, "rationale"?: string}`;
+const EVIDENCE_BUNDLE_DRAFT_SCHEMA = `{
+  "id"?: string,
+  "summary": string,
+  "facts"?: Array<{"id"?: string, "statement": string, "confidence"?: "low" | "medium" | "high" | "mixed", "referenceIds"?: string[]}>,
+  "hypotheses"?: Array<{"id"?: string, "statement": string, "confidence"?: "low" | "medium" | "high" | "mixed", "referenceIds"?: string[]}>,
+  "unknowns"?: Array<{"id"?: string, "question": string, "impact"?: "low" | "medium" | "high", "referenceIds"?: string[]}>,
+  "relevantTargets"?: Array<{"filePath"?: string, "symbol"?: string, "note"?: string}>,
+  "snippets"?: Array<${EVIDENCE_SNIPPET_DRAFT_SCHEMA}>,
+  "references"?: Array<${EVIDENCE_REFERENCE_DRAFT_SCHEMA}>,
+  "confidence"?: "low" | "medium" | "high" | "mixed"
+}`;
+
 const PHASE_RESPONSE_SCHEMAS: Record<OrchestratorCapability, string> = {
-  abstractPlan: '{"summary": string, "targetsToInspect": string[], "evidenceRequirements": string[]}',
+  abstractPlan: `{"summary": string, "targetsToInspect": string[], "evidenceRequirements": string[], ${NEXT_OBJECTIVES_SCHEMA}}`,
   gather:
-    '{"summary": string, "evidenceBundles": EvidenceBundleDraft[], "projectStructure"?: ProjectStructureReport}',
+    `{"summary": string, "evidenceBundles": Array<${EVIDENCE_BUNDLE_DRAFT_SCHEMA}>, "projectStructure"?: ProjectStructureReport, ${NEXT_OBJECTIVES_SCHEMA}}`,
   concretePlan:
-    '{"summary": string, "childTasks": Array<{"title": string, "objective": string, "importance": "critical" | "high" | "medium" | "low", "assignedModels": ModelAssignment, "reviewPolicy"?: ReviewPolicy, "acceptanceCriteria"?: AcceptanceCriteria, "executionBudget"?: Partial<ExecutionBudget>}>, "executionNotes": string[], "needsMorePlanning"?: boolean, "needsAdditionalGather"?: boolean, "additionalGatherObjectives"?: string[], "needsProjectStructureInspection"?: boolean, "inspectionObjectives"?: string[], "projectStructureContradictions"?: string[]}',
+    `{"summary": string, "childTasks": Array<{"title": string, "objective": string, "importance": "critical" | "high" | "medium" | "low", "assignedModels": ModelAssignment, "reviewPolicy"?: ReviewPolicy, "acceptanceCriteria"?: AcceptanceCriteria, "executionBudget"?: Partial<ExecutionBudget>}>, "executionNotes": string[], "needsMorePlanning"?: boolean, "needsAdditionalGather"?: boolean, "additionalGatherObjectives"?: string[], "needsProjectStructureInspection"?: boolean, "inspectionObjectives"?: string[], "projectStructureContradictions"?: string[], ${NEXT_OBJECTIVES_SCHEMA}}`,
   review:
     '{"summary": string, "followUpQuestions": string[], "approved"?: boolean, "nextActions"?: Array<{"title": string, "objective": string, "rationale": string, "priority": "critical" | "high" | "medium" | "low"}>, "carryForward"?: {"facts": string[], "openQuestions": string[], "projectPaths": string[], "evidenceSummaries": string[]}}',
   execute:
-    '{"summary": string, "outputs": string[], "completed"?: boolean, "blockedReason"?: string}',
+    `{"summary": string, "outputs": string[], "completed"?: boolean, "blockedReason"?: string, ${NEXT_OBJECTIVES_SCHEMA}}`,
   verify:
-    '{"summary": string, "passed": boolean, "findings": string[]}',
+    `{"summary": string, "passed": boolean, "findings": string[], ${NEXT_OBJECTIVES_SCHEMA}}`,
   rehydrate:
-    '{"summary": string, "evidenceBundles": EvidenceBundleDraft[]}'
+    `{"summary": string, "evidenceBundles": Array<${EVIDENCE_BUNDLE_DRAFT_SCHEMA}>}`
 };
 
 export function buildCliPrompt(capability: OrchestratorCapability, context: ModelInvocationContext): string {
@@ -191,6 +221,12 @@ export function buildCliPrompt(capability: OrchestratorCapability, context: Mode
     nodeTitle: context.node.title,
     objective: context.node.objective,
     goal: context.run.goal,
+    taskScope: context.sessionScopeHint
+      ? {
+          title: context.sessionScopeHint.ownerTaskTitle,
+          objective: context.sessionScopeHint.ownerTaskObjective
+        }
+      : undefined,
     outputLanguage: context.outputLanguage,
     assignedModel: {
       id: context.assignedModel.id,
@@ -250,8 +286,11 @@ function buildStageInstructions(
     return [
       "Before deep planning, perform a brief pre-flight check to determine available environment tools (e.g. npm, yarn, python, go, rustc) using safe, read-only shell commands (like --version or which).",
       "Produce a low-cost, approximate sketch of the repository before deeper planning starts.",
+      "Treat taskScope.objective and goal only as downstream intent for later stages. Do not execute them during bootstrap sketch.",
+      "If you can phrase the next abstract-plan objective more precisely than the fallback, return it in nextObjectives.abstractPlan.",
       "Limit yourself to top-level structure, likely entrypoints, main runtime boundaries, and a few anchor files or directories.",
       "Stay at seed level only: capture clues and open questions, then defer any detailed inspection to the later planning and gather stages.",
+      "Do not install dependencies, create files, write tests, edit files, or run builds during bootstrap sketch. This phase is read-only evidence collection.",
       "Do not probe external CLIs, managed-tool installations, package internals, auth state, quota surfaces, or home-directory files during bootstrap sketch.",
       "If deeper exploration seems necessary, record that it is needed instead of performing it now.",
       "Do not over-explore or speculate in detail.",
@@ -305,7 +344,10 @@ function buildStageInstructions(
     return [
       "Plan execution using the current projectStructure memory and gathered evidence.",
       "Use evidenceLedger as the canonical, lossless gather-to-plan handoff. The summary-only evidenceBundles field is only a skim layer.",
+      "Check evidenceBundles.snippetCount and snippetTargets first to see whether exact file or payload excerpts were actually gathered for the targets you need.",
+      "If you can phrase the next execution objective more precisely than the fallback, return it in nextObjectives.execute. If the next verify or review objective also needs custom framing, return nextObjectives.verify or nextObjectives.review.",
       "CRITICAL: Do NOT guess or speculate if the gathered evidence is insufficient or contradictory. Early convergence on a wrong implementation plan is strictly prohibited.",
+      "If execution depends on exact file structure, DOM markup, config keys, selectors, API payloads, command output, or error text and evidenceLedger lacks the relevant anchored snippets or raw excerpts, set needsAdditionalGather=true and ask for those exact snippets.",
       "If you cannot name the exact line of code, the specific configuration key, or the precise API response needed for execution, set needsAdditionalGather=true immediately.",
       "When requesting additional gather (needsAdditionalGather=true), provide 1-3 highly targeted additionalGatherObjectives that point exactly to the missing pieces of information. This ensures token efficiency by avoiding broad re-scans.",
       "Do not proceed to implementation (childTasks) if there are still open technical unknowns or unconfirmed assumptions that could lead to a 'wrong answer'.",
@@ -331,6 +373,8 @@ function buildStageInstructions(
 
   if (workflowStage === "task_orchestration" && capability === "abstractPlan") {
     return [
+      "Treat taskScope.objective as downstream task intent only. This phase plans inspection work; it does not execute the task.",
+      "If you can phrase the next gather-stage objective more precisely than the fallback, return it in nextObjectives.gather.",
       "Always account for the tools available in the environment before planning commands. If the environment tools are unknown, explicitly request a pre-flight check in the evidence requirements.",
       "Start from the provided evidence, workingMemory, and projectStructure before doing any new search.",
       "Turn the existing open questions, contradictions, keyFiles, entryPoints, relevantTargets, and recent memory decisions into 1-3 concrete inspection targets.",
@@ -341,6 +385,7 @@ function buildStageInstructions(
       "If the user explicitly asked for exact or actual data, keep the plan centered on the concrete data source or blocker evidence first. Do not jump straight to a UI fallback or copy change.",
       "If workingMemory already records a failed or deferred instrumentation, logging, or gemini_debug.log attempt for this exact-data request, do not propose that approach again. Move directly to the external approval or raw payload blocker instead.",
       "If the next narrow step is a direct managed-tool read or CLI capability check outside the workspace, target that exact surface so gather can request approval for it.",
+      "If downstream planning will depend on exact code, DOM, config, selector, payload, or error text, say so explicitly in evidenceRequirements and ask gather for a line-anchored snippet or raw excerpt instead of a summary.",
       "Do not edit files, call tools, create temp files, run builds, or execute shell commands during planning.",
       "Do not ask for broad repository or external tool exploration unless the current memory is insufficient to name a concrete next target."
     ].join(" ");
@@ -348,11 +393,15 @@ function buildStageInstructions(
 
   if (workflowStage === "task_orchestration" && capability === "gather") {
     return [
+      "Treat taskScope.objective as downstream task intent only. This phase gathers evidence; it does not execute the task.",
+      "If you can phrase the next concrete-plan objective more precisely than the fallback, return it in nextObjectives.concretePlan.",
       "Start from the provided evidence, workingMemory, and projectStructure before doing any new search.",
       "Gather only the minimum evidence needed to unblock the next concrete plan or execution step.",
       "Treat the abstract plan's inspection targets and evidence requirements as the current gather contract.",
       "Stay within that contract unless each named target has been exhausted and you can justify widening the search in the returned evidence.",
       "When returning evidenceBundles, ensure each fact is specific, concrete, and contains technical details (paths, symbols, actual values, error messages, or configuration snippets). Do not generalize or summarize multiple distinct findings into a single vague fact. Every technical detail discovered is crucial for the planning phase.",
+      "If a finding comes from source code, HTML, config, test files, IPC/preload wiring, API payloads, or terminal output that downstream planning may need structurally, include the exact excerpt in snippets with file/source location and connect it through references.",
+      "For codebase tasks, each materially relevant file or symbol target should usually contribute at least one anchored snippet/reference pair. Summary-only bundles are insufficient when later planning depends on the real file structure.",
       "If a tool output contains a crucial error, configuration, or structural pattern, record it exactly as a fact with its context.",
       "Prefer confirming or disproving the current memory's open questions at the named files, entrypoints, modules, relevantTargets, or managed tool locations before running broader searches.",
       "If the current memory already suggests a likely absence or integration gap, confirm that directly and return compact evidence instead of expanding the search surface.",
@@ -379,6 +428,7 @@ function buildStageInstructions(
   if (workflowStage === "task_orchestration" && capability === "execute") {
     return [
       "Carry out the requested implementation work instead of restating the plan.",
+      "If you can phrase the next verification objective more precisely from the actual execution outcome, return it in nextObjectives.verify.",
       "Do not invent undocumented CLI flags, slash commands, APIs, or data sources.",
       "When execution needs tests in this TypeScript workspace, prefer the project's documented scripts or a build-first path such as npm run build followed by built dist tests over raw node --test src/**/*.ts entrypoints.",
       "If a required user-visible behavior still depends on placeholder/no-data fallback because the upstream source is missing or unsupported, set completed=false and explain the blocker instead of claiming success.",
@@ -390,6 +440,7 @@ function buildStageInstructions(
   if (capability === "verify") {
     return [
       "Verify the requested user-visible behavior and system state, not just the presence of code changes, strings, or build success.",
+      "If review is enabled and you can phrase the next review objective more precisely than the fallback, return it in nextObjectives.review.",
       "A generic success claim or a simple 'grep' for modified text is insufficient. You must provide concrete evidence of logical correctness.",
       "CRITICAL: Perform behavioral verification. If the change involves a logic flow, try to execute a command or script that exercises that flow. Establish that the bug is fixed or the feature works as intended in its actual runtime context.",
       "Set passed=false if the implementation is technically present but logically disconnected (e.g., a variable is updated but its value is never used by the system).",
@@ -454,6 +505,33 @@ function truncateArray<T>(items: T[], limit: number): T[] {
   return items.length <= limit ? items : items.slice(0, limit);
 }
 
+function normalizePromptStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((item) => {
+        if (typeof item === "string") {
+          const trimmed = item.trim();
+          return trimmed.length > 0 ? [trimmed] : [];
+        }
+        if (typeof item === "number" || typeof item === "boolean") {
+          return [String(item)];
+        }
+        return [];
+      });
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? [trimmed] : [];
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return [String(value)];
+  }
+
+  return [];
+}
+
 /**
  * Build a skim-friendly evidence summary for the prompt.
  * concretePlan receives the full-fidelity evidence separately via evidenceLedger.
@@ -472,6 +550,7 @@ function buildPhaseEvidenceBundles(
   }
 
   const summaryOnlyPhase = capability === "execute" || capability === "verify";
+  const includeSnippetCoverage = capability === "concretePlan";
 
   return context.evidenceBundles.map((bundle) => ({
     summary: bundle.summary,
@@ -490,7 +569,25 @@ function buildPhaseEvidenceBundles(
       : truncateArray(
           bundle.relevantTargets.map((target) => target.filePath ?? target.symbol ?? target.note ?? "unknown"),
           MAX_EVIDENCE_TARGETS
+        ),
+    snippetCount: includeSnippetCoverage ? bundle.snippets.length : undefined,
+    referenceCount: includeSnippetCoverage ? bundle.references.length : undefined,
+    snippetTargets: includeSnippetCoverage
+      ? truncateArray(
+          Array.from(new Set(
+            bundle.snippets
+              .map((snippet) =>
+                snippet.location?.filePath
+                ?? snippet.location?.symbol
+                ?? snippet.location?.label
+                ?? snippet.rationale
+                ?? snippet.referenceId
+              )
+              .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+          )),
+          MAX_EVIDENCE_TARGETS
         )
+      : undefined
   }));
 }
 
@@ -510,19 +607,19 @@ function buildPhaseEvidenceLedger(
       id: fact.id,
       statement: fact.statement,
       confidence: fact.confidence,
-      referenceIds: [...fact.referenceIds]
+      referenceIds: normalizePromptStringArray(fact.referenceIds)
     })),
     hypotheses: bundle.hypotheses.map((hypothesis) => ({
       id: hypothesis.id,
       statement: hypothesis.statement,
       confidence: hypothesis.confidence,
-      referenceIds: [...hypothesis.referenceIds]
+      referenceIds: normalizePromptStringArray(hypothesis.referenceIds)
     })),
     unknowns: bundle.unknowns.map((unknown) => ({
       id: unknown.id,
       question: unknown.question,
       impact: unknown.impact,
-      referenceIds: [...unknown.referenceIds]
+      referenceIds: normalizePromptStringArray(unknown.referenceIds)
     })),
     relevantTargets: bundle.relevantTargets.map((target) => ({ ...target })),
     snippets: bundle.snippets.map((snippet) => ({

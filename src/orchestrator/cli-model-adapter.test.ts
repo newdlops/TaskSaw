@@ -81,6 +81,7 @@ function createContext(model: ModelRef): ModelInvocationContext {
       }
     },
     assignedModel: model,
+    role: "orchestrator",
     outputLanguage: "en",
     abortSignal: new AbortController().signal,
     workflowStage: "task_orchestration",
@@ -196,6 +197,43 @@ test("gemini adapter retries once with a JSON-only repair prompt after prose out
   assert.equal(invocationCount, 2);
   assert.match(prompts[1] ?? "", /Return exactly one JSON object and nothing else\./);
   assert.match(prompts[1] ?? "", /Do not call tools or edit files\./);
+});
+
+test("gemini adapter normalizes loose evidence bundle shapes into structured drafts", async () => {
+  const payload = {
+    summary: "normalized gather evidence",
+    evidenceBundles: [
+      {
+        summary: "Loose bundle",
+        facts: ["renderer button exists", {
+          statement: "run call is wired",
+          confidence: "high",
+          referenceIds: "ref-run"
+        }],
+        hypotheses: ["button may need disabled state handling"],
+        unknowns: ["which node status label is visible first"],
+        relevantTargets: ["src/renderer/app.ts"],
+        snippets: ["const runButton = document.getElementById('orchestrator-run');"],
+        references: ["src/renderer/app.ts: run button wiring"]
+      }
+    ]
+  };
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    buildInvocationArgs: () => ["-e", `process.stdout.write(${JSON.stringify(JSON.stringify(payload))});`],
+    supportedCapabilities: ["gather"]
+  });
+
+  const result = await adapter.gather!(createContext(TEST_MODEL));
+  assert.equal(result.evidenceBundles.length, 1);
+  assert.equal(result.evidenceBundles[0]?.facts[0]?.statement, "renderer button exists");
+  assert.deepEqual(result.evidenceBundles[0]?.facts[1]?.referenceIds, ["ref-run"]);
+  assert.equal(result.evidenceBundles[0]?.unknowns[0]?.question, "which node status label is visible first");
+  assert.equal(result.evidenceBundles[0]?.relevantTargets[0]?.note, "src/renderer/app.ts");
+  assert.equal(result.evidenceBundles[0]?.snippets[0]?.kind, "text");
+  assert.equal(result.evidenceBundles[0]?.references[0]?.sourceType, "other");
 });
 
 test("default CLI invocation streams stdout and stderr into terminal events", async () => {
@@ -401,6 +439,31 @@ test("abstract plan response defaults missing array fields", async () => {
   assert.equal(result.summary, payload.summary);
   assert.deepEqual(result.targetsToInspect, []);
   assert.deepEqual(result.evidenceRequirements, []);
+});
+
+test("abstract plan response parses next-stage objective hints", async () => {
+  const payload = {
+    summary: "inspect renderer seams first",
+    targetsToInspect: ["src/renderer/app.ts"],
+    evidenceRequirements: ["Confirm the minimal DOM and preload seams"],
+    nextObjectives: {
+      gather: "Inspect src/renderer/app.ts and src/renderer/index.html in read-only mode to confirm the minimal seams needed before planning renderer tests."
+    }
+  };
+  const script = `process.stdout.write(${JSON.stringify(JSON.stringify(payload))});`;
+  const adapter = new CliModelAdapter({
+    model: TEST_MODEL,
+    flavor: "gemini",
+    executablePath: process.execPath,
+    buildInvocationArgs: () => ["-e", script],
+    supportedCapabilities: ["abstractPlan"]
+  });
+
+  const result = await adapter.abstractPlan!(createContext(TEST_MODEL));
+  assert.equal(
+    result.nextObjectives?.gather,
+    payload.nextObjectives.gather
+  );
 });
 
 test("gather response parses project structure reports", async () => {

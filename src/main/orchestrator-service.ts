@@ -152,6 +152,7 @@ export class OrchestratorService {
         language: input.language,
         title: modeConfig.title,
         objective: goal,
+        continuedFromNodeId: input.continueFromNodeId,
         config: requestedMaxDepth === undefined
           ? undefined
           : {

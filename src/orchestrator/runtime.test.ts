@@ -1749,6 +1749,8 @@ test("runtime tolerates malformed evidence referenceIds from gather responses", 
 test("runtime runs a low-cost bootstrap sketch before root planning when no clues are seeded", async () => {
   const trace: string[] = [];
   const registry = new ModelAdapterRegistry();
+  let bootstrapObjective = "";
+  let abstractObjective = "";
 
   const planner: ModelRef = {
     id: "planner-upper",
@@ -1778,6 +1780,7 @@ test("runtime runs a low-cost bootstrap sketch before root planning when no clue
       new Set(["abstractPlan", "concretePlan", "verify"]),
       {
         abstractPlan: (context) => {
+          abstractObjective = context.node.objective;
           trace.push(`abstract-context:${context.projectStructure.summary}`);
           return {
             summary: "Plan with bootstrap clues",
@@ -1807,6 +1810,7 @@ test("runtime runs a low-cost bootstrap sketch before root planning when no clue
         gather: (context) => {
           trace.push(`gather-stage:${context.workflowStage}:${context.node.title}`);
           if (context.workflowStage === "bootstrap_sketch") {
+            bootstrapObjective = context.node.objective;
             return {
               summary: "Bootstrap sketch complete",
               evidenceBundles: [
@@ -1829,6 +1833,9 @@ test("runtime runs a low-cost bootstrap sketch before root planning when no clue
                   confidence: "mixed"
                 }
               ],
+              nextObjectives: {
+                abstractPlan: "Use the bootstrap clues to define the narrowest read-only inspection scope for the real task."
+              },
               projectStructure: {
                 summary: "Coarse sketch: main, renderer, and orchestrator layers exist",
                 directories: [
@@ -1892,6 +1899,13 @@ test("runtime runs a low-cost bootstrap sketch before root planning when no clue
   assert.equal(trace.includes("gather-stage:bootstrap_sketch:Bootstrap Sketch"), true);
   assert.equal(trace.includes("abstract-context:Coarse sketch: main, renderer, and orchestrator layers exist"), true);
   assert.ok(trace.indexOf("gather-stage:bootstrap_sketch:Bootstrap Sketch") < trace.indexOf("abstract:planner-upper"));
+  assert.match(bootstrapObjective, /Current stage restriction: read-only evidence collection only\./);
+  assert.match(bootstrapObjective, /Do not install dependencies, create files, write tests, edit files, run builds, or perform implementation work in this stage\./);
+  assert.match(bootstrapObjective, /Downstream task intent to support later \(not for direct execution in this stage\):/);
+  assert.match(
+    abstractObjective,
+    /^Use the bootstrap clues to define the narrowest read-only inspection scope for the real task\./
+  );
 });
 
 test("runtime seeds continuation snapshots into the next run", async () => {
@@ -5203,12 +5217,297 @@ test("runtime injects working-memory cues into task-orchestration abstract and g
   });
 
   assert.equal(result.snapshot.run.status, "done");
+  assert.match(abstractObjective, /Current stage restriction: planning-only\./);
+  assert.match(abstractObjective, /Downstream task intent to support later \(not for direct execution in this stage\):/);
   assert.match(abstractObjective, /Priority memory cues:/);
   assert.match(abstractObjective, /Confirm whether ToolManager already exposes quota fields/);
   assert.match(abstractObjective, /src\/main\/tool-manager\.ts/);
+  assert.match(gatherObjective, /Current stage restriction: read-only evidence collection only\./);
+  assert.match(gatherObjective, /Do not install dependencies, create files, write tests, edit files, or run other mutating commands in this stage\./);
+  assert.match(gatherObjective, /Downstream task intent to support later \(not for direct execution in this stage\):/);
   assert.match(gatherObjective, /Priority memory cues:/);
   assert.match(gatherObjective, /Inspection target identified: src\/main\/tool-manager\.ts/);
   assert.match(gatherObjective, /Current tool state has no quota field/);
+});
+
+test("runtime keeps mutating downstream goals separate from gather-stage collection objectives", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+  let gatherObjective = "";
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "verify"]),
+      {
+        abstractPlan: () => ({
+          summary: "Inspect renderer test seams first",
+          targetsToInspect: ["src/renderer/app.ts", "src/renderer/app_test_plan.md"],
+          evidenceRequirements: ["Confirm whether Jest already exists and what browser globals the renderer depends on"]
+        }),
+        concretePlan: () => ({
+          summary: "Execution ready",
+          childTasks: [],
+          executionNotes: []
+        }),
+        verify: () => ({
+          summary: "Verification passed",
+          passed: true,
+          findings: []
+        })
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: (context) => {
+          gatherObjective = context.node.objective;
+          return {
+            summary: "Gathered narrow renderer test evidence",
+            evidenceBundles: []
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: () => ({
+          summary: "Execution complete",
+          outputs: ["noop"]
+        })
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry);
+  const result = await runtime.executeScheduledRun({
+    goal: "Before refactoring src/renderer/app.ts, write tests from src/renderer/app_test_plan.md, install Jest if missing, and create 300 standalone tests with minimal mocking.",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier: planner
+    }
+  });
+
+  assert.equal(result.snapshot.run.status, "done");
+  assert.match(gatherObjective, /^Collect only the file, symbol, and evidence findings needed before the next concrete plan for the current task\./);
+  assert.match(gatherObjective, /Current stage restriction: read-only evidence collection only\./);
+  assert.match(gatherObjective, /Do not install dependencies, create files, write tests, edit files, or run other mutating commands in this stage\./);
+  assert.match(gatherObjective, /Downstream task intent to support later \(not for direct execution in this stage\):/);
+  assert.match(gatherObjective, /install Jest if missing, and create 300 standalone tests with minimal mocking\./);
+  assert.match(
+    gatherObjective,
+    /return exact snippet\/reference pairs with location instead of summary-only findings\./
+  );
+});
+
+test("runtime adopts llm-shaped next-stage objectives across planning and execution phases", async () => {
+  const trace: string[] = [];
+  const registry = new ModelAdapterRegistry();
+  let gatherObjective = "";
+  let concreteObjective = "";
+  let executeObjective = "";
+  let verifyObjective = "";
+
+  const planner: ModelRef = {
+    id: "planner-upper",
+    provider: "mock",
+    model: "planner-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+  const gatherer: ModelRef = {
+    id: "gather-lower",
+    provider: "mock",
+    model: "gather-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const executor: ModelRef = {
+    id: "execute-lower",
+    provider: "mock",
+    model: "execute-lower",
+    tier: "lower",
+    reasoningEffort: "medium"
+  };
+  const verifier: ModelRef = {
+    id: "verify-upper",
+    provider: "mock",
+    model: "verify-upper",
+    tier: "upper",
+    reasoningEffort: "high"
+  };
+
+  registry.register(
+    new MockAdapter(
+      planner,
+      new Set(["abstractPlan", "concretePlan", "review"]),
+      {
+        abstractPlan: () => ({
+          summary: "Inspect renderer seams first",
+          targetsToInspect: ["src/renderer/app.ts", "src/renderer/index.html"],
+          evidenceRequirements: ["Confirm the smallest DOM and preload surface needed for renderer tests"],
+          nextObjectives: {
+            gather: "Inspect only src/renderer/app.ts and src/renderer/index.html in read-only mode to confirm the minimal renderer test seams."
+          }
+        }),
+        concretePlan: (_evidenceCount, _factCount, context) => {
+          concreteObjective = context.node.objective;
+          return {
+            summary: "Execution-ready renderer test harness plan",
+            childTasks: [],
+            executionNotes: ["Keep the implementation minimal and aligned with the gathered seams."],
+            nextObjectives: {
+              execute: "Implement the minimal renderer test harness that matches the confirmed DOM and preload seams."
+            }
+          };
+        },
+        review: () => ({
+          summary: "Review passed",
+          approved: true,
+          followUpQuestions: [],
+          nextActions: []
+        })
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      gatherer,
+      new Set(["gather"]),
+      {
+        gather: (context) => {
+          gatherObjective = context.node.objective;
+          return {
+            summary: "Confirmed the narrow renderer test seams",
+            evidenceBundles: [],
+            nextObjectives: {
+              concretePlan: "Turn the confirmed renderer seams into a concrete Jest test plan without creating files yet."
+            }
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      executor,
+      new Set(["execute"]),
+      {
+        execute: (context) => {
+          executeObjective = context.node.objective;
+          context.reportTerminalEvent?.({
+            stream: "stdout",
+            text: "implemented renderer test harness\n"
+          });
+          return {
+            summary: "Implemented the renderer test harness",
+            outputs: ["implemented renderer test harness"],
+            completed: true,
+            nextObjectives: {
+              verify: "Verify that the renderer test harness matches the gathered DOM and preload seams and that gather remained read-only."
+            }
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  registry.register(
+    new MockAdapter(
+      verifier,
+      new Set(["verify"]),
+      {
+        verify: (context) => {
+          verifyObjective = context.node.objective;
+          return {
+            summary: "Verified the renderer test harness",
+            passed: true,
+            findings: []
+          };
+        }
+      },
+      trace
+    )
+  );
+
+  const runtime = new OrchestratorRuntime(registry);
+  const result = await runtime.executeHappyPath({
+    goal: "Before refactoring the renderer, prepare the smallest valid Jest test harness without widening the search.",
+    reviewPolicy: "none",
+    assignedModels: {
+      abstractPlanner: planner,
+      gatherer,
+      concretePlanner: planner,
+      executor,
+      verifier
+    }
+  });
+
+  assert.equal(result.snapshot.run.status, "done");
+  assert.match(
+    gatherObjective,
+    /^Inspect only src\/renderer\/app\.ts and src\/renderer\/index\.html in read-only mode to confirm the minimal renderer test seams\./
+  );
+  assert.match(gatherObjective, /Current stage restriction: read-only evidence collection only\./);
+  assert.match(
+    gatherObjective,
+    /return exact snippet\/reference pairs with location instead of summary-only findings\./
+  );
+  assert.equal(
+    concreteObjective,
+    "Turn the confirmed renderer seams into a concrete Jest test plan without creating files yet."
+  );
+  assert.match(
+    executeObjective,
+    /Implement the minimal renderer test harness that matches the confirmed DOM and preload seams\./
+  );
+  assert.equal(
+    verifyObjective,
+    "Verify that the renderer test harness matches the gathered DOM and preload seams and that gather remained read-only."
+  );
 });
 
 test("runtime resolves project-structure issues recorded inside the inspection subtree", async () => {

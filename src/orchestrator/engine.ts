@@ -80,6 +80,7 @@ export class OrchestratorEngine {
       status: "pending",
       rootNodeId,
       continuedFromRunId: input.continuation?.sourceRunId ?? null,
+      continuedFromNodeId: input.continuedFromNodeId ?? null,
       config,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -113,7 +114,8 @@ export class OrchestratorEngine {
     this.recordEvent(runId, null, "run_created", {
       goal: run.goal,
       rootNodeId,
-      continuedFromRunId: run.continuedFromRunId
+      continuedFromRunId: run.continuedFromRunId,
+      continuedFromNodeId: run.continuedFromNodeId
     });
     this.recordEvent(runId, rootNodeId, "node_created", {
       parentId: null,

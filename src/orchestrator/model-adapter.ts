@@ -139,6 +139,7 @@ export type ModelInvocationContext = {
   run: Run;
   node: PlanNode;
   config: OrchestratorConfig;
+  role: string;
   assignedModel: ModelRef;
   outputLanguage: "en" | "ko";
   abortSignal: AbortSignal;
@@ -158,6 +159,14 @@ export type ModelInvocationContext = {
   reportProgress?: (message: string, details?: Record<string, unknown>) => void;
   reportExecutionStatus?: (state: string, message: string, details?: Record<string, unknown>) => void;
   reportTerminalEvent?: (event: OrchestratorTerminalEventDraft) => void;
+  reportModelInvocation?: (payload: {
+    role: string;
+    capability: OrchestratorCapability;
+    modelId: string;
+    provider: string;
+    model: string;
+    prompt: string;
+  }) => void;
   sessionScopeHint?: ModelInvocationSessionScopeHint;
 };
 
@@ -168,10 +177,16 @@ export type ModelInvocationSessionScopeHint = {
   ownerTaskLineage: string[];
 };
 
+export type StageObjectiveHints = Partial<Record<
+  Exclude<OrchestratorCapability, "rehydrate">,
+  string
+>>;
+
 export type AbstractPlanResult = {
   summary: string;
   targetsToInspect: string[];
   evidenceRequirements: string[];
+  nextObjectives?: StageObjectiveHints;
   debug?: ModelExecutionDebugInfo;
 };
 
@@ -179,6 +194,7 @@ export type GatherResult = {
   summary: string;
   evidenceBundles: EvidenceBundleDraft[];
   projectStructure?: ProjectStructureReport;
+  nextObjectives?: StageObjectiveHints;
   debug?: ModelExecutionDebugInfo;
 };
 
@@ -192,6 +208,7 @@ export type ConcretePlanResult = {
   needsProjectStructureInspection?: boolean;
   inspectionObjectives?: string[];
   projectStructureContradictions?: string[];
+  nextObjectives?: StageObjectiveHints;
   debug?: ModelExecutionDebugInfo;
 };
 
@@ -209,6 +226,7 @@ export type ExecuteResult = {
   outputs: string[];
   completed?: boolean;
   blockedReason?: string;
+  nextObjectives?: StageObjectiveHints;
   debug?: ModelExecutionDebugInfo;
 };
 
@@ -216,6 +234,7 @@ export type VerifyResult = {
   summary: string;
   passed: boolean;
   findings: string[];
+  nextObjectives?: StageObjectiveHints;
   debug?: ModelExecutionDebugInfo;
 };
 

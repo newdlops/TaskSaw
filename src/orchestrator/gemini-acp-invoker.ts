@@ -858,39 +858,151 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
               model: modelId
             });
             const combinedAbortSignal = AbortSignal.any([context.abortSignal, stdinWaitAbort.signal]);
-            const promptResult = await withAbort(
-              promptActivity.wrap(
-                session.connection.prompt({
-                  sessionId: session.sessionId,
-                  prompt: [
-                    {
-                      type: "text",
-                      text: promptText
-                    }
-                  ],
-                  ...(isReadOnlyGeminiCapability(capability) ? {
-                    generationConfig: {
-                      temperature: defaultTemperature
-                    }
-                  } : {})
-                }) as Promise<GeminiPromptResponse>
-              ),
-              combinedAbortSignal,
-              async () => {
-                promptActivity.stop();
-                if (activeStdinMonitor) {
-                  activeStdinMonitor.stop();
-                  activeStdinMonitor = null;
+            let promptResult: GeminiPromptResponse;
+
+            const CHUNK_SIZE = 60000;
+            if (promptText.length > CHUNK_SIZE) {
+              const chunks: string[] = [];
+              for (let i = 0; i < promptText.length; i += CHUNK_SIZE) {
+                chunks.push(promptText.slice(i, i + CHUNK_SIZE));
+              }
+
+              context.reportProgress?.(`Splitting large payload into ${chunks.length} chunks to prevent timeout`, {
+                capability,
+                model: modelId,
+                totalLength: promptText.length,
+                chunkCount: chunks.length
+              });
+
+              for (let i = 0; i < chunks.length - 1; i++) {
+                context.reportProgress?.(`Sending chunk ${i + 1} of ${chunks.length}...`, { capability });
+                
+                // Temporarily redirect terminal output to capture ACK without polluting main stdout
+                const originalReportTerminalChunk = runtime.reportTerminalChunk;
+                let lastChunkResponse = "";
+                runtime.reportTerminalChunk = (stream, text) => {
+                  if (stream === "stdout") {
+                    lastChunkResponse += text;
+                  }
+                  // Still allow system/stderr logs if needed
+                  if (stream !== "stdout") {
+                    originalReportTerminalChunk?.(stream, text);
+                  }
+                };
+
+                try {
+                  await withAbort(
+                    promptActivity.wrap(
+                      session.connection.prompt({
+                        sessionId: session.sessionId,
+                        prompt: [
+                          {
+                            type: "text",
+                            text: `[System Note: This is part ${i + 1} of ${chunks.length} of the user's prompt payload. Do not process the request yet. Reply with exactly the word "ACK" and wait for the final part.]\n\n${chunks[i]}`
+                          }
+                        ],
+                        generationConfig: { temperature: 0.0 }
+                      }) as Promise<GeminiPromptResponse>
+                    ),
+                    combinedAbortSignal,
+                    async () => {
+                      promptActivity.stop();
+                      if (activeStdinMonitor) {
+                        activeStdinMonitor.stop();
+                        activeStdinMonitor = null;
+                      }
+                      await invalidateSession(scopedState, session);
+                    },
+                    [
+                      `Gemini ACP prompt chunk ${i + 1} was aborted`,
+                      `capability=${capability}`,
+                      `workflowStage=${context.workflowStage}`,
+                      `model=${modelId}`
+                    ].join(" · ")
+                  );
+
+                  // Explicitly report the ACK in the system log for transparency
+                  const cleanAck = lastChunkResponse.trim();
+                  context.reportTerminalEvent?.({
+                    stream: "system",
+                    text: `[Chunk ${i + 1}/${chunks.length} OK] Model responded: "${cleanAck}"\n`
+                  });
+                } finally {
+                  // Restore terminal output and clear accumulated ACKs
+                  runtime.reportTerminalChunk = originalReportTerminalChunk;
+                  agentMessageChunks.length = 0;
                 }
-                await invalidateSession(scopedState, session);
-              },
-              [
-                "Gemini ACP prompt was aborted",
-                `capability=${capability}`,
-                `workflowStage=${context.workflowStage}`,
-                `model=${modelId}`
-              ].join(" · ")
-            );
+              }
+
+              context.reportProgress?.(`Sending final chunk ${chunks.length} of ${chunks.length}...`, { capability });
+              promptResult = await withAbort(
+                promptActivity.wrap(
+                  session.connection.prompt({
+                    sessionId: session.sessionId,
+                    prompt: [
+                      {
+                        type: "text",
+                        text: `[System Note: This is the final part ${chunks.length} of ${chunks.length} of the user's prompt payload. You may now process the full request.]\n\n${chunks[chunks.length - 1]}`
+                      }
+                    ],
+                    ...(isReadOnlyGeminiCapability(capability) ? {
+                      generationConfig: {
+                        temperature: defaultTemperature
+                      }
+                    } : {})
+                  }) as Promise<GeminiPromptResponse>
+                ),
+                combinedAbortSignal,
+                async () => {
+                  promptActivity.stop();
+                  if (activeStdinMonitor) {
+                    activeStdinMonitor.stop();
+                    activeStdinMonitor = null;
+                  }
+                  await invalidateSession(scopedState, session);
+                },
+                [
+                  "Gemini ACP prompt was aborted",
+                  `capability=${capability}`,
+                  `workflowStage=${context.workflowStage}`,
+                  `model=${modelId}`
+                ].join(" · ")
+              );
+            } else {
+              promptResult = await withAbort(
+                promptActivity.wrap(
+                  session.connection.prompt({
+                    sessionId: session.sessionId,
+                    prompt: [
+                      {
+                        type: "text",
+                        text: promptText
+                      }
+                    ],
+                    ...(isReadOnlyGeminiCapability(capability) ? {
+                      generationConfig: {
+                        temperature: defaultTemperature
+                      }
+                    } : {})
+                  }) as Promise<GeminiPromptResponse>
+                ),
+                combinedAbortSignal,
+                async () => {
+                  promptActivity.stop();
+                  if (activeStdinMonitor) {
+                    activeStdinMonitor.stop();
+                    activeStdinMonitor = null;
+                  }
+                  await invalidateSession(scopedState, session);
+                },
+                [
+                  "Gemini ACP prompt was aborted",
+                  `capability=${capability}`,
+                  `workflowStage=${context.workflowStage}`,
+                  `model=${modelId}`
+                ].join(" · ")
+              );
+            }
 
             (activeStdinMonitor as StdinWaitMonitorHandle | null)?.stop();
             activeStdinMonitor = null;

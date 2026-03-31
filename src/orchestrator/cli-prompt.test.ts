@@ -82,6 +82,7 @@ function createContext(model: ModelRef): ModelInvocationContext {
       }
     },
     assignedModel: model,
+    role: "orchestrator",
     outputLanguage: "en",
     abortSignal: new AbortController().signal,
     workflowStage: "task_orchestration",
@@ -113,7 +114,13 @@ function createContext(model: ModelRef): ModelInvocationContext {
       contradictions: [],
       updatedAt: "2026-03-19T00:00:00.000Z"
     },
-    evidenceBundles: []
+    evidenceBundles: [],
+    sessionScopeHint: {
+      ownerTaskId: "node-root",
+      ownerTaskTitle: "Root Task",
+      ownerTaskObjective: "Add a compact quota indicator",
+      ownerTaskLineage: ["Root Task: Add a compact quota indicator"]
+    }
   };
 }
 
@@ -188,6 +195,22 @@ test("task orchestration gather prompt forbids broad search before checking memo
   assert.match(
     prompt,
     /Do not spend focused gather budget on existence-only commands such as find-by-name sweeps, plain ls path checks, recursive ls listings, or broad \*\.md\/settings\.json searches/
+  );
+  assert.match(
+    prompt,
+    /include the exact excerpt in snippets with file\/source location and connect it through references\./
+  );
+  assert.match(
+    prompt,
+    /each materially relevant file or symbol target should usually contribute at least one anchored snippet\/reference pair\./
+  );
+  assert.match(
+    prompt,
+    /"snippets"\?: Array</
+  );
+  assert.match(
+    prompt,
+    /"references"\?: Array</
   );
 });
 
@@ -334,6 +357,9 @@ test("task orchestration concrete plan prompt includes a lossless evidence ledge
   const envelope = extractCliPromptEnvelope(prompt);
   assert.equal(envelope.evidenceBundles[0]?.summary, "Renderer quota wiring evidence");
   assert.equal(envelope.evidenceBundles[0]?.facts[0], "renderer/app.ts reads quota data from the preload bridge response.");
+  assert.equal(envelope.evidenceBundles[0]?.snippetCount, 1);
+  assert.equal(envelope.evidenceBundles[0]?.referenceCount, 1);
+  assert.equal(envelope.evidenceBundles[0]?.snippetTargets?.[0], "src/renderer/app.ts");
   assert.equal(envelope.evidenceLedger?.[0]?.id, "bundle-1");
   assert.equal(envelope.evidenceLedger?.[0]?.facts[0]?.referenceIds[0], "ref-1");
   assert.equal(envelope.evidenceLedger?.[0]?.snippets[0]?.content, "const quota = await window.tasksaw.getQuota();");
@@ -341,6 +367,95 @@ test("task orchestration concrete plan prompt includes a lossless evidence ledge
   assert.match(
     prompt,
     /Use evidenceLedger as the canonical, lossless gather-to-plan handoff\./
+  );
+  assert.match(
+    prompt,
+    /Check evidenceBundles\.snippetCount and snippetTargets first to see whether exact file or payload excerpts were actually gathered/
+  );
+  assert.match(
+    prompt,
+    /If execution depends on exact file structure, DOM markup, config keys, selectors, API payloads, command output, or error text and evidenceLedger lacks the relevant anchored snippets or raw excerpts, set needsAdditionalGather=true/
+  );
+});
+
+test("task orchestration concrete plan prompt tolerates malformed referenceIds in evidence bundles", () => {
+  const prompt = buildCliPrompt("concretePlan", {
+    ...createContext(TEST_MODEL),
+    evidenceBundles: [
+      {
+        id: "bundle-malformed",
+        runId: "run-test",
+        nodeId: "node-root",
+        summary: "Loose gather output",
+        facts: [
+          {
+            id: "fact-1",
+            statement: "renderer/app.ts contains the run button listener",
+            confidence: "high",
+            referenceIds: "ref-run" as unknown as string[]
+          }
+        ],
+        hypotheses: [],
+        unknowns: [],
+        relevantTargets: [{ filePath: "src/renderer/app.ts" }],
+        snippets: [],
+        references: [],
+        confidence: "high",
+        createdAt: "2026-03-19T00:00:00.000Z",
+        updatedAt: "2026-03-19T00:00:00.000Z"
+      }
+    ] as ModelInvocationContext["evidenceBundles"]
+  });
+
+  const envelope = extractCliPromptEnvelope(prompt);
+  assert.deepEqual(envelope.evidenceLedger?.[0]?.facts[0]?.referenceIds, ["ref-run"]);
+});
+
+test("gather prompt separates the read-only stage objective from downstream task intent", () => {
+  const baseContext = createContext(TEST_MODEL);
+  const prompt = buildCliPrompt("gather", {
+    ...baseContext,
+    run: {
+      ...baseContext.run,
+      goal: "Before refactoring src/renderer/app.ts, write tests from src/renderer/app_test_plan.md, install Jest if missing, and create 300 standalone tests."
+    },
+    node: {
+      ...baseContext.node,
+      id: "node-gather",
+      parentId: "node-root",
+      role: "stage",
+      title: "Gather",
+      objective: "Collect only the file, symbol, and evidence findings needed before the next concrete plan for the current task."
+    },
+    sessionScopeHint: {
+      ownerTaskId: "node-root",
+      ownerTaskTitle: "Root Task",
+      ownerTaskObjective: "Before refactoring src/renderer/app.ts, write tests from src/renderer/app_test_plan.md, install Jest if missing, and create 300 standalone tests.",
+      ownerTaskLineage: [
+        "Root Task: Before refactoring src/renderer/app.ts, write tests from src/renderer/app_test_plan.md, install Jest if missing, and create 300 standalone tests."
+      ]
+    }
+  });
+
+  const envelope = extractCliPromptEnvelope(prompt);
+  assert.equal(
+    envelope.objective,
+    "Collect only the file, symbol, and evidence findings needed before the next concrete plan for the current task."
+  );
+  assert.equal(
+    envelope.taskScope?.objective,
+    "Before refactoring src/renderer/app.ts, write tests from src/renderer/app_test_plan.md, install Jest if missing, and create 300 standalone tests."
+  );
+  assert.match(prompt, /Treat taskScope\.objective as downstream task intent only\./);
+  assert.match(prompt, /return it in nextObjectives\.concretePlan\./);
+});
+
+test("task orchestration abstract plan prompt asks for snippet-level evidence when structure matters", () => {
+  const prompt = buildCliPrompt("abstractPlan", createContext(TEST_MODEL));
+
+  assert.match(
+    prompt,
+    /If downstream planning will depend on exact code, DOM, config, selector, payload, or error text, say so explicitly in evidenceRequirements and ask gather for a line-anchored snippet or raw excerpt instead of a summary\./
   );
 });
 

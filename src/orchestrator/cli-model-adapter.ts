@@ -11,6 +11,7 @@ import {
   OrchestratorModelAdapter,
   RehydrateResult,
   ReviewResult,
+  StageObjectiveHints,
   VerifyResult
 } from "./model-adapter";
 import {
@@ -124,6 +125,16 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
     context: ModelInvocationContext
   ): Promise<TResult> {
     const prompt = buildCliPrompt(capability, context);
+
+    context.reportModelInvocation?.({
+      role: context.role,
+      capability,
+      modelId: context.assignedModel.id,
+      provider: context.assignedModel.provider,
+      model: context.assignedModel.model,
+      prompt
+    });
+
     let activePrompt = prompt;
     let stdout = "";
     let stderr = "";
@@ -500,6 +511,9 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
           targetsToInspect: this.normalizeStringArray(record.targetsToInspect ?? record.targets ?? record.filesToInspect),
           evidenceRequirements: this.normalizeStringArray(
             record.evidenceRequirements ?? record.questions ?? record.openQuestions
+          ),
+          nextObjectives: this.normalizeStageObjectiveHints(
+            record.nextObjectives ?? record.stageObjectives ?? record.objectiveHints
           )
         } satisfies AbstractPlanResult;
 
@@ -509,6 +523,9 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
           evidenceBundles: this.normalizeEvidenceBundles(record),
           projectStructure: this.normalizeProjectStructure(
             record.projectStructure ?? record.structure ?? record.repositoryStructure
+          ),
+          nextObjectives: this.normalizeStageObjectiveHints(
+            record.nextObjectives ?? record.stageObjectives ?? record.objectiveHints
           )
         } satisfies GatherResult;
 
@@ -537,6 +554,9 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
           ),
           projectStructureContradictions: this.normalizeStringArray(
             record.projectStructureContradictions ?? record.structureContradictions ?? record.contradictions
+          ),
+          nextObjectives: this.normalizeStageObjectiveHints(
+            record.nextObjectives ?? record.stageObjectives ?? record.objectiveHints
           )
         } satisfies ConcretePlanResult;
 
@@ -564,7 +584,10 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
           summary,
           outputs: outputs.length > 0 ? outputs : (completed ? [summary] : []),
           completed,
-          blockedReason
+          blockedReason,
+          nextObjectives: this.normalizeStageObjectiveHints(
+            record.nextObjectives ?? record.stageObjectives ?? record.objectiveHints
+          )
         } satisfies ExecuteResult;
       }
 
@@ -573,7 +596,10 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
         return {
           summary: this.readString(record.summary, "No verification summary returned"),
           passed: this.inferVerifyPassed(record, findings),
-          findings
+          findings,
+          nextObjectives: this.normalizeStageObjectiveHints(
+            record.nextObjectives ?? record.stageObjectives ?? record.objectiveHints
+          )
         } satisfies VerifyResult;
       }
 
@@ -628,6 +654,23 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
     }
 
     return [];
+  }
+
+  private normalizeStageObjectiveHints(value: unknown): StageObjectiveHints | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return undefined;
+    }
+
+    const record = value as Record<string, unknown>;
+    const nextObjectives: StageObjectiveHints = {};
+    for (const key of ["abstractPlan", "gather", "concretePlan", "execute", "verify", "review"] as const) {
+      const hint = this.readOptionalString(record[key]);
+      if (hint) {
+        nextObjectives[key] = hint;
+      }
+    }
+
+    return Object.keys(nextObjectives).length > 0 ? nextObjectives : undefined;
   }
 
   private normalizeChildTasks(value: unknown): OrchestratorChildTask[] {
@@ -701,22 +744,12 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
         return {
           id: this.readString(bundleRecord.id, `bundle-${index + 1}`),
           summary: this.readString(bundleRecord.summary, "Collected evidence"),
-          facts: (Array.isArray(bundleRecord.facts) ? bundleRecord.facts : []) as EvidenceBundleDraft["facts"],
-          hypotheses: (Array.isArray(bundleRecord.hypotheses)
-            ? bundleRecord.hypotheses
-            : []) as EvidenceBundleDraft["hypotheses"],
-          unknowns: (Array.isArray(bundleRecord.unknowns)
-            ? bundleRecord.unknowns
-            : []) as EvidenceBundleDraft["unknowns"],
-          relevantTargets: (Array.isArray(bundleRecord.relevantTargets)
-            ? bundleRecord.relevantTargets
-            : []) as EvidenceBundleDraft["relevantTargets"],
-          snippets: (Array.isArray(bundleRecord.snippets)
-            ? bundleRecord.snippets
-            : []) as EvidenceBundleDraft["snippets"],
-          references: (Array.isArray(bundleRecord.references)
-            ? bundleRecord.references
-            : []) as EvidenceBundleDraft["references"],
+          facts: this.normalizeEvidenceFacts(bundleRecord.facts),
+          hypotheses: this.normalizeEvidenceHypotheses(bundleRecord.hypotheses),
+          unknowns: this.normalizeEvidenceUnknowns(bundleRecord.unknowns),
+          relevantTargets: this.normalizeEvidenceTargets(bundleRecord.relevantTargets),
+          snippets: this.normalizeEvidenceSnippets(bundleRecord.snippets),
+          references: this.normalizeEvidenceReferences(bundleRecord.references),
           confidence: this.normalizeConfidence(bundleRecord.confidence)
         } satisfies EvidenceBundleDraft;
       });
@@ -895,6 +928,247 @@ export class CliModelAdapter implements OrchestratorModelAdapter {
     }
 
     return reports;
+  }
+
+  private normalizeEvidenceFacts(value: unknown): EvidenceBundleDraft["facts"] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value.flatMap((item, index) => {
+      if (typeof item === "string") {
+        const statement = item.trim();
+        return statement.length > 0
+          ? [{
+              id: `fact-${index + 1}`,
+              statement,
+              confidence: "mixed" as const,
+              referenceIds: []
+            }]
+          : [];
+      }
+
+      const record = this.asRecord(item);
+      const statement = this.readOptionalString(record.statement ?? record.fact ?? record.text ?? record.content ?? record.summary);
+      if (!statement) {
+        return [];
+      }
+
+      return [{
+        id: this.readString(record.id, `fact-${index + 1}`),
+        statement,
+        confidence: this.normalizeConfidence(record.confidence),
+        referenceIds: this.normalizeStringArray(record.referenceIds)
+      }];
+    });
+  }
+
+  private normalizeEvidenceHypotheses(value: unknown): EvidenceBundleDraft["hypotheses"] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value.flatMap((item, index) => {
+      if (typeof item === "string") {
+        const statement = item.trim();
+        return statement.length > 0
+          ? [{
+              id: `hypothesis-${index + 1}`,
+              statement,
+              confidence: "mixed" as const,
+              referenceIds: []
+            }]
+          : [];
+      }
+
+      const record = this.asRecord(item);
+      const statement = this.readOptionalString(record.statement ?? record.hypothesis ?? record.text ?? record.content ?? record.summary);
+      if (!statement) {
+        return [];
+      }
+
+      return [{
+        id: this.readString(record.id, `hypothesis-${index + 1}`),
+        statement,
+        confidence: this.normalizeConfidence(record.confidence),
+        referenceIds: this.normalizeStringArray(record.referenceIds)
+      }];
+    });
+  }
+
+  private normalizeEvidenceUnknowns(value: unknown): EvidenceBundleDraft["unknowns"] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value.flatMap((item, index) => {
+      if (typeof item === "string") {
+        const question = item.trim();
+        return question.length > 0
+          ? [{
+              id: `unknown-${index + 1}`,
+              question,
+              impact: "medium" as const,
+              referenceIds: []
+            }]
+          : [];
+      }
+
+      const record = this.asRecord(item);
+      const question = this.readOptionalString(record.question ?? record.unknown ?? record.text ?? record.summary);
+      if (!question) {
+        return [];
+      }
+
+      return [{
+        id: this.readString(record.id, `unknown-${index + 1}`),
+        question,
+        impact: record.impact === "low" || record.impact === "medium" || record.impact === "high"
+          ? record.impact
+          : "medium",
+        referenceIds: this.normalizeStringArray(record.referenceIds)
+      }];
+    });
+  }
+
+  private normalizeEvidenceTargets(value: unknown): EvidenceBundleDraft["relevantTargets"] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    const targets: NonNullable<EvidenceBundleDraft["relevantTargets"]> = [];
+
+    for (const item of value) {
+      if (typeof item === "string") {
+        const text = item.trim();
+        if (text.length > 0) {
+          targets.push({ note: text });
+        }
+        continue;
+      }
+
+      const record = this.asRecord(item);
+      const filePath = this.readOptionalString(record.filePath ?? record.path);
+      const symbol = this.readOptionalString(record.symbol ?? record.name);
+      const note = this.readOptionalString(record.note ?? record.summary ?? record.description);
+      if (!filePath && !symbol && !note) {
+        continue;
+      }
+
+      targets.push({ filePath, symbol, note });
+    }
+
+    return targets;
+  }
+
+  private normalizeEvidenceSnippets(value: unknown): EvidenceBundleDraft["snippets"] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    const snippets: NonNullable<EvidenceBundleDraft["snippets"]> = [];
+
+    for (const [index, item] of value.entries()) {
+      if (typeof item === "string") {
+        const content = item.trim();
+        if (content.length > 0) {
+          snippets.push({
+              id: `snippet-${index + 1}`,
+              kind: "text" as const,
+              content
+            });
+        }
+        continue;
+      }
+
+      const record = this.asRecord(item);
+      const content = this.readOptionalString(record.content ?? record.text ?? record.snippet);
+      if (!content) {
+        continue;
+      }
+
+      const kind = record.kind === "code" || record.kind === "text" || record.kind === "terminal" || record.kind === "search_result"
+        ? record.kind
+        : "text";
+
+      snippets.push({
+        id: this.readString(record.id, `snippet-${index + 1}`),
+        kind,
+        content,
+        location: this.normalizeEvidenceLocation(record.location),
+        referenceId: this.readOptionalString(record.referenceId),
+        rationale: this.readOptionalString(record.rationale)
+      });
+    }
+
+    return snippets;
+  }
+
+  private normalizeEvidenceReferences(value: unknown): EvidenceBundleDraft["references"] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    const references: NonNullable<EvidenceBundleDraft["references"]> = [];
+
+    for (const [index, item] of value.entries()) {
+      if (typeof item === "string") {
+        const note = item.trim();
+        if (note.length > 0) {
+          references.push({
+              id: `reference-${index + 1}`,
+              sourceType: "other" as const,
+              note
+            });
+        }
+        continue;
+      }
+
+      const record = this.asRecord(item);
+      const sourceType = record.sourceType === "file"
+        || record.sourceType === "terminal"
+        || record.sourceType === "web"
+        || record.sourceType === "search"
+        || record.sourceType === "human"
+        || record.sourceType === "generated"
+        || record.sourceType === "other"
+        ? record.sourceType
+        : "other";
+      const location = this.normalizeEvidenceLocation(record.location);
+      const note = this.readOptionalString(record.note ?? record.summary ?? record.description);
+      if (!location && !note) {
+        continue;
+      }
+
+      references.push({
+        id: this.readString(record.id, `reference-${index + 1}`),
+        sourceType,
+        location,
+        note
+      });
+    }
+
+    return references;
+  }
+
+  private normalizeEvidenceLocation(value: unknown): { filePath?: string; symbol?: string; line?: number; column?: number; uri?: string; label?: string } | undefined {
+    const record = this.asOptionalRecord(value);
+    if (!record) {
+      return undefined;
+    }
+
+    const filePath = this.readOptionalString(record.filePath ?? record.path);
+    const symbol = this.readOptionalString(record.symbol);
+    const uri = this.readOptionalString(record.uri);
+    const label = this.readOptionalString(record.label);
+    const line = typeof record.line === "number" && Number.isFinite(record.line) ? record.line : undefined;
+    const column = typeof record.column === "number" && Number.isFinite(record.column) ? record.column : undefined;
+
+    if (!filePath && !symbol && !uri && !label && line === undefined && column === undefined) {
+      return undefined;
+    }
+
+    return { filePath, symbol, line, column, uri, label };
   }
 }
 

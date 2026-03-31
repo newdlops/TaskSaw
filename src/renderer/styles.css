@@ -1584,6 +1584,8 @@ body[data-has-sessions="false"] #sidebar {
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+  max-width: 800px;
+  flex: 1;
   font-size: 12px;
 }
 
@@ -1973,6 +1975,20 @@ body[data-has-sessions="false"] #sidebar {
     color-mix(in srgb, var(--surface-strong) 96%, transparent);
   box-shadow: var(--shadow);
   pointer-events: auto;
+}
+
+.toast-card-error {
+  border-color: var(--error);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--error) 10%, transparent), transparent 60%),
+    color-mix(in srgb, var(--surface-strong) 96%, transparent);
+}
+
+.toast-card-success {
+  border-color: var(--success);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--success) 10%, transparent), transparent 60%),
+    color-mix(in srgb, var(--surface-strong) 96%, transparent);
 }
 
 .toast-card-header {

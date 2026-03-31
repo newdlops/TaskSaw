@@ -123,6 +123,17 @@ test("emits live events to subscribers", () => {
   assert.deepEqual(events, ["run_created", "node_created", "phase_transition"]);
 });
 
+test("records the resumed node id on continued runs", () => {
+  const engine = new OrchestratorEngine();
+  const { run } = engine.createRun({
+    goal: "Resume from a selected node",
+    continuedFromNodeId: "node-selected-7"
+  });
+
+  assert.equal(run.continuedFromNodeId, "node-selected-7");
+  assert.equal(engine.listEvents(run.id)[0]?.payload.continuedFromNodeId, "node-selected-7");
+});
+
 test("pauses a running run without changing the active node phase", () => {
   const engine = new OrchestratorEngine();
   const { run, rootNode } = engine.createRun({

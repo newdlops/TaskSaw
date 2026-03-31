@@ -90,6 +90,7 @@ export type RunOrchestratorInput = {
   geminiRegion?: string | null;
   workspacePath?: string | null;
   continueFromRunId?: string | null;
+  continueFromNodeId?: string | null;
   workspaceAccessDialog?: DirectoryDialogOptions;
 };
 

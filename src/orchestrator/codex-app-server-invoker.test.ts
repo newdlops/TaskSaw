@@ -84,6 +84,7 @@ function createContext(model: ModelRef): ModelInvocationContext {
       }
     },
     assignedModel: model,
+    role: "orchestrator",
     outputLanguage: "en",
     abortSignal: new AbortController().signal,
     workflowStage: "task_orchestration",

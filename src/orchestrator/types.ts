@@ -394,6 +394,7 @@ export type Run = {
   status: RunStatus;
   rootNodeId: string;
   continuedFromRunId?: string | null;
+  continuedFromNodeId?: string | null;
   config: OrchestratorConfig;
   createdAt: string;
   updatedAt: string;
@@ -482,6 +483,7 @@ export type CreateRunInput = {
   acceptanceCriteria?: AcceptanceCriteria;
   executionBudget?: Partial<ExecutionBudget>;
   continuation?: ContinuationSeed;
+  continuedFromNodeId?: string | null;
 };
 
 export type CreateChildNodeInput = {

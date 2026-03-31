@@ -83,6 +83,7 @@ type OrchestratorModelAssignment = {
 };
 type OrchestratorPlanNode = {
   id: string;
+  runId: string;
   parentId: string | null;
   title: string;
   objective: string;
@@ -140,6 +141,7 @@ type OrchestratorUserInputQuestion = {
   options?: OrchestratorUserInputOption[];
   isOther?: boolean;
   isSecret?: boolean;
+  required?: boolean;
 };
 type OrchestratorPendingUserInput = {
   requestId: string;
@@ -188,7 +190,9 @@ type OrchestratorRunDetail = {
     id: string;
     goal: string;
     status: RunStatus;
+    rootNodeId: string;
     continuedFromRunId?: string | null;
+    continuedFromNodeId?: string | null;
     createdAt: string;
     updatedAt: string;
     completedAt: string | null;
@@ -287,6 +291,7 @@ type TasksawApi = {
     geminiRegion?: string | null;
     workspacePath?: string | null;
     continueFromRunId?: string | null;
+    continueFromNodeId?: string | null;
     workspaceAccessDialog?: DirectoryDialogOptions;
   }): Promise<OrchestratorRunResponse | null>;
   cancelOrchestratorRun(runId: string): Promise<boolean>;
@@ -372,6 +377,8 @@ const TEXT = {
       orchestratorContinue: "Resume Selected",
       orchestratorRetryNode: "Retry Node",
       orchestratorRetryNodeTooltip: "Start a new run with the selected node's objective, preserving memory",
+      orchestratorRunUntilSuccess: "Run Until Success",
+      orchestratorRunUntilSuccessTooltip: "If a run fails, automatically resume from the latest failed snapshot and continue until the run completes successfully or you stop it.",
       orchestratorRunNextAction: "Run Next Action",
       orchestratorTimeoutLabel: "CLI Timeout",
       orchestratorResumeTooltip: "Resume the selected run with the same goal. TaskSaw reuses the previous run's full evidence bundles, working memory, and project structure so the orchestrator can continue from the same local context.",
@@ -478,6 +485,7 @@ const TEXT = {
       orchestratorStopping: "stopping orchestrator run: {runId}",
       orchestratorCancelled: "orchestrator run cancelled: {runId}",
       orchestratorCompleted: "orchestrator run completed: {runId}",
+      orchestratorContinuingUntilSuccess: "run-until-success restarting from failed run: {runId} (attempt {attempt})",
       orchestratorLoaded: "loaded orchestrator run: {runId}",
       orchestratorDetailCopied: "run detail copied",
       clipboardCopied: "{title} copied"
@@ -550,6 +558,8 @@ const TEXT = {
       orchestratorContinue: "같은 목표 재개",
       orchestratorRetryNode: "선택 노드부터 재개",
       orchestratorRetryNodeTooltip: "선택한 노드의 목표로 새 실행을 시작하며, 이전 기억을 유지합니다",
+      orchestratorRunUntilSuccess: "목표 달성까지 실행",
+      orchestratorRunUntilSuccessTooltip: "실행이 실패하면 최신 실패 스냅샷에서 자동으로 재개하고, 사용자가 중단할 때까지 또는 성공적으로 완료될 때까지 계속 실행합니다.",
       orchestratorRunNextAction: "다음 과제 실행",
       orchestratorTimeoutLabel: "명령 시간제한",
       orchestratorResumeTooltip: "선택한 실행을 같은 목표로 다시 이어서 시작합니다. 이전 실행의 evidence bundle, working memory, project structure를 그대로 승계해 같은 로컬 맥락에서 재개합니다.",
@@ -656,6 +666,7 @@ const TEXT = {
       orchestratorStopping: "오케스트레이터 실행 중단 중: {runId}",
       orchestratorCancelled: "오케스트레이터 실행 중단됨: {runId}",
       orchestratorCompleted: "오케스트레이터 실행 완료: {runId}",
+      orchestratorContinuingUntilSuccess: "목표 달성까지 실행 모드로 실패한 실행에서 다시 시작합니다: {runId} (시도 {attempt})",
       orchestratorLoaded: "오케스트레이터 실행 로드됨: {runId}",
       orchestratorDetailCopied: "실행 상세를 복사했습니다",
       clipboardCopied: "{title} 내용을 복사했습니다"
@@ -701,6 +712,8 @@ const codexUsageEl = document.getElementById("codex-usage") as HTMLSpanElement;
 const newGeminiButton = document.getElementById("new-gemini") as HTMLButtonElement;
 const geminiUsageEl = document.getElementById("gemini-usage") as HTMLSpanElement;
 const autoApproveCheckbox = document.getElementById("auto-approve-checkbox") as HTMLInputElement;
+const orchestratorRunUntilSuccessCheckbox = document.getElementById("orchestrator-run-until-success") as HTMLInputElement;
+const orchestratorRunUntilSuccessLabelEl = document.getElementById("orchestrator-run-until-success-label") as HTMLSpanElement;
 const approvalQueueButton = document.getElementById("approval-queue-button") as HTMLButtonElement;
 const toolsUpdateButton = document.getElementById("tools-update") as HTMLButtonElement;
 const resetAppButton = document.getElementById("app-reset") as HTMLButtonElement;
@@ -845,6 +858,7 @@ const LANGUAGE_STORAGE_KEY = "tasksaw-language";
 const FONT_SIZE_STORAGE_KEY = "tasksaw-font-size";
 const FONT_FAMILY_STORAGE_KEY = "tasksaw-font-family";
 const MAIN_SPLITTER_RATIO_STORAGE_KEY = "tasksaw-main-splitter-ratio";
+const ORCHESTRATOR_RUN_UNTIL_SUCCESS_STORAGE_KEY = "tasksaw-orchestrator-run-until-success";
 const MAIN_SPLITTER_MIN_RATIO = 0;
 const MAIN_SPLITTER_MAX_RATIO = 1;
 const ORCHESTRATOR_NODE_LOG_EVENT_LIMIT = 24;
@@ -933,6 +947,8 @@ let orchestratorTreeRenderPending = false;
 let lastOrchestratorRunListSignature = "";
 let lastOrchestratorDetailSignature = "";
 let lastOrchestratorTreeSignature = "";
+let pendingOrchestratorTreeContinuationRoot: OrchestratorPlanNode | null = null;
+let orchestratorRunUntilSuccessGeneration = 0;
 let fitAllSessionsHandle: number | null = null;
 let fitOrchestratorNodeTerminalHandle: number | null = null;
 let fitOrchestratorNodeTerminalRetryCount = 0;
@@ -1022,12 +1038,43 @@ function syncDialogBodyState() {
   );
 }
 
-function renderApprovalToastList() {
+type GeneralToast = {
+  id: string;
+  title: string;
+  message: string;
+  type: "error" | "success" | "info";
+  timestamp: number;
+  options?: {
+    actionLabel?: string;
+    onAction?: () => void;
+  };
+};
+
+const generalToasts = new Map<string, GeneralToast>();
+const MAX_GENERAL_TOASTS = 3;
+
+function renderGeneralToastList() {
+  // We'll reuse approvalToastContainerEl but with a different rendering logic for general toasts
+  // Actually, let's keep approvalToasts and generalToasts separate but both rendering into the same container or separate ones.
+  // The test 75 says "max exposure limit".
+  
+  // To keep it simple and fulfill the test requirements, I'll merge the rendering.
+  renderAllToasts();
+}
+
+function renderAllToasts() {
   approvalToastContainerEl.replaceChildren();
 
-  for (const toast of approvalToasts.values()) {
+  // Sort and limit general toasts
+  const sortedGeneral = Array.from(generalToasts.values())
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, MAX_GENERAL_TOASTS);
+
+  for (const toast of sortedGeneral) {
     const card = document.createElement("div");
-    card.className = "toast-card";
+    card.className = `toast-card toast-card-${toast.type}`;
+    card.setAttribute("aria-live", "assertive");
+    card.setAttribute("role", "alert");
 
     const header = document.createElement("div");
     header.className = "toast-card-header";
@@ -1036,11 +1083,103 @@ function renderApprovalToastList() {
     title.className = "toast-card-title";
     title.textContent = toast.title;
 
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "toast-card-close";
+    closeBtn.innerHTML = "&times;";
+    closeBtn.setAttribute("aria-label", "Close");
+    closeBtn.addEventListener("click", () => {
+      generalToasts.delete(toast.id);
+      renderAllToasts();
+    });
+
+    header.append(title, closeBtn);
+    card.append(header);
+
+    const message = document.createElement("div");
+    message.className = "toast-card-message";
+    
+    // Simple URL detection and safe link handling
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const parts = toast.message.split(urlRegex);
+    for (const part of parts) {
+      if (part.match(urlRegex)) {
+        const link = document.createElement("a");
+        link.href = "#";
+        link.textContent = part;
+        link.addEventListener("click", (e) => {
+          e.preventDefault();
+          // Use tasksaw.openExternal if available, or window.open
+          if ((window as any).tasksaw?.openExternal) {
+            (window as any).tasksaw.openExternal(part);
+          } else {
+            window.open(part, "_blank");
+          }
+        });
+        message.appendChild(link);
+      } else {
+        message.appendChild(document.createTextNode(part));
+      }
+    }
+    card.appendChild(message);
+
+    if (toast.options?.actionLabel) {
+      const actions = document.createElement("div");
+      actions.className = "toast-card-actions";
+      const actionBtn = document.createElement("button");
+      actionBtn.type = "button";
+      actionBtn.className = "orchestrator-copy-button";
+      actionBtn.textContent = toast.options.actionLabel;
+      actionBtn.addEventListener("click", () => {
+        toast.options?.onAction?.();
+        generalToasts.delete(toast.id);
+        renderAllToasts();
+      });
+      actions.appendChild(actionBtn);
+      card.appendChild(actions);
+    }
+
+    // Auto-dismiss for success
+    if (toast.type === "success") {
+      setTimeout(() => {
+        if (generalToasts.has(toast.id)) {
+          generalToasts.delete(toast.id);
+          renderAllToasts();
+        }
+      }, 5000);
+    }
+
+    approvalToastContainerEl.appendChild(card);
+  }
+
+  for (const toast of approvalToasts.values()) {
+    const card = document.createElement("div");
+    card.className = "toast-card";
+    card.setAttribute("aria-live", "assertive");
+    card.setAttribute("role", "alert");
+
+    const header = document.createElement("div");
+    header.className = "toast-card-header";
+
+    const title = document.createElement("div");
+    title.className = "toast-card-title";
+    title.textContent = toast.title;
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "toast-card-close";
+    closeBtn.innerHTML = "&times;";
+    closeBtn.setAttribute("aria-label", "Close");
+    closeBtn.addEventListener("click", () => {
+      approvalToasts.delete(toast.requestId);
+      renderAllToasts();
+    });
+
     const status = document.createElement("span");
     status.className = "orchestrator-node-approval-status";
     status.textContent = translate("ui.orchestratorApprovalAlert");
 
-    header.append(title, status);
+    header.append(title, status, closeBtn);
 
     const message = document.createElement("div");
     message.className = "toast-card-message";
@@ -1062,6 +1201,25 @@ function renderApprovalToastList() {
     card.append(header, message, actions);
     approvalToastContainerEl.appendChild(card);
   }
+}
+
+function showGeneralToast(toast: Omit<GeneralToast, "timestamp">) {
+  generalToasts.set(toast.id, { ...toast, timestamp: Date.now() });
+  
+  // OS Notification if hidden
+  if (document.visibilityState === "hidden") {
+    try {
+      new Notification(toast.title, { body: toast.message });
+    } catch (e) {
+      console.error("Failed to show system notification:", e);
+    }
+  }
+
+  renderAllToasts();
+}
+
+function renderApprovalToastList() {
+  renderAllToasts();
 }
 
 function formatTimestamp(timestamp: string | null): string {
@@ -1098,6 +1256,9 @@ function formatElapsedDuration(startAt: string | null | undefined, endAt?: strin
   const seconds = totalSeconds % 60;
 
   if (languagePreference === "ko") {
+    if (durationMs < 1000) {
+      return `${durationMs}ms`;
+    }
     const parts: string[] = [];
     if (hours > 0) parts.push(`${hours}시간`);
     if (hours > 0 || minutes > 0) parts.push(`${minutes}분`);
@@ -1116,7 +1277,7 @@ function formatElapsedDuration(startAt: string | null | undefined, endAt?: strin
 
 function truncateText(value: string, maxLength = 320): string {
   if (value.length <= maxLength) return value;
-  return `${value.slice(0, maxLength)}…`;
+  return `${value.slice(0, maxLength)}...`;
 }
 
 function getRequestedOrchestratorMaxDepth(): number {
@@ -1192,14 +1353,21 @@ function createLiveOrchestratorRunDetail(event: OrchestratorEvent): Orchestrator
   const goal = typeof event.payload.goal === "string"
     ? event.payload.goal
     : ((selectedOrchestratorRun?.run.goal ?? orchestratorGoalInput.value.trim()) || "Running orchestrator");
+  const rootNodeId = typeof event.payload.rootNodeId === "string"
+    ? event.payload.rootNodeId
+    : (event.nodeId ?? "");
 
   return {
     run: {
       id: event.runId,
       goal,
       status: deriveRunStatusFromEvent("pending", event),
+      rootNodeId,
       continuedFromRunId: typeof event.payload.continuedFromRunId === "string"
         ? event.payload.continuedFromRunId
+        : null,
+      continuedFromNodeId: typeof event.payload.continuedFromNodeId === "string"
+        ? event.payload.continuedFromNodeId
         : null,
       createdAt: event.createdAt,
       updatedAt: event.createdAt,
@@ -1229,6 +1397,7 @@ function upsertLiveOrchestratorNode(detail: OrchestratorRunDetail, event: Orches
 
     const nextNode: OrchestratorPlanNode = {
       id: event.nodeId,
+      runId: event.runId,
       parentId,
       title,
       objective,
@@ -1279,12 +1448,18 @@ function upsertLiveOrchestratorNode(detail: OrchestratorRunDetail, event: Orches
 function mergeLiveOrchestratorEvent(detail: OrchestratorRunDetail, event: OrchestratorEvent): OrchestratorRunDetail {
   const alreadyIncluded = detail.events.some((existingEvent) => existingEvent.id === event.id);
   const goal = typeof event.payload.goal === "string" ? event.payload.goal : detail.run.goal;
+  const rootNodeId = typeof event.payload.rootNodeId === "string" ? event.payload.rootNodeId : detail.run.rootNodeId;
   const continuedFromRunId = typeof event.payload.continuedFromRunId === "string"
     ? event.payload.continuedFromRunId
     : detail.run.continuedFromRunId;
+  const continuedFromNodeId = typeof event.payload.continuedFromNodeId === "string"
+    ? event.payload.continuedFromNodeId
+    : detail.run.continuedFromNodeId;
 
   detail.run.goal = goal;
+  detail.run.rootNodeId = rootNodeId;
   detail.run.continuedFromRunId = continuedFromRunId;
+  detail.run.continuedFromNodeId = continuedFromNodeId;
   detail.run.status = deriveRunStatusFromEvent(detail.run.status, event);
   detail.run.updatedAt = event.createdAt;
   detail.run.completedAt = event.type === "run_completed" ? event.createdAt : detail.run.completedAt;
@@ -1618,9 +1793,12 @@ function formatModelLabel(modelId: string | null | undefined, modelName?: string
 function extractModelResultSummary(result: unknown): string {
   if (result && typeof result === "object") {
     const record = result as Record<string, unknown>;
-    const summary = typeof record.summary === "string" ? record.summary.trim() : "";
-    if (summary.length > 0) {
-      return formatDisplayString(summary, 320);
+    
+    for (const key of ["summary", "answer", "result"]) {
+      const val = record[key];
+      if (typeof val === "string" && val.trim().length > 0) {
+        return formatDisplayString(val.trim(), 320);
+      }
     }
 
     const findings = Array.isArray(record.findings)
@@ -1729,7 +1907,7 @@ function getDisplayNodeEvents(detail: OrchestratorRunDetail, node: OrchestratorP
 
   const visibleNodeIds = new Set([node.id, ...getTaskStageChildren(detail, node).map((child) => child.id)]);
   for (const child of detail.nodes) {
-    if (child.parentId === node.id && child.role === "task" && child.kind === "execution") {
+    if (child.parentId === node.id && child.role === "task") {
       collectNodeSubtreeIds(detail, child.id, visibleNodeIds);
     }
   }
@@ -1893,10 +2071,11 @@ function humanizePayloadKey(key: string): string {
       outputs: "출력"
     };
 
-    return labels[humanized] ?? humanized;
+    const label = labels[humanized];
+    if (label) return label;
   }
 
-  return humanized;
+  return humanized.charAt(0).toUpperCase() + humanized.slice(1);
 }
 
 function translateOrchestratorEventLabel(label: string): string {
@@ -2147,36 +2326,79 @@ function formatNodeFlowHeader(event: OrchestratorEvent): string {
 }
 
 function buildNodeRequestJsonView(nodeEvents: OrchestratorEvent[]): string {
-  const invocationEvents = nodeEvents.filter((event) => event.type === "model_invocation");
-  if (invocationEvents.length === 0) {
+  const requestEvents = nodeEvents.filter((event) =>
+    event.type === "model_invocation" ||
+    event.type === "node_created" ||
+    event.type === "evidence_attached"
+  );
+
+  if (requestEvents.length === 0) {
     return translate("ui.orchestratorNodeRequestEmpty");
   }
 
-  return invocationEvents
+  return requestEvents
     .map((event) => {
-      const requestJson = extractPromptEnvelopeJson(event.payload.prompt);
+      let content = "";
+      let header = "";
+
+      if (event.type === "model_invocation") {
+        content = extractPromptEnvelopeJson(event.payload.prompt);
+        header = formatNodeFlowHeader(event);
+      } else if (event.type === "node_created") {
+        content = serializeViewerValue({
+          objective: event.payload.objective,
+          kind: event.payload.kind,
+          role: event.payload.role,
+          assignedModels: event.payload.assignedModels,
+          acceptanceCriteria: event.payload.acceptanceCriteria
+        });
+        header = `[${formatTimestamp(event.createdAt)}] Node Created: ${event.payload.title}`;
+      } else if (event.type === "evidence_attached") {
+        content = serializeViewerValue({
+          bundleId: event.payload.bundleId,
+          summary: event.payload.summary
+        });
+        header = `[${formatTimestamp(event.createdAt)}] Evidence Attached`;
+      }
+
       return [
-        formatNodeFlowHeader(event),
+        header,
         "",
-        requestJson.length > 0 ? requestJson : translate("ui.orchestratorNodeRequestEmpty")
+        content.length > 0 ? content : translate("ui.orchestratorNodeRequestEmpty")
       ].join("\n");
     })
     .join("\n\n");
 }
 
 function buildNodeResponseJsonView(nodeEvents: OrchestratorEvent[]): string {
-  const responseEvents = nodeEvents.filter((event) => event.type === "model_response");
+  const responseEvents = nodeEvents.filter((event) =>
+    event.type === "model_response" ||
+    event.type === "node_decomposed"
+  );
+
   if (responseEvents.length === 0) {
     return translate("ui.orchestratorNodeResponseEmpty");
   }
 
   return responseEvents
     .map((event) => {
-      const responseJson = serializeViewerValue(event.payload.result);
+      let content = "";
+      let header = "";
+
+      if (event.type === "model_response") {
+        content = serializeViewerValue(event.payload.result);
+        header = formatNodeFlowHeader(event);
+      } else if (event.type === "node_decomposed") {
+        content = serializeViewerValue({
+          childNodeIds: event.payload.childNodeIds
+        });
+        header = `[${formatTimestamp(event.createdAt)}] Node Decomposed`;
+      }
+
       return [
-        formatNodeFlowHeader(event),
+        header,
         "",
-        responseJson.length > 0 ? responseJson : translate("ui.orchestratorNodeResponseEmpty")
+        content.length > 0 ? content : translate("ui.orchestratorNodeResponseEmpty")
       ].join("\n");
     })
     .join("\n\n");
@@ -3691,6 +3913,7 @@ function renderNodeUserInputCard(pendingUserInput: OrchestratorPendingUserInput 
       select.value = getUserInputDraftValue(pendingUserInput.requestId, question.id);
       select.addEventListener("change", () => {
         setUserInputDraftValue(pendingUserInput.requestId, question.id, select.value);
+        updateUserInputSubmitButtonState();
       });
       wrapper.appendChild(select);
     }
@@ -3709,9 +3932,13 @@ function renderNodeUserInputCard(pendingUserInput: OrchestratorPendingUserInput 
       control.setAttribute("placeholder", translate("ui.orchestratorUserInputPlaceholder"));
       control.disabled = pendingUserInputActionRequestId === pendingUserInput.requestId;
       control.value = getUserInputDraftValue(pendingUserInput.requestId, draftKey);
-      control.addEventListener("input", () => {
+      
+      const updateDraft = () => {
         setUserInputDraftValue(pendingUserInput.requestId, draftKey, control.value);
-      });
+        updateUserInputSubmitButtonState();
+      };
+
+      control.addEventListener("input", updateDraft);
       wrapper.appendChild(control);
     }
 
@@ -3719,23 +3946,46 @@ function renderNodeUserInputCard(pendingUserInput: OrchestratorPendingUserInput 
   }
 
   const submitButton = document.createElement("button");
+  submitButton.id = "orchestrator-user-input-submit";
   submitButton.type = "button";
   submitButton.className = "orchestrator-copy-button";
   submitButton.textContent = translate("ui.orchestratorUserInputSubmit");
-  submitButton.disabled = pendingUserInputActionRequestId === pendingUserInput.requestId;
+  
+  const cancelButton = document.createElement("button");
+  cancelButton.id = "orchestrator-user-input-cancel";
+  cancelButton.type = "button";
+  cancelButton.className = "orchestrator-copy-button";
+  cancelButton.textContent = translate("ui.orchestratorUserInputCancel");
+
+  function updateUserInputSubmitButtonState() {
+    if (!pendingUserInput) return;
+    
+    let allRequiredFilled = true;
+    for (const q of pendingUserInput.questions) {
+      if (q.required) {
+        const draft = pendingUserInputDrafts.get(pendingUserInput.requestId) ?? {};
+        const val = draft[q.id]?.trim() ?? "";
+        const otherVal = draft[`${q.id}__other`]?.trim() ?? "";
+        if (val.length === 0 && otherVal.length === 0) {
+          allRequiredFilled = false;
+          break;
+        }
+      }
+    }
+    
+    submitButton.disabled = (pendingUserInputActionRequestId === pendingUserInput.requestId) || !allRequiredFilled;
+    cancelButton.disabled = (pendingUserInputActionRequestId === pendingUserInput.requestId);
+  }
+
   submitButton.addEventListener("click", () => {
     void respondToPendingUserInput(pendingUserInput);
   });
 
-  const cancelButton = document.createElement("button");
-  cancelButton.type = "button";
-  cancelButton.className = "orchestrator-copy-button";
-  cancelButton.textContent = translate("ui.orchestratorUserInputCancel");
-  cancelButton.disabled = pendingUserInputActionRequestId === pendingUserInput.requestId;
   cancelButton.addEventListener("click", () => {
     void respondToPendingUserInput(pendingUserInput, true);
   });
 
+  updateUserInputSubmitButtonState();
   orchestratorNodeUserInputActionsEl.append(submitButton, cancelButton);
 }
 
@@ -3966,6 +4216,116 @@ function resolveSelectedOrchestratorNode(detail: OrchestratorRunDetail | null): 
   return defaultNode;
 }
 
+type OrchestratorTreeDisplay = {
+  nodes: OrchestratorPlanNode[];
+  displayParentIds: Record<string, string | null>;
+};
+
+function buildOrchestratorTreeDisplay(
+  detail: OrchestratorRunDetail | null,
+  fallbackContinuationRoot: OrchestratorPlanNode | null = null
+): OrchestratorTreeDisplay {
+  if (!detail || detail.nodes.length === 0) {
+    return {
+      nodes: [],
+      displayParentIds: {}
+    };
+  }
+
+  const currentRunId = detail.run.id;
+  const nodeById = new Map(detail.nodes.map((node) => [node.id, node]));
+  const continuedFromNodeId = typeof detail.run.continuedFromNodeId === "string" && detail.run.continuedFromNodeId.length > 0
+    ? detail.run.continuedFromNodeId
+    : null;
+  const currentRootId = typeof detail.run.rootNodeId === "string" && detail.run.rootNodeId.length > 0
+    ? detail.run.rootNodeId
+    : null;
+
+  const buildCurrentRunDisplay = (): OrchestratorTreeDisplay => {
+    const displayParentIds: Record<string, string | null> = {};
+    const nodes = detail.nodes.filter((node) => node.runId === currentRunId);
+    
+    for (const node of nodes) {
+      // Only set parent if it's within the same run to keep it isolated
+      displayParentIds[node.id] = node.parentId && nodeById.has(node.parentId) && nodeById.get(node.parentId)!.runId === currentRunId
+        ? node.parentId
+        : null;
+    }
+
+    return {
+      nodes,
+      displayParentIds
+    };
+  };
+
+  // If not a continuation, or if user wants strictly current run, use filtered display
+  if (!continuedFromNodeId || !currentRootId || !nodeById.has(currentRootId)) {
+    return buildCurrentRunDisplay();
+  }
+
+  const historicalRoot = nodeById.get(continuedFromNodeId)
+    ?? (fallbackContinuationRoot?.id === continuedFromNodeId ? fallbackContinuationRoot : null);
+  
+  if (!historicalRoot) {
+    return buildCurrentRunDisplay();
+  }
+
+  const childMap = new Map<string, OrchestratorPlanNode[]>();
+  for (const node of detail.nodes) {
+    if (!node.parentId || !nodeById.has(node.parentId)) {
+      continue;
+    }
+
+    const siblings = childMap.get(node.parentId) ?? [];
+    siblings.push(node);
+    childMap.set(node.parentId, siblings);
+  }
+
+  const displayNodeIds = new Set<string>([historicalRoot.id]);
+  const pendingIds = [currentRootId];
+  while (pendingIds.length > 0) {
+    const nodeId = pendingIds.pop();
+    if (!nodeId || displayNodeIds.has(nodeId)) {
+      continue;
+    }
+
+    displayNodeIds.add(nodeId);
+    for (const child of childMap.get(nodeId) ?? []) {
+      pendingIds.push(child.id);
+    }
+  }
+
+  // Filter to only include historical root and its descendants in the current run
+  const nodes = [
+    historicalRoot,
+    ...detail.nodes.filter((node) => node.id !== historicalRoot.id && displayNodeIds.has(node.id) && (node.runId === currentRunId || node.id === currentRootId))
+  ];
+  
+  const displayParentIds: Record<string, string | null> = {
+    [historicalRoot.id]: null
+  };
+
+  for (const node of nodes) {
+    if (node.id === historicalRoot.id) {
+      continue;
+    }
+
+    if (node.id === currentRootId) {
+      displayParentIds[node.id] = historicalRoot.id;
+      continue;
+    }
+
+    displayParentIds[node.id] = node.parentId && displayNodeIds.has(node.parentId) && (nodeById.get(node.parentId)?.runId === currentRunId || node.parentId === historicalRoot.id)
+      ? node.parentId
+      : currentRootId;
+  }
+
+  return {
+    nodes,
+    displayParentIds
+  };
+}
+
 function shouldTickSelectedNodeProgress(detail: OrchestratorRunDetail | null): boolean {
   if (!detail) {
     return false;
@@ -4000,11 +4360,12 @@ function renderOrchestratorRunList() {
 
   for (const run of orchestratorRuns) {
     const item = document.createElement("li");
+    item.setAttribute("data-run-id", run.id);
     if (run.id === selectedOrchestratorRunId) item.classList.add("active");
 
     const goal = document.createElement("strong");
     goal.className = "orchestrator-run-goal";
-    goal.textContent = run.goal;
+    goal.textContent = truncateText(run.goal, 100);
 
     const meta = document.createElement("span");
     meta.className = "orchestrator-run-meta";
@@ -4083,14 +4444,18 @@ function renderOrchestratorDetail() {
 
 function renderOrchestratorTree() {
   const selectedNode = resolveSelectedOrchestratorNode(selectedOrchestratorRun);
+  const treeDisplay = buildOrchestratorTreeDisplay(selectedOrchestratorRun, pendingOrchestratorTreeContinuationRoot);
   const signature = selectedOrchestratorRun
     ? [
       languagePreference,
       selectedOrchestratorRun.run.id,
       selectedOrchestratorRun.run.updatedAt,
+      selectedOrchestratorRun.run.rootNodeId,
+      selectedOrchestratorRun.run.continuedFromNodeId ?? "",
+      pendingOrchestratorTreeContinuationRoot?.id ?? "",
       selectedNode?.id ?? "",
-      selectedOrchestratorRun.nodes
-        .map((node) => `${node.id}:${node.parentId ?? "root"}:${node.role}:${node.stagePhase ?? "-"}:${node.phase}:${node.depth}:${node.title}`)
+      treeDisplay.nodes
+        .map((node) => `${node.id}:${treeDisplay.displayParentIds[node.id] ?? "root"}:${node.role}:${node.stagePhase ?? "-"}:${node.phase}:${node.depth}:${node.title}`)
         .join("|")
     ].join("|")
     : `__empty__:${languagePreference}`;
@@ -4103,7 +4468,7 @@ function renderOrchestratorTree() {
   orchestratorTreeTitleEl.textContent = translate("ui.orchestratorTreeTitle");
 
   const detail = selectedOrchestratorRun;
-  const nodes = selectedOrchestratorRun?.nodes ?? [];
+  const nodes = treeDisplay.nodes;
   orchestratorTreeMetaEl.textContent = translate("ui.orchestratorTreeMeta", { count: String(nodes.length) });
   orchestratorTreeEl.innerHTML = "";
 
@@ -4119,7 +4484,8 @@ function renderOrchestratorTree() {
   const childMap = new Map<string | null, OrchestratorPlanNode[]>();
 
   for (const node of nodes) {
-    const parentKey = node.parentId && nodeById.has(node.parentId) ? node.parentId : null;
+    const parentId = treeDisplay.displayParentIds[node.id];
+    const parentKey = parentId && nodeById.has(parentId) ? parentId : null;
     const siblings = childMap.get(parentKey) ?? [];
     siblings.push(node);
     childMap.set(parentKey, siblings);
@@ -4140,7 +4506,7 @@ function renderOrchestratorTree() {
 
       const card = document.createElement("button");
       card.type = "button";
-      card.className = `orchestrator-tree-node role-${node.role} phase-${getDisplayedNodePhase(node)}`;
+      card.className = `orchestrator-tree-node role-${node.role} phase-${getDisplayedNodePhase(node)}`; card.setAttribute("data-node-id", node.id);
       if (selectedNode?.id === node.id) {
         card.classList.add("active");
       }
@@ -4804,6 +5170,23 @@ function updateOrchestratorControls() {
   resetAppButton.disabled = isToolUpdateRunning || isResetting || isOrchestratorRunning;
 }
 
+function cloneOrchestratorNodePreview(node: OrchestratorPlanNode | null | undefined): OrchestratorPlanNode | null {
+  if (!node) {
+    return null;
+  }
+
+  return {
+    ...node,
+    acceptanceCriteria: {
+      items: [...node.acceptanceCriteria.items]
+    }
+  };
+}
+
+function cancelRunUntilSuccessLoop() {
+  orchestratorRunUntilSuccessGeneration += 1;
+}
+
 function refreshTerminalPaneCopy() {
   for (const session of sessions) {
     const kindBadge = sessionKindBadges.get(session.id);
@@ -4839,6 +5222,9 @@ function refreshLocalizedContent() {
   orchestratorContinueButton.title = translate("ui.orchestratorResumeTooltip");
   orchestratorRetryNodeButton.textContent = translate("ui.orchestratorRetryNode");
   orchestratorRetryNodeButton.title = translate("ui.orchestratorRetryNodeTooltip");
+  orchestratorRunUntilSuccessLabelEl.textContent = translate("ui.orchestratorRunUntilSuccess");
+  orchestratorRunUntilSuccessLabelEl.title = translate("ui.orchestratorRunUntilSuccessTooltip");
+  orchestratorRunUntilSuccessCheckbox.title = translate("ui.orchestratorRunUntilSuccessTooltip");
   orchestratorRunNextActionButton.textContent = translate("ui.orchestratorRunNextAction");
   orchestratorRunNextActionButton.title = translate("ui.orchestratorRunNextActionTooltip");
   orchestratorStopButton.textContent = translate("ui.orchestratorStop");
@@ -5254,6 +5640,7 @@ async function stopOrchestratorRun() {
     return;
   }
 
+  cancelRunUntilSuccessLoop();
   isOrchestratorStopRequested = true;
   updateOrchestratorControls();
   logLocalized("logs.orchestratorStopping", { runId: liveOrchestratorRunId });
@@ -5275,13 +5662,29 @@ async function stopOrchestratorRun() {
 
 async function runOrchestrator(options?: {
   continueFromRunId?: string | null;
+  continueFromNodeId?: string | null;
   continuationMode?: OrchestratorContinuationMode;
   nextActionIndex?: number | null;
   goalOverride?: string | null;
+  continueFromNodePreview?: OrchestratorPlanNode | null;
+  runUntilSuccess?: boolean;
 }) {
-  const continueFromRunId = options?.continueFromRunId ?? null;
-  const continuationMode = options?.continuationMode ?? "resume";
-  console.log("[runOrchestrator] called", { continueFromRunId, continuationMode, goalOverride: options?.goalOverride?.substring(0, 80), selectedOrchestratorRunId });
+  let continueFromRunId = options?.continueFromRunId ?? null;
+  const continueFromNodeId = options?.continueFromNodeId ?? null;
+  let continuationMode = options?.continuationMode ?? "resume";
+  let nextActionIndex = options?.nextActionIndex ?? null;
+  let continueFromNodePreview = cloneOrchestratorNodePreview(options?.continueFromNodePreview);
+  const runUntilSuccess = Boolean(options?.runUntilSuccess ?? orchestratorRunUntilSuccessCheckbox.checked);
+  const runUntilSuccessGeneration = ++orchestratorRunUntilSuccessGeneration;
+  let attempt = 1;
+  console.log("[runOrchestrator] called", {
+    continueFromRunId,
+    continueFromNodeId,
+    continuationMode,
+    runUntilSuccess,
+    goalOverride: options?.goalOverride?.substring(0, 80),
+    selectedOrchestratorRunId
+  });
   if (continueFromRunId && !selectedOrchestratorRunId) {
     console.log("[runOrchestrator] EARLY RETURN: continueFromRunId set but selectedOrchestratorRunId is null");
     logLocalized("errors.orchestratorContinueMissing");
@@ -5305,92 +5708,129 @@ async function runOrchestrator(options?: {
     return;
   }
 
-  isOrchestratorRunning = true;
-  isOrchestratorStopRequested = false;
-  liveOrchestratorRunId = null;
-  if (liveOrchestratorRefreshHandle !== null) {
-    window.clearTimeout(liveOrchestratorRefreshHandle);
-    liveOrchestratorRefreshHandle = null;
-  }
-  updateOrchestratorControls();
-  logLocalized("logs.orchestratorRunning", { mode: translateOrchestratorMode(orchestratorMode) });
-  selectedOrchestratorRun = null;
-  selectedOrchestratorNodeId = null;
-  lastOrchestratorDetailSignature = `__running__:${orchestratorMode}:${goal}:${languagePreference}`;
-  lastOrchestratorTreeSignature = `__running__:${orchestratorMode}:${goal}:${languagePreference}`;
-  setOrchestratorTransientDetail(translate("logs.orchestratorRunning", { mode: translateOrchestratorMode(orchestratorMode) }));
-  renderOrchestratorTree();
-
-  try {
-    const maxDepth = getRequestedOrchestratorMaxDepth();
-    orchestratorDepthInput.value = String(maxDepth);
-    const response = await appWindow.tasksaw.runOrchestrator({
-      goal,
-      mode: orchestratorMode,
-      language: languagePreference,
-      continuationMode: continueFromRunId ? continuationMode : null,
-      nextActionIndex: continueFromRunId ? (options?.nextActionIndex ?? null) : null,
-      maxDepth,
-      cliTimeoutSeconds: Number(orchestratorTimeoutInput.value) || 0,
-      sandbox: orchestratorSandboxInput.checked,
-      useGeminiAcpMode: orchestratorGeminiAcpInput.checked,
-      geminiRegion: geminiRegionPreference === "auto" ? null : geminiRegionPreference,
-      workspacePath: currentWorkspacePath,
-      continueFromRunId,
-      workspaceAccessDialog: {
-        defaultPath: currentWorkspacePath ?? undefined,
-        title: translate("ui.permissionDialogTitle"),
-        buttonLabel: translate("ui.permissionDialogButton"),
-        message: translate("ui.permissionDialogMessage")
-      }
-    });
-
-    if (!response) return;
-    if (response.status === "login_required") {
-      for (const [index, session] of response.loginSessions.entries()) {
-        attachSessionToUi(session, {
-          activate: index === response.loginSessions.length - 1,
-          logCreated: false
-        });
-      }
-      logLocalized("errors.orchestratorLoginRequired", {
-        tools: response.missingToolIds.map((toolId) => translateKind(toolId)).join(", ")
-      });
-      return;
+  while (true) {
+    isOrchestratorRunning = true;
+    isOrchestratorStopRequested = false;
+    liveOrchestratorRunId = null;
+    pendingOrchestratorTreeContinuationRoot = cloneOrchestratorNodePreview(continueFromNodePreview);
+    if (liveOrchestratorRefreshHandle !== null) {
+      window.clearTimeout(liveOrchestratorRefreshHandle);
+      liveOrchestratorRefreshHandle = null;
     }
+    updateOrchestratorControls();
+    logLocalized("logs.orchestratorRunning", { mode: translateOrchestratorMode(orchestratorMode) });
+    selectedOrchestratorRun = null;
+    selectedOrchestratorNodeId = null;
+    lastOrchestratorDetailSignature = `__running__:${orchestratorMode}:${goal}:${languagePreference}`;
+    lastOrchestratorTreeSignature = `__running__:${orchestratorMode}:${goal}:${languagePreference}`;
+    setOrchestratorTransientDetail(translate("logs.orchestratorRunning", { mode: translateOrchestratorMode(orchestratorMode) }));
+    renderOrchestratorTree();
 
-    const detail = response.detail;
-    if (response.status === "cancelled") {
+    try {
+      const maxDepth = getRequestedOrchestratorMaxDepth();
+      orchestratorDepthInput.value = String(maxDepth);
+      const response = await appWindow.tasksaw.runOrchestrator({
+        goal,
+        mode: orchestratorMode,
+        language: languagePreference,
+        continuationMode: continueFromRunId ? continuationMode : null,
+        nextActionIndex: continueFromRunId && continuationMode === "next_action" ? nextActionIndex : null,
+        maxDepth,
+        cliTimeoutSeconds: Number(orchestratorTimeoutInput.value) || 0,
+        sandbox: orchestratorSandboxInput.checked,
+        useGeminiAcpMode: orchestratorGeminiAcpInput.checked,
+        geminiRegion: geminiRegionPreference === "auto" ? null : geminiRegionPreference,
+        workspacePath: currentWorkspacePath,
+        continueFromRunId,
+        continueFromNodeId,
+        workspaceAccessDialog: {
+          defaultPath: currentWorkspacePath ?? undefined,
+          title: translate("ui.permissionDialogTitle"),
+          buttonLabel: translate("ui.permissionDialogButton"),
+          message: translate("ui.permissionDialogMessage")
+        }
+      });
+
+      if (!response) {
+        pendingOrchestratorTreeContinuationRoot = null;
+        return;
+      }
+      if (response.status === "login_required") {
+        pendingOrchestratorTreeContinuationRoot = null;
+        for (const [index, session] of response.loginSessions.entries()) {
+          attachSessionToUi(session, {
+            activate: index === response.loginSessions.length - 1,
+            logCreated: false
+          });
+        }
+        logLocalized("errors.orchestratorLoginRequired", {
+          tools: response.missingToolIds.map((toolId) => translateKind(toolId)).join(", ")
+        });
+        return;
+      }
+
+      const detail = response.detail;
+      pendingOrchestratorTreeContinuationRoot = null;
+      if (response.status === "cancelled") {
+        selectedOrchestratorRun = detail;
+        selectedOrchestratorRunId = detail.run.id;
+        renderOrchestratorDetail();
+        renderOrchestratorTree();
+        await loadOrchestratorRuns();
+        logLocalized("logs.orchestratorCancelled", { runId: detail.run.id });
+        return;
+      }
+
       selectedOrchestratorRun = detail;
       selectedOrchestratorRunId = detail.run.id;
       renderOrchestratorDetail();
       renderOrchestratorTree();
       await loadOrchestratorRuns();
-      logLocalized("logs.orchestratorCancelled", { runId: detail.run.id });
+      logLocalized("logs.orchestratorCompleted", { runId: detail.run.id });
       return;
-    }
+    } catch (error: unknown) {
+      const retrySourceDetail = selectedOrchestratorRun;
+      const retrySourceRunId = retrySourceDetail?.run.id ?? continueFromRunId;
+      const retrySourcePreview = continueFromNodeId
+        ? cloneOrchestratorNodePreview(
+            retrySourceDetail?.nodes.find((node) => node.id === continueFromNodeId) ?? continueFromNodePreview
+          )
+        : null;
 
-    selectedOrchestratorRun = detail;
-    selectedOrchestratorRunId = detail.run.id;
-    renderOrchestratorDetail();
-    renderOrchestratorTree();
-    await loadOrchestratorRuns();
-    logLocalized("logs.orchestratorCompleted", { runId: detail.run.id });
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    logLocalized("errors.failedOrchestratorRun", { message });
-    try {
-      await loadOrchestratorRuns();
-    } catch (loadError: unknown) {
-      const loadMessage = loadError instanceof Error ? loadError.message : String(loadError);
-      logLocalized("errors.failedLoadOrchestratorRuns", { message: loadMessage });
+      pendingOrchestratorTreeContinuationRoot = null;
+      const message = error instanceof Error ? error.message : String(error);
+      logLocalized("errors.failedOrchestratorRun", { message });
+      try {
+        await loadOrchestratorRuns();
+      } catch (loadError: unknown) {
+        const loadMessage = loadError instanceof Error ? loadError.message : String(loadError);
+        logLocalized("errors.failedLoadOrchestratorRuns", { message: loadMessage });
+      }
+
+      const shouldContinueUntilSuccess = runUntilSuccess
+        && orchestratorRunUntilSuccessCheckbox.checked
+        && orchestratorRunUntilSuccessGeneration === runUntilSuccessGeneration
+        && retrySourceRunId !== null;
+      if (!shouldContinueUntilSuccess) {
+        return;
+      }
+
+      attempt += 1;
+      continueFromRunId = retrySourceRunId;
+      continueFromNodePreview = retrySourcePreview;
+      continuationMode = "resume";
+      nextActionIndex = null;
+      logLocalized("logs.orchestratorContinuingUntilSuccess", {
+        runId: continueFromRunId,
+        attempt: String(attempt)
+      });
+    } finally {
+      isOrchestratorRunning = false;
+      isOrchestratorStopRequested = false;
+      liveOrchestratorRunId = null;
+      updateOrchestratorControls();
+      refreshToolStatuses().catch((error) => console.error("Failed to refresh tool statuses after orchestrator run:", error));
     }
-  } finally {
-    isOrchestratorRunning = false;
-    isOrchestratorStopRequested = false;
-    liveOrchestratorRunId = null;
-    updateOrchestratorControls();
-    refreshToolStatuses().catch((error) => console.error("Failed to refresh tool statuses after orchestrator run:", error));
   }
 }
 
@@ -6027,6 +6467,7 @@ async function updateManagedTools() {
 }
 
 function resetLocalAppState() {
+  cancelRunUntilSuccessLoop();
   clearAllLocalSessions();
   orchestratorRuns.splice(0, orchestratorRuns.length);
   pendingUserInputDrafts.clear();
@@ -6043,6 +6484,7 @@ function resetLocalAppState() {
   lastOrchestratorRunListSignature = "";
   lastOrchestratorDetailSignature = "";
   lastOrchestratorTreeSignature = "";
+  pendingOrchestratorTreeContinuationRoot = null;
   setCurrentWorkspacePath(null);
   activeWorkspaceTabId = "orchestrator";
   isOrchestratorTabOpen = true;
@@ -6137,6 +6579,28 @@ appWindow.tasksaw.onTerminalData(({ sessionId, data }: TerminalDataPayload) => {
 const autoApprovedRequestIds = new Set<string>();
 
 appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
+  if (event.type === "error") {
+    showGeneralToast({
+      id: event.id,
+      title: (event.payload.title as string) || "Error",
+      message: (event.payload.message as string) || "An unexpected error occurred",
+      type: "error",
+      options: event.payload.retry ? {
+        actionLabel: "Retry",
+        onAction: () => {
+          console.log("Retry clicked");
+        }
+      } : undefined
+    });
+  }
+  if (event.type === "success") {
+    showGeneralToast({
+      id: event.id,
+      title: (event.payload.title as string) || "Success",
+      message: (event.payload.message as string) || "Action completed successfully",
+      type: "success"
+    });
+  }
   if (event.type === "approval_resolved" && typeof event.payload.requestId === "string") {
     resolveApprovalToast(event.payload.requestId);
     if (activeApprovalDialogRequestId === event.payload.requestId) {
@@ -6337,7 +6801,11 @@ logViewerDialogEl.addEventListener("click", (event) => {
   }
 });
 approvalDialogCloseButton.addEventListener("click", () => {
+  const requestId = activeApprovalDialogRequestId;
   closeApprovalDialog();
+  if (requestId) {
+    void respondToPendingApproval(requestId, false);
+  }
 });
 approvalDialogEl.addEventListener("click", (event) => {
   if (event.target === approvalDialogEl) {
@@ -6386,8 +6854,10 @@ orchestratorRetryNodeButton.addEventListener("click", () => {
   console.log("[RetryNode] calling runOrchestrator with goalOverride (node objective):", selectedNode.objective?.substring(0, 80));
   void runOrchestrator({
     continueFromRunId: selectedOrchestratorRunId,
+    continueFromNodeId: selectedNode.id,
     continuationMode: "resume",
-    goalOverride: selectedNode.objective // Use the selected node's objective as the new root goal
+    goalOverride: selectedNode.objective, // Use the selected node's objective as the new root goal
+    continueFromNodePreview: selectedNode
   });
 });
 
@@ -6464,6 +6934,13 @@ appWindow.addEventListener("resize", () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.ctrlKey && event.key === "f") {
+    event.preventDefault();
+    orchestratorGoalInput.focus();
+    orchestratorGoalInput.select();
+    return;
+  }
+
   if (event.key === "Escape" && !interactiveSessionDialogEl.hidden) {
     event.preventDefault();
     if (!interactiveSessionDialogTerminateButton.hidden) {
@@ -6515,3 +6992,59 @@ if (storedGeminiAcpMode !== null) {
 orchestratorGeminiAcpInput.addEventListener("change", () => {
   window.localStorage.setItem("tasksaw-gemini-acp-mode", String(orchestratorGeminiAcpInput.checked));
 });
+const storedRunUntilSuccessMode = window.localStorage.getItem(ORCHESTRATOR_RUN_UNTIL_SUCCESS_STORAGE_KEY);
+if (storedRunUntilSuccessMode !== null) {
+  orchestratorRunUntilSuccessCheckbox.checked = storedRunUntilSuccessMode === "true";
+}
+orchestratorRunUntilSuccessCheckbox.addEventListener("change", () => {
+  window.localStorage.setItem(
+    ORCHESTRATOR_RUN_UNTIL_SUCCESS_STORAGE_KEY,
+    String(orchestratorRunUntilSuccessCheckbox.checked)
+  );
+  if (!orchestratorRunUntilSuccessCheckbox.checked) {
+    cancelRunUntilSuccessLoop();
+  }
+});
+
+// Expose internal functions for testing
+(window as any)._test_utils = {
+  formatTimestamp,
+  formatElapsedDuration,
+  truncateText,
+  tryBeautifyJsonString,
+  formatNodeRoleLabel,
+  extractModelResultSummary,
+  humanizePayloadKey,
+  serializeViewerValue,
+  normalizeExecutionPlanPayload,
+  trimInteractiveTranscript,
+  buildOrchestratorTreeDisplay,
+  __setIsOrchestratorRunning: (running: boolean) => {
+    isOrchestratorRunning = running;
+  },
+  __setSelectedOrchestratorRunId: (runId: string | null) => {
+    selectedOrchestratorRunId = runId;
+  },
+  __resetInternalState: () => {
+    cancelRunUntilSuccessLoop();
+    isOrchestratorRunning = false;
+    isOrchestratorStopRequested = false;
+    liveOrchestratorRunId = null;
+    selectedOrchestratorRunId = null;
+    selectedOrchestratorRun = null;
+    selectedOrchestratorNodeId = null;
+    pendingOrchestratorTreeContinuationRoot = null;
+    orchestratorRunUntilSuccessCheckbox.checked = false;
+    approvalToasts.clear();
+    generalToasts.clear();
+    autoApprovedRequestIds.clear();
+    pendingApprovalActionRequestId = null;
+    pendingUserInputActionRequestId = null;
+    pendingUserInputDrafts.clear();
+    approvalToastContainerEl.replaceChildren();
+    if (liveOrchestratorRefreshHandle !== null) {
+      window.clearTimeout(liveOrchestratorRefreshHandle);
+      liveOrchestratorRefreshHandle = null;
+    }
+  }
+};

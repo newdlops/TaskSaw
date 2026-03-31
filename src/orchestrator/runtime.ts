@@ -19,6 +19,7 @@ import {
   OrchestratorCapability,
   OrchestratorModelAdapter,
   ReviewResult,
+  StageObjectiveHints,
   VerifyResult
 } from "./model-adapter";
 import { ModelAdapterRegistry } from "./adapter-registry";
@@ -439,6 +440,7 @@ export class OrchestratorRuntime {
     const nodeId = startingNode.id;
     const isProjectStructureInspection = this.isProjectStructureInspectionNode(startingNode);
     let evidenceBundles = this.getNodeEvidenceBundles(startingNode);
+    let bootstrapSketch: GatherResult | undefined;
 
     if (!isProjectStructureInspection && this.shouldRunBootstrapSketch(startingNode, evidenceBundles)) {
       this.engine.appendEvent(startingNode.runId, startingNode.id, "scheduler_progress", {
@@ -447,13 +449,13 @@ export class OrchestratorRuntime {
       const bootstrapSketchStage = await this.executeStageCapability<GatherResult>(startingNode, {
         phase: "gather",
         title: "Bootstrap Sketch",
-        objective: `Produce a rough, low-cost sketch of the repository before deeper planning for:\n${startingNode.objective}`,
+        objective: this.buildBootstrapSketchObjective(startingNode),
         kind: "planning",
         role: "gatherer",
         capability: "gather",
         evidenceBundles: evidenceBundles
       });
-      const bootstrapSketch = bootstrapSketchStage.result;
+      bootstrapSketch = bootstrapSketchStage.result;
       this.mergeProjectStructureReport(bootstrapSketchStage.stageNode, bootstrapSketch.projectStructure);
       const bootstrapBundles = bootstrapSketch.evidenceBundles.map((bundleDraft) =>
         this.materializeEvidenceBundle(bootstrapSketchStage.stageNode, bundleDraft)
@@ -476,7 +478,11 @@ export class OrchestratorRuntime {
       objective: this.buildPlanningStageObjective(
         currentNode,
         "abstractPlan",
-        `Define the search scope, evidence requirements, and inspection targets for:\n${currentNode.objective}`,
+        this.resolveNextStageObjective(
+          bootstrapSketch?.nextObjectives,
+          "abstractPlan",
+          "Define the narrowest read-only search scope, evidence requirements, and inspection targets needed before execution for the current task."
+        ),
         evidenceBundles
       ),
       kind: "planning",
@@ -495,7 +501,11 @@ export class OrchestratorRuntime {
       objective: this.buildPlanningStageObjective(
         currentNode,
         "gather",
-        `Gather file, symbol, and evidence findings for:\n${currentNode.objective}`,
+        this.resolveNextStageObjective(
+          abstractPlan.nextObjectives,
+          "gather",
+          "Collect only the file, symbol, and evidence findings needed before the next concrete plan for the current task."
+        ),
         evidenceBundles,
         {
           targetsToInspect: abstractPlan.targetsToInspect,
@@ -543,7 +553,11 @@ export class OrchestratorRuntime {
     let concretePlanStage = await this.executeStageCapability<ConcretePlanResult>(currentNode, {
       phase: "concrete_plan",
       title: "Concrete Plan",
-      objective: `Turn the gathered evidence into an execution plan for:\n${currentNode.objective}`,
+      objective: this.resolveNextStageObjective(
+        gather.nextObjectives,
+        "concretePlan",
+        `Turn the gathered evidence into an execution plan for:\n${currentNode.objective}`
+      ),
       kind: "planning",
       role: "concretePlanner",
       capability: "concretePlan",
@@ -819,7 +833,11 @@ export class OrchestratorRuntime {
     const verifyStage = await this.executeStageCapability<VerifyResult>(currentNode, {
       phase: "verify",
       title: "Verify",
-      objective: `Verify the execution result for:\n${currentNode.objective}`,
+      objective: this.resolveNextStageObjective(
+        execute.nextObjectives,
+        "verify",
+        `Verify the execution result for:\n${currentNode.objective}`
+      ),
       kind: "execution",
       role: "verifier",
       capability: "verify",
@@ -934,17 +952,21 @@ export class OrchestratorRuntime {
       const reviewStage = await this.executeStageCapability<ReviewResult>(node, {
         phase: "review",
         title: "Review",
-        objective: [
-          `Review the completed execution result for:\n${node.objective}`,
-          `Execution summary:\n${execute.summary}`,
-          execute.outputs.length > 0
-            ? `Execution outputs:\n${execute.outputs.join("\n")}`
-            : null,
-          `Verification summary:\n${verify.summary}`,
-          verify.findings.length > 0
-            ? `Verification findings:\n${verify.findings.join("\n")}`
-            : null
-        ].filter((section): section is string => Boolean(section)).join("\n\n"),
+        objective: this.resolveNextStageObjective(
+          verify.nextObjectives ?? execute.nextObjectives,
+          "review",
+          [
+            `Review the completed execution result for:\n${node.objective}`,
+            `Execution summary:\n${execute.summary}`,
+            execute.outputs.length > 0
+              ? `Execution outputs:\n${execute.outputs.join("\n")}`
+              : null,
+            `Verification summary:\n${verify.summary}`,
+            verify.findings.length > 0
+              ? `Verification findings:\n${verify.findings.join("\n")}`
+              : null
+          ].filter((section): section is string => Boolean(section)).join("\n\n")
+        ),
         kind: "execution",
         role: "reviewer",
         capability: "review",
@@ -993,7 +1015,9 @@ export class OrchestratorRuntime {
   }
 
   private buildExecutionObjective(node: PlanNode, concretePlan: ConcretePlanResult): string {
-    const sections = [node.objective.trim()];
+    const sections = [
+      this.resolveNextStageObjective(concretePlan.nextObjectives, "execute", node.objective.trim())
+    ];
 
     if (concretePlan.summary.trim().length > 0) {
       sections.push(`Execution plan summary: ${concretePlan.summary.trim()}`);
@@ -1335,7 +1359,7 @@ export class OrchestratorRuntime {
       id: randomUUID(),
       title: this.buildTerminalSessionTitle(capability, assignedModel)
     };
-    const context = this.buildInvocationContext(node, assignedModel, capability, evidenceBundles, terminalSession);
+    const context = this.buildInvocationContext(node, assignedModel, role, capability, evidenceBundles, terminalSession);
     const invocation = this.getInvocation(adapter, capability);
     try {
       const result = await invocation(context) as TResult;
@@ -1623,7 +1647,7 @@ export class OrchestratorRuntime {
           currentNode,
           "abstractPlan",
           [
-            `Narrow the next gather pass for:\n${currentNode.objective}`,
+            "Narrow the next read-only gather pass for the current task.",
             focusedObjectives.length > 0
               ? `Focused refinement objectives:\n${focusedObjectives.map((objective, index) => `${index + 1}. ${objective}`).join("\n")}`
               : ""
@@ -1646,7 +1670,11 @@ export class OrchestratorRuntime {
         objective: this.buildPlanningStageObjective(
           currentNode,
           "gather",
-          `Gather only the targeted follow-up evidence for:\n${currentNode.objective}`,
+          this.resolveNextStageObjective(
+            abstractPlan.nextObjectives,
+            "gather",
+            "Collect only the targeted follow-up evidence needed to unblock the next concrete plan for the current task."
+          ),
           evidenceBundles,
           {
             targetsToInspect: abstractPlan.targetsToInspect,
@@ -1692,7 +1720,11 @@ export class OrchestratorRuntime {
       concretePlanStage = await this.executeStageCapability<ConcretePlanResult>(currentNode, {
         phase: "concrete_plan",
         title: "Concrete Plan",
-        objective: `Turn the refined evidence into an execution plan for:\n${currentNode.objective}`,
+        objective: this.resolveNextStageObjective(
+          gather.nextObjectives,
+          "concretePlan",
+          `Turn the refined evidence into an execution plan for:\n${currentNode.objective}`
+        ),
         kind: "planning",
         role: "concretePlanner",
         capability: "concretePlan",
@@ -1976,6 +2008,7 @@ export class OrchestratorRuntime {
   private buildInvocationContext(
     node: PlanNode,
     assignedModel: ModelRef,
+    role: AssignedModelRole,
     capability: OrchestratorCapability,
     evidenceBundles: EvidenceBundle[],
     terminalSession: {
@@ -1992,6 +2025,7 @@ export class OrchestratorRuntime {
       run,
       node,
       config: run.config,
+      role,
       assignedModel,
       outputLanguage: run.language ?? "ko",
       abortSignal: this.abortController.signal,
@@ -2007,6 +2041,19 @@ export class OrchestratorRuntime {
       evidenceBundles,
       terminalSessionId: terminalSession.id,
       terminalSessionTitle: terminalSession.title,
+      reportModelInvocation: (payload) => {
+        this.engine.appendEvent(node.runId, node.id, "model_invocation", {
+          role: payload.role,
+          capability: payload.capability,
+          modelId: payload.modelId,
+          provider: payload.provider,
+          model: payload.model,
+          command: [],
+          prompt: payload.prompt,
+          terminalSessionId: terminalSession.id,
+          terminalSessionTitle: terminalSession.title
+        });
+      },
       requestUserApproval: async (request) => {
         this.recordTerminalEvent(node, {
           sessionId: terminalSession.id,
@@ -2457,14 +2504,33 @@ export class OrchestratorRuntime {
   }
 
   private materializeEvidenceBundle(node: PlanNode, bundleDraft: EvidenceBundleDraft): EvidenceBundle {
-    const timestamp = this.now();
-    return {
-      ...bundleDraft,
+    const normalized = this.evidenceStore.createBundle({
+      id: bundleDraft.id,
       runId: node.runId,
       nodeId: node.id,
-      createdAt: bundleDraft.createdAt ?? timestamp,
-      updatedAt: bundleDraft.updatedAt ?? timestamp
-    } as EvidenceBundle;
+      summary: bundleDraft.summary,
+      facts: bundleDraft.facts,
+      hypotheses: bundleDraft.hypotheses,
+      unknowns: bundleDraft.unknowns,
+      relevantTargets: bundleDraft.relevantTargets,
+      snippets: bundleDraft.snippets,
+      references: bundleDraft.references,
+      confidence: bundleDraft.confidence
+    });
+
+    const createdAt = bundleDraft.createdAt ?? normalized.createdAt;
+    const updatedAt = bundleDraft.updatedAt ?? normalized.updatedAt;
+    if (createdAt === normalized.createdAt && updatedAt === normalized.updatedAt) {
+      return normalized;
+    }
+
+    const withPreservedTimestamps: EvidenceBundle = {
+      ...normalized,
+      createdAt,
+      updatedAt
+    };
+    this.evidenceStore.upsertBundle(withPreservedTimestamps);
+    return withPreservedTimestamps;
   }
 
   private recordModelInvocation(
@@ -2475,18 +2541,6 @@ export class OrchestratorRuntime {
     debug: ModelExecutionDebugInfo | undefined,
     result: { debug?: ModelExecutionDebugInfo }
   ) {
-    this.engine.appendEvent(node.runId, node.id, "model_invocation", {
-      role,
-      capability,
-      modelId: assignedModel.id,
-      provider: assignedModel.provider,
-      model: assignedModel.model,
-      command: debug?.command ?? [],
-      prompt: debug?.prompt ?? null,
-      terminalSessionId: debug?.terminalSessionId ?? null,
-      terminalSessionTitle: debug?.terminalSessionTitle ?? null
-    });
-
     this.engine.appendEvent(node.runId, node.id, "model_response", {
       role,
       capability,
@@ -2708,7 +2762,7 @@ export class OrchestratorRuntime {
           rootNode.assignedModels.gatherer!,
           "gather"
         ) as ShellCommandCapableAdapter;
-        const context = this.buildInvocationContext(rootNode, rootNode.assignedModels.gatherer!, "gather", [], terminalSession);
+        const context = this.buildInvocationContext(rootNode, rootNode.assignedModels.gatherer!, "gatherer", "gather", [], terminalSession);
 
         // Use the adapter's gather capability to execute a simple command if possible
         const result = await adapter.executeShellCommand?.(context, {
@@ -2814,15 +2868,15 @@ export class OrchestratorRuntime {
       return baseObjective;
     }
 
+    const stageRestriction = capability === "gather"
+      ? "Current stage restriction: read-only evidence collection only. Do not install dependencies, create files, write tests, edit files, or run other mutating commands in this stage."
+      : "Current stage restriction: planning-only. Define the next inspection scope, but do not edit files, install dependencies, create artifacts, or execute implementation work in this stage.";
+    const downstreamTaskIntent = this.buildDownstreamTaskIntentCue(node);
     const memoryCues = this.buildTaskOrchestrationMemoryCues(node, evidenceBundles);
     const contractCues = capability === "gather"
       ? this.buildGatherContractCues(gatherContract)
       : [];
-    if (memoryCues.length === 0 && contractCues.length === 0) {
-      return baseObjective;
-    }
-
-    const sections = [baseObjective];
+    const sections = [baseObjective, stageRestriction, downstreamTaskIntent];
     if (memoryCues.length > 0) {
       sections.push(`Priority memory cues:\n${memoryCues.map((cue) => `- ${cue}`).join("\n")}`);
     }
@@ -2830,6 +2884,50 @@ export class OrchestratorRuntime {
       sections.push(`Current gather contract:\n${contractCues.map((cue) => `- ${cue}`).join("\n")}`);
     }
     return sections.join("\n\n");
+  }
+
+  private resolveNextStageObjective(
+    hints: StageObjectiveHints | undefined,
+    capability: Exclude<OrchestratorCapability, "rehydrate">,
+    fallback: string
+  ): string {
+    const hinted = this.normalizeNextStageObjectiveHint(hints?.[capability]);
+    return hinted ?? fallback;
+  }
+
+  private normalizeNextStageObjectiveHint(value: string | undefined): string | undefined {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+
+    const trimmed = value
+      .replace(/\r\n/g, "\n")
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .join("\n")
+      .trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+
+    return trimmed.slice(0, 1_200);
+  }
+
+  private buildBootstrapSketchObjective(node: PlanNode): string {
+    return [
+      "Collect only a rough, low-cost repository sketch before deeper planning begins.",
+      "Current stage restriction: read-only evidence collection only. Do not install dependencies, create files, write tests, edit files, run builds, or perform implementation work in this stage.",
+      "Capture only top-level structure, likely entrypoints, runtime boundaries, and a few anchor files or directories.",
+      this.buildDownstreamTaskIntentCue(node)
+    ].join("\n\n");
+  }
+
+  private buildDownstreamTaskIntentCue(node: PlanNode): string {
+    const ownerTask = this.resolveSessionOwnerTask(node);
+    return [
+      "Downstream task intent to support later (not for direct execution in this stage):",
+      ownerTask.objective
+    ].join("\n");
   }
 
   private requireExplicitEvidenceBeforeFallback(
@@ -3084,6 +3182,9 @@ export class OrchestratorRuntime {
       cues.push(`Focused gather objectives from concrete plan: ${additionalObjectives.join(" | ")}`);
     }
     if (cues.length > 0) {
+      cues.push(
+        "Where the contract depends on concrete file structure, DOM markup, config keys, selectors, payloads, or raw errors, return exact snippet/reference pairs with location instead of summary-only findings."
+      );
       cues.push("Do not widen beyond this contract unless each item has been exhausted and the returned evidence explains why widening was necessary.");
     }
     return cues;
