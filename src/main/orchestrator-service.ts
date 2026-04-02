@@ -129,7 +129,17 @@ export class OrchestratorService {
     const continuation = this.resolveContinuationSeed(explicitContinuation, cachedContinuation);
     const goal = this.resolveRunGoal(input, continuationSnapshot);
     let activeRunId: string | null = null;
-    const runtime = new OrchestratorRuntime(await this.createRegistry(workspacePath, modeConfig.toolModels, input.sandbox ?? true, input.cliTimeoutSeconds, input.useGeminiAcpMode, input.geminiRegion), {
+    
+    const registry = await this.createRegistry(
+      workspacePath, 
+      modeConfig.toolModels, 
+      input.sandbox ?? true, 
+      input.cliTimeoutSeconds, 
+      input.useGeminiAcpMode, 
+      input.geminiRegion
+    );
+
+    const runtime = new OrchestratorRuntime(registry, {
       persistence: this.persistence,
       enableRootBootstrapSketch: true,
       requestUserApproval,
@@ -146,7 +156,7 @@ export class OrchestratorService {
     });
 
     try {
-      const result = await runtime.executeScheduledRun({
+      const createInput = {
         goal,
         workspacePath,
         language: input.language,
@@ -154,12 +164,6 @@ export class OrchestratorService {
         objective: goal,
         continuedFromNodeId: input.continueFromNodeId,
         config: requestedMaxDepth === undefined
-          ? undefined
-          : {
-              maxDepth: requestedMaxDepth
-            },
-        reviewPolicy: "light",
-        executionBudget: requestedMaxDepth === undefined
           ? undefined
           : {
               maxDepth: requestedMaxDepth
@@ -172,13 +176,26 @@ export class OrchestratorService {
               id: modeConfig.acceptanceCriterionId,
               description: modeConfig.acceptanceCriterionDescription,
               required: true,
-              status: "pending"
+              status: "pending" as const
             }
           ]
         }
+      };
+
+      const { run } = runtime.createRun(createInput);
+
+      // Trigger session pre-warming in the background before starting the main run
+      void runtime.prewarm(run.id).catch(() => {
+        // Silently ignore prewarm errors
       });
 
+      const result = await runtime.executeRun(run, createInput.continuation);
       return this.injectHistoricalNodes(result.snapshot);
+    } catch (error) {
+      if (activeRunId) {
+        this.activeRuns.delete(activeRunId);
+      }
+      throw error;
     } finally {
       if (activeRunId) {
         this.activeRuns.delete(activeRunId);

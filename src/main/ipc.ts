@@ -227,7 +227,9 @@ export function registerIpc(
   });
 
   ipcMain.handle("tools:update", async () => {
-    return toolManager.updateAll();
+    return toolManager.updateAll((toolId, percent, status) => {
+      mainWindow.send("tools:progress", { toolId, progress: { percent, status } });
+    });
   });
 
   ipcMain.handle("tools:get-statuses", async () => {

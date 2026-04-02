@@ -17,6 +17,8 @@ import {
   WorkingMemorySnapshot
 } from "./types";
 
+export { OrchestratorWorkflowStage };
+
 export type OrchestratorCapability =
   | "abstractPlan"
   | "gather"
@@ -47,6 +49,7 @@ export type OrchestratorApprovalRequest = {
   options: OrchestratorApprovalOption[];
   createdAt: string;
   abortSignal: AbortSignal;
+  disallowAutoApprove?: boolean;
 };
 
 export type OrchestratorApprovalDecision = {

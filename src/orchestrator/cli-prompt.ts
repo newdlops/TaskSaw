@@ -373,21 +373,19 @@ function buildStageInstructions(
 
   if (workflowStage === "task_orchestration" && capability === "abstractPlan") {
     return [
-      "Treat taskScope.objective as downstream task intent only. This phase plans inspection work; it does not execute the task.",
-      "If you can phrase the next gather-stage objective more precisely than the fallback, return it in nextObjectives.gather.",
-      "Always account for the tools available in the environment before planning commands. If the environment tools are unknown, explicitly request a pre-flight check in the evidence requirements.",
-      "Start from the provided evidence, workingMemory, and projectStructure before doing any new search.",
-      "Turn the existing open questions, contradictions, keyFiles, entryPoints, relevantTargets, and recent memory decisions into 1-3 concrete inspection targets.",
-      "Inspection targets must be explicit file paths, modules, entrypoints, symbols, managed-tool locations, or clearly named external surfaces. Avoid generic targets like repository, codebase, current implementation, or relevant files.",
-      "If the current memory is too weak to name a narrow target, identify the single most useful clue to gather next instead of delegating a broad search.",
-      "If the current memory already names likely files, modules, entrypoints, or managed tool locations, inspect those first instead of widening the search.",
-      "If the current memory already names a concrete external surface such as a CLI command, API route, or managed-tool capability check, inspect that surface before pivoting to local caches, log files, temp files, or home-directory state.",
-      "If the user explicitly asked for exact or actual data, keep the plan centered on the concrete data source or blocker evidence first. Do not jump straight to a UI fallback or copy change.",
-      "If workingMemory already records a failed or deferred instrumentation, logging, or gemini_debug.log attempt for this exact-data request, do not propose that approach again. Move directly to the external approval or raw payload blocker instead.",
-      "If the next narrow step is a direct managed-tool read or CLI capability check outside the workspace, target that exact surface so gather can request approval for it.",
-      "If downstream planning will depend on exact code, DOM, config, selector, payload, or error text, say so explicitly in evidenceRequirements and ask gather for a line-anchored snippet or raw excerpt instead of a summary.",
-      "Do not edit files, call tools, create temp files, run builds, or execute shell commands during planning.",
-      "Do not ask for broad repository or external tool exploration unless the current memory is insufficient to name a concrete next target."
+      "CRITICAL: This is a STRICTLY READ-ONLY PLANNING phase. You are NOT allowed to use any terminal tools, shell commands, or sub-agents.",
+      "Do NOT try to 'inspect', 'tail', 'grep', 'ls', or 'edit' anything. Your ONLY task is to analyze the provided memory and plan.",
+      "Any tool call in this phase will be AUTOMATICALLY REJECTED. Do not waste your budget trying.",
+      "If you need more information, set the 'evidenceRequirements' in your plan so the next 'gather' phase can collect it for you.",
+      "Focus 100% on high-level strategy and evidence requirements. Implementation and investigation happen in later phases."
+    ].join(" ");
+  }
+
+  if (workflowStage === "bootstrap_sketch" && capability === "abstractPlan") {
+    return [
+      "In this initial bootstrap phase, you ARE allowed to use read-only terminal tools (like 'node -v', 'npm -v', 'ls') to understand the environment.",
+      "Focus on identifying the project structure, tool versions, and any immediate blockers.",
+      "Keep your investigations minimal and focused on environmental discovery."
     ].join(" ");
   }
 
@@ -418,6 +416,7 @@ function buildStageInstructions(
       "Do not spend focused gather budget on existence-only commands such as find-by-name sweeps, plain ls path checks, recursive ls listings, or broad *.md/settings.json searches when the target path is already named in memory.",
       "Do not ask the user for permission to continue planning, escape plan mode, or work around internal tool/runtime errors. Report those blockers directly in the JSON response instead.",
       "Do not edit files, run builds, or execute other mutating commands in gather. This phase is read-only evidence collection.",
+      "Any sub-agent call (like generalist or codebase_investigator) MUST be strictly for analysis or investigation. You are NOT allowed to request sub-agents to 'fix', 'edit', 'write', or 'implement' anything in this stage.",
       "CRITICAL: Do NOT attempt to enter 'plan mode', generate plan files (e.g., in a 'plans/' directory), or use tools like `write_file`, `exit_plan_mode`, or `ask_user`. You are NOT the planner. You must ONLY explore the codebase using read-only terminal commands, gather the requested evidence, and then immediately return your GatherResult JSON.",
       "Update projectStructure only for the files, directories, or entrypoints that are directly relevant to the current node.",
       "Do not search outside the workspace or managed tool installation paths unless the current node explicitly requires it.",

@@ -409,6 +409,7 @@ export type ModelExecutionDebugInfo = {
   rawStderr: string;
   terminalSessionId?: string;
   terminalSessionTitle?: string;
+  childTasks?: OrchestratorChildTask[];
 };
 
 export type OrchestratorEvent = {

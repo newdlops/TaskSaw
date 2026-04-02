@@ -35,6 +35,13 @@ export type ManagedToolStatus = {
   installed: boolean;
   version: string | null;
   usage?: ManagedToolUsage | null;
+  updateAvailable?: boolean;
+  isBroken?: boolean;
+  isNew?: boolean;
+  progress?: {
+    percent: number;
+    status: string;
+  } | null;
 };
 
 export type ManagedToolModel = {

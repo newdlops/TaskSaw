@@ -850,13 +850,16 @@ export class ToolManager {
     return this.installLatest(toolId);
   }
 
-  async updateAll(): Promise<ManagedToolStatus[]> {
+  async updateAll(onProgress?: (toolId: ManagedToolId, percent: number, status: string) => void): Promise<ManagedToolStatus[]> {
     this.modelCatalogPromises.clear();
     this.resolvedModelCatalogs.clear();
     const statuses: ManagedToolStatus[] = [];
 
-    for (const toolId of Object.keys(TOOL_DEFINITIONS) as ManagedToolId[]) {
-      statuses.push(await this.installLatest(toolId));
+    const toolIds = Object.keys(TOOL_DEFINITIONS) as ManagedToolId[];
+    for (const toolId of toolIds) {
+      statuses.push(await this.installLatest(toolId, (percent, status) => {
+        if (onProgress) onProgress(toolId, percent, status);
+      }));
     }
 
     return statuses;
@@ -1860,11 +1863,14 @@ export class ToolManager {
     });
   }
 
-  private async installLatest(toolId: ManagedToolId): Promise<ManagedToolStatus> {
+  private async installLatest(
+    toolId: ManagedToolId,
+    onProgress?: (percent: number, status: string) => void
+  ): Promise<ManagedToolStatus> {
     const inFlight = this.installPromises.get(toolId);
     if (inFlight) return inFlight;
 
-    const installPromise = this.installLatestInternal(toolId);
+    const installPromise = this.installLatestInternal(toolId, onProgress);
     this.installPromises.set(toolId, installPromise);
 
     try {
@@ -1874,12 +1880,20 @@ export class ToolManager {
     }
   }
 
-  private async installLatestInternal(toolId: ManagedToolId): Promise<ManagedToolStatus> {
+  private async installLatestInternal(
+    toolId: ManagedToolId,
+    onProgress?: (percent: number, status: string) => void
+  ): Promise<ManagedToolStatus> {
     this.modelCatalogPromises.clear();
     const definition = TOOL_DEFINITIONS[toolId];
+
+    if (onProgress) onProgress(10, `Preparing ${definition.displayName} install...`);
+
     const installDirectory = this.getInstallDirectory(toolId);
     fs.mkdirSync(installDirectory, { recursive: true });
     this.writeInstallerManifest(toolId);
+
+    if (onProgress) onProgress(30, `Installing ${definition.packageName}@latest...`);
 
     const npmCommand = this.resolveNpmCommand();
     const npmArgs = [
@@ -1895,12 +1909,16 @@ export class ToolManager {
 
     await this.runCommand(npmCommand.command, npmArgs, npmCommand.env);
 
+    if (onProgress) onProgress(80, `Finalizing ${definition.displayName} install...`);
+
     const status = await this.getStatus(toolId);
     if (!status.installed) {
       throw new Error(`${definition.displayName} install completed without producing an executable package`);
     }
 
     this.ensureShim(toolId);
+
+    if (onProgress) onProgress(100, `${definition.displayName} update complete`);
     return status;
   }
 

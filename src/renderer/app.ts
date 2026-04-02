@@ -46,6 +46,13 @@ type ManagedToolStatus = {
   installed: boolean;
   version: string | null;
   usage?: ManagedToolUsage;
+  updateAvailable?: boolean;
+  isBroken?: boolean;
+  isNew?: boolean;
+  progress?: {
+    percent: number;
+    status: string;
+  } | null;
 };
 type DirectoryDialogOptions = {
   defaultPath?: string;
@@ -119,6 +126,7 @@ type OrchestratorPendingApproval = {
   message: string;
   details: string;
   options: OrchestratorApprovalOption[];
+  disallowAutoApprove?: boolean;
 };
 type ApprovalToast = {
   requestId: string;
@@ -324,6 +332,7 @@ type TasksawApi = {
   onTerminalData(handler: (payload: TerminalDataPayload) => void): void;
   onTerminalExit(handler: (payload: TerminalExitPayload) => void): void;
   onOrchestratorEvent(handler: (payload: OrchestratorEvent) => void): void;
+  onToolsProgress(handler: (payload: { toolId: ManagedToolId; progress: { percent: number; status: string } | null }) => void): void;
 };
 
 type RendererWindow = Window & {
@@ -1316,8 +1325,22 @@ function formatDisplayString(value: string, maxLength = 320): string {
 }
 
 function formatDisplayValue(value: unknown, maxLength = 320): string {
+  if (value && typeof value === "object" && (value as any).type === "image_payload") {
+    const img = value as any;
+    return `<img src="data:${img.mimeType || "image/png"};base64,${img.data}" class="payload-thumbnail" style="max-width:120px;max-height:120px;border-radius:4px;vertical-align:middle;margin:4px 0;">`;
+  }
+
+  if (value && typeof value === "object" && (value as any).stack) {
+    const err = value as any;
+    return `<details class="error-stack-accordion"><summary>${escapeHtml(String(err.message || "Error"))}</summary><pre>${escapeHtml(String(err.stack))}</pre></details>`;
+  }
+
   if (typeof value === "string") {
     return formatDisplayString(value, maxLength);
+  }
+
+  if (Array.isArray(value)) {
+    return truncateText(value.map((v) => (typeof v === "object" ? JSON.stringify(v) : String(v))).join(", "), maxLength);
   }
 
   if (value === null) {
@@ -1329,6 +1352,11 @@ function formatDisplayValue(value: unknown, maxLength = 320): string {
   }
 
   return truncateText(JSON.stringify(value, null, 2), maxLength);
+}
+
+function updateTokenCount(_usage: ManagedToolUsage) {
+  // Directly refresh from main process to be sure of latest data
+  void refreshToolStatuses();
 }
 
 function createEmptyWorkingMemory(): OrchestratorWorkingMemory {
@@ -1781,13 +1809,47 @@ function formatNodeRoleLabel(node: OrchestratorPlanNode): string {
   return languagePreference === "ko" ? "태스크" : "Task";
 }
 
+function escapeHtml(text: string): string {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function highlightJson(json: string): string {
+  if (!json) return "";
+  const escaped = escapeHtml(json);
+  return escaped.replace(
+    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g,
+    (match) => {
+      let cls = "json-number";
+      if (/^"/.test(match)) {
+        if (/:$/.test(match)) {
+          cls = "json-key";
+        } else {
+          cls = "json-string";
+        }
+      } else if (/true|false/.test(match)) {
+        cls = "json-boolean";
+      } else if (/null/.test(match)) {
+        cls = "json-null";
+      }
+      return `<span class="${cls}">${match}</span>`;
+    }
+  );
+}
+
 function formatModelLabel(modelId: string | null | undefined, modelName?: string | null, provider?: string | null): string {
+  const providerLower = provider?.toLowerCase() || "";
+  const providerClass = providerLower.includes("google") ? "model-google" : providerLower.includes("openai") ? "model-openai" : providerLower.includes("anthropic") ? "model-anthropic" : "";
+  
   const parts = [modelName, provider, modelId]
     .map((value) => value?.trim())
     .filter((value): value is string => Boolean(value && value.length > 0));
 
   const uniqueParts = Array.from(new Set(parts));
-  return uniqueParts[0] ? uniqueParts.join(" · ") : "unknown";
+  const label = uniqueParts[0] ? uniqueParts.join(" · ") : "unknown";
+  
+  return providerClass ? `<span class="${providerClass}">${label}</span>` : label;
 }
 
 function extractModelResultSummary(result: unknown): string {
@@ -1984,13 +2046,16 @@ function buildNodeTerminalTranscript(
   nodeEvents: OrchestratorEvent[],
   fallbackTranscript: string
 ): string {
-  const terminalEvents = nodeEvents.filter(isNodeTerminalEvent);
+  const terminalEvents = (Array.isArray(nodeEvents) ? nodeEvents : []).filter(isNodeTerminalEvent);
   if (terminalEvents.length === 0) {
     return fallbackTranscript;
   }
 
   let transcript = "";
   let lastSessionId: string | null = null;
+
+  // ANSI escape code removal regex
+  const ansiRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
 
   for (const event of terminalEvents) {
     const sessionId = typeof event.payload.sessionId === "string" && event.payload.sessionId.trim().length > 0
@@ -1999,17 +2064,24 @@ function buildNodeTerminalTranscript(
     const title = typeof event.payload.title === "string" && event.payload.title.trim().length > 0
       ? event.payload.title.trim()
       : sessionId;
-    const text = typeof event.payload.text === "string" ? event.payload.text : "";
+    let text = typeof event.payload.text === "string" ? event.payload.text : "";
     if (!text) {
       continue;
     }
 
+    // Strip ANSI codes
+    text = text.replace(ansiRegex, "");
+
     if (sessionId && sessionId !== lastSessionId) {
       const header = title ?? sessionId;
-      if (transcript.length > 0 && !transcript.endsWith("\n")) {
-        transcript += "\n";
+      if (transcript.length > 0) {
+        if (!transcript.endsWith("\n")) {
+          transcript += "\n";
+        }
+        transcript += `\n=== ${header} ===\n`;
+      } else {
+        transcript += `=== ${header} ===\n`;
       }
-      transcript += `\n=== ${header} ===\n`;
       lastSessionId = sessionId;
     }
 
@@ -2616,7 +2688,8 @@ function getPendingApproval(nodeEvents: OrchestratorEvent[]): OrchestratorPendin
       ? pendingRequest.payload.message.trim()
       : translate("ui.orchestratorApprovalWaiting"),
     details: typeof pendingRequest.payload.details === "string" ? pendingRequest.payload.details.trim() : "",
-    options
+    options,
+    disallowAutoApprove: Boolean(pendingRequest.payload.disallowAutoApprove)
   };
 }
 
@@ -4419,9 +4492,9 @@ function renderOrchestratorDetail() {
   renderPendingApprovalsCard(pendingApprovals);
   renderNodeApprovalCard(liveView.pendingApproval);
   renderNodeUserInputCard(liveView.pendingUserInput);
-  orchestratorNodeRequestDataEl.textContent = liveView.requestJson;
-  orchestratorNodeResponseDataEl.textContent = liveView.responseJson;
-  orchestratorNodePlanDataEl.textContent = liveView.executionPlan;
+  orchestratorNodeRequestDataEl.innerHTML = highlightJson(liveView.requestJson);
+  orchestratorNodeResponseDataEl.innerHTML = highlightJson(liveView.responseJson);
+  orchestratorNodePlanDataEl.innerHTML = highlightJson(liveView.executionPlan);
   orchestratorNodeRequestOpenButton.disabled = liveView.progress === null;
   orchestratorNodeResponseOpenButton.disabled = liveView.progress === null;
   orchestratorNodePlanOpenButton.disabled = !liveView.hasExecutionPlan;
@@ -4437,7 +4510,7 @@ function renderOrchestratorDetail() {
   orchestratorWorkingMemoryEl.textContent = buildWorkingMemoryText(selectedOrchestratorRun);
   orchestratorWorkingMemoryOpenButton.disabled = selectedOrchestratorRun === null;
   orchestratorWorkingMemoryCopyButton.disabled = selectedOrchestratorRun === null;
-  orchestratorLogEl.textContent = buildOrchestratorLog(selectedOrchestratorRun);
+  orchestratorLogEl.innerHTML = buildOrchestratorLog(selectedOrchestratorRun).split("\n\n").map(entry => `<div>${entry.replace(/\n/g, "<br>")}</div>`).join("<br>");
   syncLogViewerContent();
   renderApprovalDialog();
 }
@@ -4948,15 +5021,16 @@ function updateLanguageControls(preference: LanguageCode) {
   }
 }
 
-function syncTerminalThemes(theme: ResolvedTheme) {
+function syncTerminalThemes(theme?: ResolvedTheme) {
+  const targetTheme = theme || resolveTheme(themePreference);
   for (const terminal of terminals.values()) {
-    terminal.options.theme = XTERM_THEMES[theme];
+    terminal.options.theme = XTERM_THEMES[targetTheme];
   }
   if (orchestratorNodeTerminal) {
-    orchestratorNodeTerminal.options.theme = XTERM_THEMES[theme];
+    orchestratorNodeTerminal.options.theme = XTERM_THEMES[targetTheme];
   }
   if (interactiveSessionTerminal) {
-    interactiveSessionTerminal.options.theme = XTERM_THEMES[theme];
+    interactiveSessionTerminal.options.theme = XTERM_THEMES[targetTheme];
   }
 }
 
@@ -5302,28 +5376,44 @@ function refreshLocalizedContent() {
   renderApprovalToastList();
 }
 
-async function copyTextToClipboard(value: string) {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
+async function copyTextToClipboard(value: string, btn?: HTMLElement) {
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "true");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      textarea.style.pointerEvents = "none";
+      document.body.appendChild(textarea);
+      textarea.select();
+      const copied = document.execCommand("copy");
+      textarea.remove();
+      if (!copied) throw new Error("clipboard unavailable");
+    }
 
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  textarea.style.pointerEvents = "none";
-  document.body.appendChild(textarea);
-  textarea.select();
-
-  const copied = document.execCommand("copy");
-  textarea.remove();
-
-  if (!copied) {
-    throw new Error("clipboard unavailable");
+    if (btn) {
+      const originalText = btn.textContent;
+      btn.classList.add("copied");
+      if (btn.id === "orchestrator-node-terminal-copy" || btn.classList.contains("orchestrator-copy-button")) {
+        btn.textContent = languagePreference === "ko" ? "복사됨" : "Copied";
+      }
+      setTimeout(() => {
+        btn.classList.remove("copied");
+        btn.textContent = originalText;
+      }, 2000);
+    }
+  } catch (err) {
+    console.error("Failed to copy text: ", err);
   }
 }
+
+orchestratorGoalInput.addEventListener("input", () => {
+  orchestratorGoalInput.style.height = "auto";
+  orchestratorGoalInput.style.height = `${orchestratorGoalInput.scrollHeight}px`;
+});
 
 async function respondToPendingApproval(
   requestId: string,
@@ -5408,14 +5498,15 @@ async function respondToPendingUserInput(
 async function copyOrchestratorSection(
   titleElement: HTMLElement,
   contentElement: HTMLElement,
-  emptyMessage: string
+  emptyMessage: string,
+  btn?: HTMLElement
 ) {
   const title = titleElement.textContent?.trim() || "Clipboard";
   const content = contentElement.textContent?.trim() ?? "";
   const textToCopy = content.length > 0 ? content : emptyMessage;
 
   try {
-    await copyTextToClipboard(textToCopy);
+    await copyTextToClipboard(textToCopy, btn);
     logLocalized("logs.clipboardCopied", { title });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -5426,13 +5517,14 @@ async function copyOrchestratorSection(
 async function copyOrchestratorTextSection(
   titleElement: HTMLElement,
   content: string,
-  emptyMessage: string
+  emptyMessage: string,
+  btn?: HTMLElement
 ) {
   const title = titleElement.textContent?.trim() || "Clipboard";
   const textToCopy = content.trim().length > 0 ? content : emptyMessage;
 
   try {
-    await copyTextToClipboard(textToCopy);
+    await copyTextToClipboard(textToCopy, btn);
     logLocalized("logs.clipboardCopied", { title });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
@@ -5487,7 +5579,8 @@ async function copyLogViewerContent() {
   await copyOrchestratorSection(
     logViewerTitleEl,
     logViewerContentEl,
-    ""
+    "",
+    logViewerCopyButton
   );
 }
 
@@ -5588,6 +5681,7 @@ async function createWorkspaceDirectory() {
 
 async function selectOrchestratorRun(runId: string) {
   selectedOrchestratorRunId = runId;
+  window.localStorage.setItem("tasksaw-last-run-id", runId);
   selectedOrchestratorRun = null;
   selectedOrchestratorNodeId = null;
   updateOrchestratorControls();
@@ -6430,6 +6524,16 @@ function renderToolUsageStatus(status: ManagedToolStatus) {
     label = `${status.displayName} ${percentLabel} ${leftLabel}`;
   }
 
+  if (status.isBroken) {
+    label = `[Broken] ${label}`;
+  }
+  if (status.isNew) {
+    label = `[New] ${label}`;
+  }
+  if (status.updateAvailable) {
+    label = `${label} (Update!)`;
+  }
+
   usageEl.textContent = label;
   usageEl.title = remainingPercent === null ? fallbackReason : usageEl.textContent;
   usageEl.hidden = false;
@@ -6447,10 +6551,23 @@ async function refreshToolStatuses() {
 }
 
 async function updateManagedTools() {
+  const progressContainer = document.getElementById("tool-update-progress-container");
   isToolUpdateRunning = true;
   updateSessionCreationState();
   updateOrchestratorControls();
   logRaw("Updating managed Codex/Gemini...");
+
+  const progressHandler = (payload: { toolId: ManagedToolId; progress: { percent: number; status: string } | null }) => {
+    if (progressContainer) {
+      progressContainer.hidden = false;
+      const progressText = payload.progress 
+        ? `${payload.toolId}: ${payload.progress.status} (${payload.progress.percent}%)` 
+        : "";
+      progressContainer.textContent = progressText;
+    }
+  };
+
+  const unlistenProgress = appWindow.tasksaw.onToolsProgress(progressHandler);
 
   try {
     const statuses = await appWindow.tasksaw.updateManagedTools();
@@ -6461,6 +6578,12 @@ async function updateManagedTools() {
     await refreshToolStatuses();
   } finally {
     isToolUpdateRunning = false;
+    if (unlistenProgress) unlistenProgress();
+    
+    if (progressContainer) {
+      progressContainer.hidden = true;
+      progressContainer.textContent = "";
+    }
     updateSessionCreationState();
     updateOrchestratorControls();
   }
@@ -6661,13 +6784,13 @@ appWindow.tasksaw.onOrchestratorEvent((event: OrchestratorEvent) => {
     const nodeEvents = liveDetail.events.filter((entry) => entry.nodeId === event.nodeId);
     const pendingApproval = getPendingApproval(nodeEvents);
     if (pendingApproval) {
-      if (autoApproveCheckbox.checked && !autoApprovedRequestIds.has(pendingApproval.requestId)) {
+      if (autoApproveCheckbox.checked && !pendingApproval.disallowAutoApprove && !autoApprovedRequestIds.has(pendingApproval.requestId)) {
         autoApprovedRequestIds.add(pendingApproval.requestId);
         const allowOption = pendingApproval.options.find((opt) => opt.kind === "allow_once")
           ?? pendingApproval.options.find((opt) => typeof opt.kind === "string" && opt.kind.startsWith("allow"))
           ?? pendingApproval.options[0];
         void respondToPendingApproval(pendingApproval.requestId, true, allowOption?.optionId);
-      } else if (!autoApproveCheckbox.checked) {
+      } else if (!autoApproveCheckbox.checked || pendingApproval.disallowAutoApprove) {
         showApprovalToast(pendingApproval);
         openApprovalDialog(pendingApproval.requestId);
       }
@@ -6744,7 +6867,8 @@ orchestratorNodeTerminalCopyButton.addEventListener("click", () => {
   void copyOrchestratorTextSection(
     orchestratorNodeTerminalTitleEl,
     orchestratorNodeTerminalText,
-    translate("ui.orchestratorNodeTerminalEmpty")
+    translate("ui.orchestratorNodeTerminalEmpty"),
+    orchestratorNodeTerminalCopyButton
   );
 });
 orchestratorNodeTerminalOpenButton.addEventListener("click", () => {
@@ -6765,7 +6889,8 @@ orchestratorWorkingMemoryCopyButton.addEventListener("click", () => {
   void copyOrchestratorSection(
     orchestratorWorkingMemoryTitleEl,
     orchestratorWorkingMemoryEl,
-    translate("ui.orchestratorWorkingMemoryEmpty")
+    translate("ui.orchestratorWorkingMemoryEmpty"),
+    orchestratorWorkingMemoryCopyButton
   );
 });
 orchestratorWorkingMemoryOpenButton.addEventListener("click", () => {
@@ -6779,7 +6904,8 @@ orchestratorLogCopyButton.addEventListener("click", () => {
   void copyOrchestratorSection(
     orchestratorLogTitleEl,
     orchestratorLogEl,
-    translate("ui.orchestratorLogEmpty")
+    translate("ui.orchestratorLogEmpty"),
+    orchestratorLogCopyButton
   );
 });
 orchestratorLogOpenButton.addEventListener("click", () => {
@@ -6976,6 +7102,11 @@ restoreSessions().catch((error: unknown) => {
   logLocalized("errors.failedRestore", { message });
 });
 
+const lastRunId = window.localStorage.getItem("tasksaw-last-run-id");
+if (lastRunId) {
+  selectedOrchestratorRunId = lastRunId;
+}
+
 loadOrchestratorRuns().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   logLocalized("errors.failedLoadOrchestratorRuns", { message });
@@ -7019,12 +7150,63 @@ orchestratorRunUntilSuccessCheckbox.addEventListener("change", () => {
   normalizeExecutionPlanPayload,
   trimInteractiveTranscript,
   buildOrchestratorTreeDisplay,
+  highlightJson,
+  formatModelLabel,
+  buildNodeTerminalTranscript,
+  getDisplayedNodePhase,
+  buildOrchestratorLog,
+  formatAssignedModelLabel,
+  scheduleOrchestratorRender,
+  formatDisplayValue,
+  describeApprovalOptionLabel,
+  getLatestExecutionStatusEvent,
+  getPendingApproval,
+  get selectedRunId() {
+    return selectedOrchestratorRunId;
+  },
+  get activeSessionId() {
+    return activeSessionId;
+  },
+  get sessions() {
+    return sessions;
+  },
   __setIsOrchestratorRunning: (running: boolean) => {
     isOrchestratorRunning = running;
   },
   __setSelectedOrchestratorRunId: (runId: string | null) => {
     selectedOrchestratorRunId = runId;
   },
+  __setSessions: (newSessions: SessionInfo[]) => { sessions.length = 0; sessions.push(...newSessions); },
+  __setActiveSessionId: (id: string | null) => { activeSessionId = id; },
+  updateTokenCount,
+  calculateTerminalDimensions,
+  updateTerminalTheme: syncTerminalThemes,
+  updateTerminalFontSize: applyFontSettings,
+  __setTerminal: (id: string, terminal: any) => { terminals.set(id, terminal); },
+  getTerminalCellDimensions,
+  resolveTheme,
+  updateManagedTools,
+  refreshToolStatuses,
+  getLastSearchTerm: () => {
+    const input = document.getElementById('terminal-search-input') as HTMLInputElement;
+    return input ? input.value : '';
+  },
+  setLoading: (isLoading: boolean) => {
+    const loader = document.getElementById('global-loader');
+    if (loader) loader.style.display = isLoading ? 'block' : 'none';
+  },
+  adjustDropdownPosition: (menu: HTMLElement, x: number, y: number) => {
+    const rect = menu.getBoundingClientRect();
+    const winW = window.innerWidth;
+    const winH = window.innerHeight;
+    let finalX = x;
+    let finalY = y;
+    if (x + rect.width > winW) finalX = winW - rect.width - 10;
+    if (y + rect.height > winH) finalY = winH - rect.height - 10;
+    menu.style.left = `${finalX}px`;
+    menu.style.top = `${finalY}px`;
+  },
+  get currentRunId() { return liveOrchestratorRunId; },
   __resetInternalState: () => {
     cancelRunUntilSuccessLoop();
     isOrchestratorRunning = false;

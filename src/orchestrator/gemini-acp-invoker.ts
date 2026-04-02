@@ -7,7 +7,8 @@ import {
   ModelInvocationContext,
   OrchestratorApprovalDecision,
   OrchestratorApprovalOption,
-  OrchestratorCapability
+  OrchestratorCapability,
+  OrchestratorWorkflowStage
 } from "./model-adapter";
 import {
   appendSessionContextLedger,
@@ -336,7 +337,7 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
   const sessionPool = options.sessionPool ?? createGeminiAcpSessionPool();
   let currentRegion = options.initialRegion;
 
-  return async (
+  const invoker = async (
     capability: OrchestratorCapability,
     prompt: string,
     context: ModelInvocationContext
@@ -540,8 +541,23 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                 }
               };
 
-              const disallowedReason = getDisallowedToolCallReasonForCapability(capability, permissionRequest.toolCall);
-              if (disallowedReason) {
+              const disallowed = getDisallowedToolCallReasonForCapability(capability, permissionRequest.toolCall, context.workflowStage);
+              if (disallowed) {
+                const { reason: disallowedReason, isHard } = disallowed;
+
+                if (isHard) {
+                  context.reportProgress?.(disallowedReason, {
+                    capability,
+                    model: modelId,
+                    toolCall: toolCallSummary ?? null
+                  });
+                  promptActivity.touch();
+                  return {
+                    outcome: "internally_cancelled",
+                    reason: disallowedReason
+                  };
+                }
+
                 if (capability === "gather" && permissionRequest.toolCall?.kind?.trim() === "edit") {
                   readOnlyProbeGuardState.gatherAutoRejectCount += 1;
                   const count = readOnlyProbeGuardState.gatherAutoRejectCount;
@@ -901,7 +917,11 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                             text: `[System Note: This is part ${i + 1} of ${chunks.length} of the user's prompt payload. Do not process the request yet. Reply with exactly the word "ACK" and wait for the final part.]\n\n${chunks[i]}`
                           }
                         ],
-                        generationConfig: { temperature: 0.0 }
+                        generationConfig: { 
+                          temperature: 0.0,
+                          // Use a lower max output token for faster ACK
+                          maxOutputTokens: 10
+                        }
                       }) as Promise<GeminiPromptResponse>
                     ),
                     combinedAbortSignal,
@@ -921,12 +941,20 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
                     ].join(" · ")
                   );
 
-                  // Explicitly report the ACK in the system log for transparency
+                  // Robust ACK detection: check if response contains ACK (case-insensitive)
                   const cleanAck = lastChunkResponse.trim();
+                  const isAcked = /ack/i.test(cleanAck);
+                  
                   context.reportTerminalEvent?.({
                     stream: "system",
-                    text: `[Chunk ${i + 1}/${chunks.length} OK] Model responded: "${cleanAck}"\n`
+                    text: `[Chunk ${i + 1}/${chunks.length} ${isAcked ? "OK" : "WARN"}] Model responded: "${cleanAck}"\n`
                   });
+
+                  if (!isAcked && cleanAck.length > 0) {
+                    // If model didn't say ACK but said something else, it might have started processing early or errored.
+                    // We'll log it but continue for now, assuming the next chunk might correct it.
+                    retryNotes.push(`Chunk ${i + 1} received unexpected response: ${cleanAck}`);
+                  }
                 } finally {
                   // Restore terminal output and clear accumulated ACKs
                   runtime.reportTerminalChunk = originalReportTerminalChunk;
@@ -1346,6 +1374,14 @@ export function createGeminiAcpInvoker(options: GeminiAcpInvokerOptions) {
     sessionPool.set(scopeKey, initialState);
     return initialState;
   }
+
+  const prewarm = async (context: ModelInvocationContext) => {
+    const scope = buildSessionReuseScope("gemini-acp", workspaceRoot, "gather", context);
+    const scopedState = getOrCreateScopedState(scope.key);
+    await ensureSession(scopedState, context.abortSignal);
+  };
+
+  return Object.assign(invoker, { prewarm }) as any;
 }
 
 function describePermissionOption(kind: string | undefined): string | undefined {
@@ -1533,28 +1569,61 @@ function getDisallowedToolCallReasonForCapability(
         };
       }
     >;
-  } | undefined
-): string | null {
+  } | undefined,
+  workflowStage?: OrchestratorWorkflowStage
+): { reason: string; isHard?: boolean } | null {
   const kind = toolCall?.kind?.trim();
+
+  // abstractPlan is usually strictly for planning, but we MUST allow discovery tools 
+  // during the initial bootstrap_sketch stage to understand the environment.
+  if (capability === "abstractPlan" && workflowStage !== "bootstrap_sketch") {
+    return {
+      reason: "The abstractPlan phase is for high-level planning only. No terminal tools or sub-agents are allowed in this phase. Use your existing knowledge and the provided working memory to create a plan.",
+      isHard: true
+    };
+  }
+
   if (kind === "other") {
-    return "Rejected Gemini tool call because generic approval requests are not supported";
+    return {
+      reason: "Rejected Gemini tool call because generic approval requests are not supported",
+      isHard: true
+    };
   }
+
   if (kind === "edit") {
-    return capability !== "execute" ? "Rejected Gemini tool call because this phase is read-only" : null;
+    if (capability !== "execute") {
+      return {
+        reason: "Rejected Gemini tool call because this phase is read-only",
+        isHard: true
+      };
+    }
+    return null;
   }
+
   if (kind !== "execute") {
     return null;
   }
-  if (disallowsExecuteToolCallsInCapability(capability)) {
-    return "Rejected Gemini tool call because this phase is read-only";
+
+  // Allow execute tools during abstractPlan ONLY in bootstrap_sketch stage
+  if (disallowsExecuteToolCallsInCapability(capability) && workflowStage !== "bootstrap_sketch") {
+    return {
+      reason: "Rejected Gemini tool call because this phase is read-only",
+      isHard: true
+    };
   }
+
   if (!isReadOnlyGeminiCapability(capability)) {
     return null;
   }
 
-  return isDisallowedReadOnlyExecuteToolCall(toolCall)
-    ? "Rejected Gemini tool call because this phase is read-only"
-    : null;
+  if (isDisallowedReadOnlyExecuteToolCall(toolCall)) {
+    return {
+      reason: "Rejected Gemini tool call because this phase is read-only",
+      isHard: true // DO NOT allow overrides for mutating commands in read-only phases
+    };
+  }
+
+  return null;
 }
 
 function isDisallowedReadOnlyExecuteToolCall(toolCall: {
@@ -1588,8 +1657,38 @@ function isDisallowedReadOnlyExecuteToolCall(toolCall: {
     .join("\n")
     .toLowerCase();
 
-  return READ_ONLY_MUTATION_COMMAND_PATTERNS.some((pattern) => pattern.test(lowerText));
+  const hasShellMutation = READ_ONLY_MUTATION_COMMAND_PATTERNS.some((pattern) => pattern.test(lowerText));
+  if (hasShellMutation) {
+    return true;
+  }
+
+  // If this is a sub-agent call (like generalist or cli_help), check the natural language request for mutation keywords
+  const isSubAgentCall = lowerText.includes("generalist") || lowerText.includes("cli_help") || lowerText.includes("codebase_investigator");
+  if (isSubAgentCall) {
+    return SUB_AGENT_MUTATION_KEYWORDS.some((keyword) => lowerText.includes(keyword));
+  }
+
+  return false;
 }
+
+const SUB_AGENT_MUTATION_KEYWORDS = [
+  "edit",
+  "write",
+  "fix",
+  "create",
+  "implement",
+  "insert",
+  "delete",
+  "remove",
+  "update",
+  "modify",
+  "patch",
+  "refactor",
+  "install",
+  "add ",
+  "setup",
+  "apply"
+] as const;
 
 const READ_ONLY_MUTATION_COMMAND_PATTERNS = [
   /\bnpm\s+(?:run\s+)?build\b/,
@@ -1646,7 +1745,13 @@ const BOOTSTRAP_SKETCH_ALLOWED_READ_ONLY_COMMANDS = new Set([
   "head",
   "tail",
   "file",
-  "pwd"
+  "pwd",
+  "npm",
+  "node",
+  "python",
+  "python3",
+  "git",
+  "echo"
 ]);
 
 const FOCUSED_GATHER_LOW_SIGNAL_COMMANDS = new Set([
@@ -2081,13 +2186,20 @@ function getBootstrapSketchExecuteRejectionReason(params: {
     return null;
   }
 
-  if (tokenizeCommandText(commandText).some((token) => isShellOperatorToken(token))) {
-    return "Rejected Gemini tool call because bootstrap sketch must stay shallow; defer multi-step CLI probing to later stages";
+  const tokens = tokenizeCommandText(commandText);
+  
+  // Check if any restricted shell operator is used (like pipes or redirects)
+  // We allow && and ; for simple discovery chaining
+  if (tokens.some((token) => token === "|" || token === "||" || token === ">" || token === ">>" || token === "<")) {
+    return "Rejected Gemini tool call because bootstrap sketch must stay shallow; defer complex CLI probing to later stages";
   }
 
-  const commandName = extractPrimaryCommandName(commandText);
-  if (!commandName || !BOOTSTRAP_SKETCH_ALLOWED_READ_ONLY_COMMANDS.has(commandName)) {
-    return "Rejected Gemini tool call because bootstrap sketch must stay workspace-local and low-cost";
+  // Ensure all commands in the chain are allowed
+  const commandNames = extractAllCommandNames(tokens);
+  for (const commandName of commandNames) {
+    if (!BOOTSTRAP_SKETCH_ALLOWED_READ_ONLY_COMMANDS.has(commandName)) {
+      return `Rejected Gemini tool call because bootstrap sketch must stay workspace-local and low-cost: disallowed command '${commandName}'`;
+    }
   }
 
   if (extractExternalResourceKeys(commandText, params.workspaceRoot).length > 0) {
@@ -2095,6 +2207,27 @@ function getBootstrapSketchExecuteRejectionReason(params: {
   }
 
   return null;
+}
+
+function extractAllCommandNames(tokens: string[]): string[] {
+  const names: string[] = [];
+  let nextIsCommand = true;
+
+  for (const token of tokens) {
+    if (nextIsCommand) {
+      if (!isEnvironmentAssignmentToken(token)) {
+        const cleanName = stripOuterQuotes(token).trim();
+        if (cleanName.length > 0) {
+          names.push(cleanName.toLowerCase());
+        }
+        nextIsCommand = false;
+      }
+    } else if (token === "&&" || token === ";") {
+      nextIsCommand = true;
+    }
+  }
+
+  return names;
 }
 
 function buildExecuteToolCallFingerprint(toolCall: {

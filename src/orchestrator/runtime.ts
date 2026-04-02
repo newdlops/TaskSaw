@@ -244,7 +244,8 @@ export class OrchestratorRuntime {
   }
 
   async executeHappyPath(input: CreateRunInput): Promise<HappyPathExecutionResult> {
-    const execution = await this.executeRunInternal(input, false);
+    const { run } = this.createRun(input);
+    const execution = await this.executeRunInternal(run, false, input.continuation);
     const { execute, verify } = execution.phaseResults;
 
     if (!execute || !verify) {
@@ -269,7 +270,60 @@ export class OrchestratorRuntime {
   }
 
   async executeScheduledRun(input: CreateRunInput): Promise<ScheduledRunExecutionResult> {
-    return this.executeRunInternal(input, true);
+    const { run } = this.createRun(input);
+    return this.executeRunInternal(run, true, input.continuation);
+  }
+
+  createRun(input: CreateRunInput): { run: Run; rootNode: PlanNode } {
+    return this.engine.createRun(input);
+  }
+
+  async executeRun(run: Run, continuation?: ContinuationSeed): Promise<ScheduledRunExecutionResult> {
+    return this.executeRunInternal(run, true, continuation);
+  }
+
+  async prewarm(runId: string) {
+    const run = this.engine.getRun(runId);
+    if (!run) {
+      return;
+    }
+
+    const rootNode = this.engine.getNode(run.rootNodeId);
+    if (!rootNode) {
+      return;
+    }
+
+    const roles: AssignedModelRole[] = ["abstractPlanner", "gatherer", "concretePlanner", "reviewer", "executor", "verifier"];
+    const prewarmPromises: Array<Promise<void>> = [];
+
+    for (const role of roles) {
+      const model = rootNode.assignedModels[role];
+      if (!model) {
+        continue;
+      }
+
+      try {
+        const capability = ASSIGNED_ROLE_CAPABILITY[role];
+        const adapter = this.adapterRegistry.resolve(model, capability);
+        if (typeof (adapter as any).customInvoke?.prewarm === "function") {
+          const terminalSession = {
+            id: randomUUID(),
+            title: `Pre-warming ${role}`
+          };
+          const context = this.buildInvocationContext(rootNode, model, role, capability, [], terminalSession);
+          prewarmPromises.push((adapter as any).customInvoke.prewarm(context));
+        }
+      } catch {
+        // Ignore resolution or prewarm errors during pre-warming
+      }
+    }
+
+    if (prewarmPromises.length > 0) {
+      this.engine.appendEvent(runId, rootNode.id, "scheduler_progress", {
+        message: `Pre-warming ${prewarmPromises.length} model sessions...`
+      });
+      await Promise.allSettled(prewarmPromises);
+    }
   }
 
   cancel(reason = "Orchestrator run cancelled by user") {
@@ -309,17 +363,18 @@ export class OrchestratorRuntime {
   }
 
   private async executeRunInternal(
-    input: CreateRunInput,
-    allowDecomposition: boolean
+    run: Run,
+    allowDecomposition: boolean,
+    continuation?: ContinuationSeed
   ): Promise<ScheduledRunExecutionResult & { phaseResults: RootPhaseResults }> {
-    const { run, rootNode } = this.engine.createRun(input);
+    const rootNode = this.engine.getNode(run.rootNodeId)!;
     this.workingMemoryByRun.set(
       run.id,
       new WorkingMemoryStore(
         run.id,
         this.now,
-        input.continuation
-          ? this.rebaseWorkingMemorySnapshot(input.continuation.workingMemory, rootNode.id)
+        continuation
+          ? this.rebaseWorkingMemorySnapshot(continuation.workingMemory, rootNode.id)
           : undefined
       )
     );
@@ -328,8 +383,8 @@ export class OrchestratorRuntime {
       new ProjectStructureMemoryStore(
         run.id,
         this.now,
-        input.continuation
-          ? this.rebaseProjectStructureSnapshot(input.continuation.projectStructure, rootNode.id)
+        continuation
+          ? this.rebaseProjectStructureSnapshot(continuation.projectStructure, rootNode.id)
           : undefined
       )
     );
@@ -340,21 +395,21 @@ export class OrchestratorRuntime {
     // 1. Mandatory Pre-flight Environment Discovery (Capability Check)
     await this.runPreFlightDiscovery(run.id, rootNode.id, run.workspacePath ?? null);
 
-    const seededEvidenceCount = this.seedContinuationContext(rootNode, input.continuation);
+    const seededEvidenceCount = this.seedContinuationContext(rootNode, continuation);
     this.persistence?.saveSnapshot(this.getSnapshot(run.id));
     this.engine.appendEvent(run.id, rootNode.id, "scheduler_progress", {
       message: "Starting orchestrator run",
       allowDecomposition
     });
-    if (input.continuation) {
+    if (continuation) {
       this.engine.appendEvent(run.id, rootNode.id, "scheduler_progress", {
         message: "Seeded run from previous snapshot",
-        sourceRunId: input.continuation.sourceRunId,
+        sourceRunId: continuation.sourceRunId,
         seededEvidenceCount,
-        seededOpenQuestionCount: input.continuation.workingMemory.openQuestions.length,
-        seededFactCount: input.continuation.workingMemory.facts.length,
-        seededProjectStructureDirectoryCount: input.continuation.projectStructure.directories.length,
-        seededProjectStructureKeyFileCount: input.continuation.projectStructure.keyFiles.length
+        seededOpenQuestionCount: continuation.workingMemory.openQuestions.length,
+        seededFactCount: continuation.workingMemory.facts.length,
+        seededProjectStructureDirectoryCount: continuation.projectStructure.directories.length,
+        seededProjectStructureKeyFileCount: continuation.projectStructure.keyFiles.length
       });
     }
 
@@ -2160,7 +2215,8 @@ export class OrchestratorRuntime {
       details: approvalRequest.details ?? null,
       kind: approvalRequest.kind ?? null,
       locations: approvalRequest.locations ?? [],
-      options: payloadOptions
+      options: payloadOptions,
+      disallowAutoApprove: approvalRequest.disallowAutoApprove ?? false
     });
 
     if (node.kind === "execution") {
@@ -2559,6 +2615,14 @@ export class OrchestratorRuntime {
   }
 
   private recordAbstractPlanning(node: PlanNode, result: AbstractPlanResult) {
+    if (result.debug?.childTasks && result.debug.childTasks.length > 0) {
+      this.engine.appendEvent(node.runId, node.id, "scheduler_progress", {
+        message: "Ignored implementation child tasks proposed during abstract planning. Child tasks must only be created during concrete planning.",
+        ignoredChildTaskCount: result.debug.childTasks.length
+      });
+      // Clear childTasks to prevent them from being accidentally used if the engine structure changes later
+      result.debug.childTasks = [];
+    }
     this.recordDecision(node.runId, node.id, "Abstract plan created", result.summary);
 
     const workingMemory = this.requireWorkingMemory(node.runId);

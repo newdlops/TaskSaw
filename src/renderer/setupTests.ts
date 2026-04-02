@@ -45,6 +45,7 @@ const handlers = {
   onTerminalData: null as ((...args: any[]) => void) | null,
   onTerminalExit: null as ((...args: any[]) => void) | null,
   onOrchestratorEvent: null as ((...args: any[]) => void) | null,
+  onToolsProgress: null as ((...args: any[]) => void) | null,
 };
 (window as any).handlers = handlers;
 
@@ -76,6 +77,10 @@ const tasksawMock = {
   onOrchestratorEvent: jest.fn((handler: (...args: any[]) => void) => {
     handlers.onOrchestratorEvent = handler;
   }),
+  onToolsProgress: jest.fn((handler: (...args: any[]) => void) => {
+    handlers.onToolsProgress = handler;
+  }),
+  openExternal: jest.fn(),
 };
 (window as any).tasksaw = tasksawMock;
 
@@ -86,7 +91,9 @@ document.close();
 
 // 5. Additional mocks
 (window as any).HTMLCanvasElement.prototype.getContext = jest.fn().mockReturnValue({
-  measureText: jest.fn().mockReturnValue({ width: 10 }),
+  measureText: jest.fn().mockImplementation((text) => ({
+    width: (parseInt(window.getComputedStyle(document.body).fontSize) || 14) * 0.6
+  })),
   fillText: jest.fn(),
   strokeText: jest.fn(),
   getImageData: jest.fn().mockReturnValue({ data: new Uint8ClampedArray() }),
@@ -105,20 +112,39 @@ document.close();
 });
 
 (window as any).Terminal = class {
-  options = {
+  options: any = {
     fontSize: 14,
-    fontFamily: 'monospace'
+    fontFamily: 'monospace',
+    scrollback: 1000,
+    theme: {}
   };
+  open = jest.fn();
+  write = jest.fn();
+  dispose = jest.fn();
+  loadAddon = jest.fn();
+  onData = jest.fn().mockReturnValue({ dispose: jest.fn() });
+  onResize = jest.fn().mockReturnValue({ dispose: jest.fn() });
+  reset = jest.fn();
+  clear = jest.fn();
+  focus = jest.fn();
+  blur = jest.fn();
+  resize = jest.fn();
+  scrollLines = jest.fn();
+  getSelection = jest.fn().mockReturnValue('');
 };
-
-(window as any).Terminal.prototype.open = jest.fn();
 (window as any).Terminal.prototype.write = jest.fn();
-(window as any).Terminal.prototype.dispose = jest.fn();
-(window as any).Terminal.prototype.loadAddon = jest.fn();
-(window as any).Terminal.prototype.onData = jest.fn().mockReturnValue({ dispose: jest.fn() });
-(window as any).Terminal.prototype.onResize = jest.fn().mockReturnValue({ dispose: jest.fn() });
-(window as any).Terminal.prototype.reset = jest.fn();
-(window as any).Terminal.prototype.clear = jest.fn();
-(window as any).Terminal.prototype.focus = jest.fn();
-(window as any).Terminal.prototype.blur = jest.fn();
+(window as any).Terminal.prototype.open = jest.fn();
 (window as any).Terminal.prototype.resize = jest.fn();
+(window as any).Terminal.prototype.onData = jest.fn().mockReturnValue({ dispose: jest.fn() });
+(window as any).Terminal.prototype.getSelection = jest.fn().mockReturnValue('');
+
+(window as any).Notification = class {
+  title: string;
+  options: any;
+  constructor(title: string, options?: any) {
+    this.title = title;
+    this.options = options;
+  }
+  static permission = 'granted';
+  static requestPermission = jest.fn().mockResolvedValue('granted');
+};

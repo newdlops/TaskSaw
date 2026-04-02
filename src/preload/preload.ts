@@ -81,5 +81,13 @@ contextBridge.exposeInMainWorld("tasksaw", {
 
   onOrchestratorEvent: (handler: (payload: OrchestratorEvent) => void) => {
     ipcRenderer.on("orchestrator:event", (_event, payload) => handler(payload));
+  },
+
+  onToolsProgress: (handler: (payload: { toolId: ManagedToolId; progress: { percent: number; status: string } | null }) => void) => {
+    const listener = (_event: any, payload: any) => handler(payload);
+    ipcRenderer.on("tools:progress", listener);
+    return () => {
+      ipcRenderer.removeListener("tools:progress", listener);
+    };
   }
 });
