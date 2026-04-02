@@ -331,9 +331,9 @@ type TasksawApi = {
   killSession(sessionId: string): void;
   onTerminalData(handler: (payload: TerminalDataPayload) => void): void;
   onTerminalExit(handler: (payload: TerminalExitPayload) => void): void;
-  onOrchestratorEvent(handler: (payload: OrchestratorEvent) => void): void;
-  onToolsProgress(handler: (payload: { toolId: ManagedToolId; progress: { percent: number; status: string } | null }) => void): void;
-};
+  onOrchestratorEvent: (handler: (payload: OrchestratorEvent) => void) => void;
+  onToolsProgress: (handler: (payload: { toolId: ManagedToolId; progress: { percent: number; status: string } | null }) => void) => () => void;
+  }
 
 type RendererWindow = Window & {
   Terminal?: typeof import("@xterm/xterm").Terminal;
@@ -6576,6 +6576,10 @@ async function updateManagedTools() {
       .join(", ");
     logLocalized("logs.toolsUpdated", { details });
     await refreshToolStatuses();
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logLocalized("errors.failedToolUpdate", { message });
+    console.error("Failed to update managed tools:", error);
   } finally {
     isToolUpdateRunning = false;
     if (unlistenProgress) unlistenProgress();
@@ -7170,14 +7174,7 @@ orchestratorRunUntilSuccessCheckbox.addEventListener("change", () => {
   get sessions() {
     return sessions;
   },
-  __setIsOrchestratorRunning: (running: boolean) => {
-    isOrchestratorRunning = running;
-  },
-  __setSelectedOrchestratorRunId: (runId: string | null) => {
-    selectedOrchestratorRunId = runId;
-  },
-  __setSessions: (newSessions: SessionInfo[]) => { sessions.length = 0; sessions.push(...newSessions); },
-  __setActiveSessionId: (id: string | null) => { activeSessionId = id; },
+  __setIsOrchestratorRunning: (val: boolean) => { isOrchestratorRunning = val; },
   updateTokenCount,
   calculateTerminalDimensions,
   updateTerminalTheme: syncTerminalThemes,
@@ -7187,6 +7184,8 @@ orchestratorRunUntilSuccessCheckbox.addEventListener("change", () => {
   resolveTheme,
   updateManagedTools,
   refreshToolStatuses,
+  updateSessionCreationState,
+  updateOrchestratorControls,
   getLastSearchTerm: () => {
     const input = document.getElementById('terminal-search-input') as HTMLInputElement;
     return input ? input.value : '';
